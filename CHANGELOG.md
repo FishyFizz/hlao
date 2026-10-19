@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 — unreleased
+
+### Changed
+
+- Universal addressing (ADR 0008). One HLAO instance — one `HLAO_HOME`, supervisor, socket,
+  and token — is one address space and one swarm boundary. Every session in it is addressable
+  by every caller; isolation is another instance.
+- `sessions.list` returns a flat `{ sessions }`; `scope` is removed and the CLI footer reports
+  the instance session count.
+- `callerSessionId` is attribution and self-defaulting, not a visibility filter. A stale caller
+  can still act and spawn; its spawn becomes a root.
+- The parent-send exception is removed. Siblings, ancestors, and unrelated trees are addressable
+  by id, name, or prefix; `forbidden` is reserved.
+- Protocol version is 2.0 because the addressing semantics are breaking. `hlao down` can still
+  stop a pre-2.0 supervisor during the upgrade; other commands require major equality.
+
 ## 0.4.0 — unreleased
 
 ### Added
