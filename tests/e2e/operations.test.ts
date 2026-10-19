@@ -46,6 +46,13 @@ test("agents and doctor inspect configuration without starting a supervisor", as
   );
   assert.equal(supervisor?.status, "warn");
   assert.match(supervisor?.detail ?? "", /not running/);
+  const log = doctor.value.checks.find((check) => check.name === "log");
+  assert.equal(log?.status, "warn");
+  assert.match(log?.detail ?? "", /supervisor\.log/);
+  const backends = doctor.value.checks.find(
+    (check) => check.name === "backends",
+  );
+  assert.match(backends?.detail ?? "", /adapter command.* present/);
   assert.equal(readLock(harness.home), null);
 
   const started = await harness.json<DoctorValue>(["doctor", "--start"]);
@@ -55,6 +62,13 @@ test("agents and doctor inspect configuration without starting a supervisor", as
     "ok",
   );
   assert.notEqual(readLock(harness.home), null);
+
+  const probed = await harness.json<DoctorValue>(["doctor", "--probe"]);
+  assert.equal(probed.code, 0);
+  assert.equal(
+    probed.value.checks.find((check) => check.name === "probe fake")?.status,
+    "ok",
+  );
 });
 
 test("status probes without autostart and --start launches the supervisor", async (t) => {
@@ -376,4 +390,113 @@ test("spawn --wait prints the handle before the first turn finishes", async (t) 
   } finally {
     if (!settled) child.kill("SIGKILL");
   }
+});
+
+test("help and version honor --json", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const help = await harness.json<{ topic: string | null; help: string }>([
+    "help",
+    "spawn",
+  ]);
+  assert.equal(help.value.topic, "spawn");
+  assert.match(help.value.help, /hlao spawn <backend>/);
+
+  const full = await harness.json<{ topic: null; help: string }>(["help"]);
+  assert.equal(full.value.topic, null);
+  assert.match(full.value.help, /Usage:/);
+
+  const commandHelp = await harness.json<{ topic: string; help: string }>([
+    "spawn",
+    "--help",
+  ]);
+  assert.equal(commandHelp.value.topic, "spawn");
+
+  const version = await harness.json<{ version: string }>(["version"]);
+  assert.match(version.value.version, /^\d+\.\d+\.\d+/);
+});
+
+test("a spawn failure carries the adapter exit code", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const failed = await harness.json<JsonError>([
+    "spawn",
+    "fake",
+    "crash",
+    "--env",
+    "FAKE_MODE=crash-start",
+  ]);
+  assert.equal(failed.code, 1);
+  assert.equal(failed.value.error.code, "spawn_failed");
+  const details = failed.value.error.details as {
+    exit?: { code: number | null; signal: string | null };
+  };
+  assert.equal(details.exit?.code, 3);
+
+  const human = await harness.run(
+    ["spawn", "fake", "crash", "--env", "FAKE_MODE=crash-start"],
+    { json: false },
+  );
+  assert.equal(human.code, 1);
+  assert.match(human.stderr, /adapter exit: code 3/);
+});
+
+test("session.created records the name, requested mode, and env keys", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "recorded",
+    "--name",
+    "recorded-label",
+    "--mode",
+    "auto",
+    "--env",
+    "SECRET_TOKEN=super-secret-value",
+    "--wait",
+  ]);
+  assert.equal(spawned.code, 0);
+
+  const read = await harness.run(
+    ["read", spawned.value.session.id, "--since", "0", "--json"],
+    { json: true },
+  );
+  assert.equal(read.code, 0);
+  assert.ok(!read.stdout.includes("super-secret-value"));
+  const page = JSON.parse(read.stdout) as ReadValue;
+  const created = page.events.find((event) => event.type === "session.created");
+  assert.ok(created);
+  assert.equal(created.data.name, "recorded-label");
+  assert.equal(created.data.mode, "auto");
+  assert.deepEqual(created.data.envKeys, ["SECRET_TOKEN"]);
+});
+
+test("a version mismatch warns once without blocking the command", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "version",
+    "--wait",
+  ]);
+  assert.equal(spawned.code, 0);
+
+  const lockFile = join(harness.home, "supervisor.json");
+  const lock = JSON.parse(readFileSync(lockFile, "utf8")) as Record<string, unknown>;
+  lock.version = "0.0.0";
+  writeFileSync(lockFile, JSON.stringify(lock, null, 2));
+
+  const listed = await harness.run(["list", "--json"], { json: true });
+  assert.equal(listed.code, 0);
+  assert.match(
+    listed.stderr,
+    /supervisor 0\.0\.0 differs from CLI \d+\.\d+\.\d+/,
+  );
+  assert.equal(listed.stderr.match(/differs from CLI/g)?.length, 1);
 });

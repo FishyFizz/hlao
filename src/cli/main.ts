@@ -98,15 +98,21 @@ export async function main(argv: string[]): Promise<number> {
     }
 
     if (first === undefined || first === "--help" || first === "-h") {
-      process.stdout.write(`${fullHelp()}\n`);
+      if (jsonRequested) writeJson({ topic: null, help: fullHelp() });
+      else process.stdout.write(`${fullHelp()}\n`);
       return 0;
     }
     if (first === "help") {
-      const topic = rest[1];
+      const parsed = parseArgs([...rest.slice(1), ...injected], COMMON);
+      expectPositionals(parsed, "help", 0, 1);
+      const topic = parsed.positionals[0];
       if (topic !== undefined && !hasCommandHelp(topic)) {
         throw usageError(`unknown help topic "${topic}" — run "hlao help"`);
       }
-      process.stdout.write(`${topic ? commandHelp(topic) : fullHelp()}\n`);
+      const text = topic ? commandHelp(topic) : fullHelp();
+      const json = booleanOption(parsed, "json") ?? jsonRequested;
+      if (json) writeJson({ topic: topic ?? null, help: text });
+      else process.stdout.write(`${text}\n`);
       return 0;
     }
     if (first === "version" || first === "--version" || first === "-v") {
@@ -1237,11 +1243,13 @@ async function cmdDoctor(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "start", type: "boolean" },
+    { name: "probe", type: "boolean" },
   ]);
   if (helpRequested(parsed, "doctor")) return 0;
   expectPositionals(parsed, "doctor", 0, 0);
   const ctx = contextFrom(parsed);
-  const start = booleanOption(parsed, "start") === true;
+  const probe = booleanOption(parsed, "probe") === true;
+  const start = booleanOption(parsed, "start") === true || probe;
   const checks: DoctorCheck[] = [];
 
   const nodeOk = nodeVersionAtLeast(22, 13, 0);
@@ -1278,6 +1286,22 @@ async function cmdDoctor(args: string[]): Promise<number> {
       : existsSync(configFile)
         ? configFile
         : "no config.json — built-in backends only",
+  });
+
+  const logFile = logPath(ctx.home);
+  const logExists = existsSync(logFile);
+  let logSize = 0;
+  try {
+    logSize = logExists ? statSync(logFile).size : 0;
+  } catch {
+    logSize = 0;
+  }
+  checks.push({
+    name: "log",
+    status: logExists ? "ok" : "warn",
+    detail: logExists
+      ? `${logFile} (${formatBytes(logSize)})`
+      : `${logFile} (not created yet)`,
   });
 
   let conn: SupervisorConnection | null = null;
@@ -1345,9 +1369,12 @@ async function cmdDoctor(args: string[]): Promise<number> {
         name: "backends",
         status: available.length > 0 ? "ok" : "fail",
         detail:
-          `${available.length}/${agents.length} ready` +
+          `${available.length}/${agents.length} adapter command${agents.length === 1 ? "" : "s"} present` +
           (available.length > 0
             ? ` (${available.map((agent) => agent.name).join(", ")})`
+            : "") +
+          (available.length > 0 && !probe
+            ? " · run with --probe to start each adapter"
             : ""),
       });
       for (const agent of unavailable) {
@@ -1363,6 +1390,62 @@ async function cmdDoctor(args: string[]): Promise<number> {
         status: "fail",
         detail: toHlaoError(error).message,
       });
+    }
+  }
+
+  if (probe) {
+    if (!conn) {
+      checks.push({
+        name: "probe",
+        status: "fail",
+        detail: "no supervisor is available to launch adapters",
+      });
+    } else if (loaded.error) {
+      checks.push({
+        name: "probe",
+        status: "fail",
+        detail: "cannot probe while the user config is invalid",
+      });
+    } else {
+      const merged = mergeBackends(loaded.config.backends, process.cwd());
+      const available = Object.values(merged)
+        .map(toAgentView)
+        .filter((agent) => agent.available);
+      for (const agent of available) {
+        let spawned: SpawnResult | null = null;
+        try {
+          spawned = await conn.request<SpawnResult>(
+            "sessions.spawn",
+            { backend: agent.name, cwd: process.cwd() },
+            { timeoutMs: 0 },
+          );
+          await conn.request("sessions.close", {
+            sessionId: spawned.session.id,
+            force: true,
+          });
+          checks.push({
+            name: `probe ${agent.name}`,
+            status: "ok",
+            detail: `ACP initialize + session/new succeeded (${spawned.session.id} closed)`,
+          });
+        } catch (error) {
+          checks.push({
+            name: `probe ${agent.name}`,
+            status: "fail",
+            detail: toHlaoError(error).message,
+          });
+          if (spawned) {
+            try {
+              await conn.request("sessions.close", {
+                sessionId: spawned.session.id,
+                force: true,
+              });
+            } catch {
+              // The session is already gone or the supervisor is stopping.
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1765,6 +1848,12 @@ function collectSubtree(target: SessionView, sessions: SessionView[]): SessionVi
   return sessions.filter((session) => allowed.has(session.id));
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(1)} KiB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MiB`;
+}
+
 function nodeVersionAtLeast(major: number, minor: number, patch: number): boolean {
   const [currentMajor = 0, currentMinor = 0, currentPatch = 0] = process.versions.node
     .split(".")
@@ -1776,7 +1865,12 @@ function nodeVersionAtLeast(major: number, minor: number, patch: number): boolea
 
 function helpRequested(parsed: ParsedArgs, command: string): boolean {
   if (booleanOption(parsed, "help") === true) {
-    process.stdout.write(`${commandHelp(command)}\n`);
+    const text = commandHelp(command);
+    if (booleanOption(parsed, "json") === true) {
+      writeJson({ topic: command, help: text });
+    } else {
+      process.stdout.write(`${text}\n`);
+    }
     return true;
   }
   return false;
@@ -1811,6 +1905,15 @@ function renderError(error: HlaoError): string {
         text += `    ${line.length > 300 ? `${line.slice(0, 300)}…` : line}\n`;
       }
     }
+  }
+
+  if (typeof details?.exit === "object" && details.exit !== null) {
+    const exit = details.exit as { code?: unknown; signal?: unknown };
+    const detail =
+      typeof exit.signal === "string" && exit.signal.length > 0
+        ? `signal ${exit.signal}`
+        : `code ${exit.code ?? "unknown"}`;
+    text += `  adapter exit: ${detail}\n`;
   }
 
   if (Array.isArray(details?.options)) {
@@ -1897,7 +2000,7 @@ Usage:
   hlao logs [--lines N] [--follow]             supervisor diagnostics
   hlao config show|path|validate               local configuration
   hlao reload                                  re-read config for new spawns
-  hlao doctor                                  environment and connectivity checks
+  hlao doctor [--start] [--probe]                 environment and connectivity checks
   hlao whoami                                  this shell's scope and lineage
   hlao down [--force]                          stop the supervisor
   hlao help [command]                          this help or one command
@@ -2099,12 +2202,15 @@ Local, non-mutating configuration inspection.
 Re-read the user config in the running supervisor. New spawns use the new
 values; live sessions keep the settings they started with. Operator only.
 An invalid file is reported and makes later spawns fail until fixed.`,
-    doctor: `hlao doctor [--start]
+    doctor: `hlao doctor [--start] [--probe]
 
-Check node, runtime home, config, supervisor connectivity, wire version, config
-freshness, and backend readiness. By default it never starts a supervisor; a
-stopped supervisor is a warning ("installed"), not a failure. --start launches
-one and probes it. Exits 1 only when a required check fails.`,
+Check node, runtime home, config, log, supervisor connectivity, wire version,
+config freshness, and adapter presence. By default it never starts a supervisor;
+a stopped supervisor is a warning ("installed"), not a failure. --start launches
+one and probes it. --probe additionally spawns every available backend, completes
+ACP initialize and session/new, and closes it; this can be slow and may exercise
+provider authentication. --probe implies --start. Exits 1 only when a required
+check fails.`,
     whoami: `hlao whoami
 
 Report this shell's role, session id, parent, root, depth, and backend from the

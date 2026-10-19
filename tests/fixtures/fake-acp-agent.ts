@@ -32,6 +32,9 @@ const availableModes = [
 
 const app = agent({ name: "fake-acp" })
   .onRequest("initialize", async ({ params }) => {
+    if (mode === "crash-start") {
+      process.exit(3);
+    }
     const startupDelay = Number(process.env.FAKE_STARTUP_DELAY_MS ?? 0);
     if (startupDelay > 0) {
       await new Promise((resolve) => setTimeout(resolve, startupDelay));

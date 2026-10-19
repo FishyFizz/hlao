@@ -16,8 +16,10 @@ import {
   type RequestEnvelope,
   type ResponseEnvelope,
 } from "./protocol.js";
+import { VERSION } from "./version.js";
 
 let nextRequestId = 1;
+let versionWarned = false;
 
 export interface ConnectionOptions {
   home: string;
@@ -66,10 +68,11 @@ export async function connectSupervisor(
 }
 
 async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
-  ensureHome(options.home);
-
   let existing = readLock(options.home);
-  if (existing && (await probeSupervisor(existing, 750))) return existing;
+  if (existing && (await probeSupervisor(existing, 750))) {
+    warnVersionMismatch(existing);
+    return existing;
+  }
 
   if (options.autostart === false) {
     throw new HlaoError(
@@ -77,6 +80,9 @@ async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
       "no supervisor is running (autostart disabled)",
     );
   }
+
+  // A read-only probe must not create the runtime home. Only autostart does.
+  ensureHome(options.home);
 
   if (existing) {
     const started = Date.parse(existing.startedAt);
@@ -104,7 +110,10 @@ async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
           `supervisor speaks wire protocol ${lock.protocolVersion}; this CLI speaks 1`,
         );
       }
-      if (await probeSupervisor(lock, 500)) return lock;
+      if (await probeSupervisor(lock, 500)) {
+        warnVersionMismatch(lock);
+        return lock;
+      }
       lastProblem = `pid ${lock.pid} is not answering`;
     }
     await sleep(100);
@@ -296,4 +305,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function warnVersionMismatch(lock: LockInfo): void {
+  if (versionWarned || lock.version === VERSION) return;
+  versionWarned = true;
+  process.stderr.write(
+    `hlao: supervisor ${lock.version} differs from CLI ${VERSION}; run "hlao down" and let the next command start ${VERSION}\n`,
+  );
 }

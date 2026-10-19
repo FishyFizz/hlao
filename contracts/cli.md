@@ -96,9 +96,12 @@ the new values; live sessions are untouched. An invalid file makes `reload` exit
 a valid file is reloaded.
 
 `doctor` exits 1 only when a required check fails. Without `--start`, a missing supervisor is a
-warning (`installed`, not running), and backend readiness is checked locally. With `--start`,
-connectivity and the wire version are checked too. `doctor` and `status` warn when the config
-on disk has a different fingerprint from the one the supervisor loaded.
+warning (`installed`, not running), and backend adapter commands are checked locally; the
+check says "present", not "ready". `--probe` implies `--start` and additionally spawns each
+available backend, completes ACP `initialize` + `session/new`, and closes it, so it can be slow
+and may exercise provider authentication. The diagnostic log path and size are always reported.
+`doctor` and `status` warn when the config on disk has a different fingerprint from the one the
+supervisor loaded.
 
 `down --json` reports one of:
 - `{ stopped: true, sessionsClosed: number }`
@@ -129,6 +132,8 @@ condition is now impossible, not that the command failed to run.
 ## `--json` output
 
 - Success: one JSON object, exactly the method's `result` (session views included).
+- `help` returns `{topic, help}` and `version` returns `{version}` when `--json` is present;
+  `help` with no topic uses `topic: null`.
 - Failure: one JSON object `{ "ok": false, "error": { "code", "message", "details"? } }` on
   **stdout**, exit code `1`. Agents that capture stdout always see a parseable document.
 - Human mode writes errors to stderr.

@@ -512,6 +512,7 @@ export class SupervisorServer {
       rootId,
       depth,
       name: params.name ?? null,
+      requestedMode: params.mode,
       env: params.env ?? {},
       permissionPolicy: policy,
       home: this.#home,

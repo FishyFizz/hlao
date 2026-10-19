@@ -76,9 +76,10 @@ npm link          # or: npm install -g .
 hlao doctor
 ```
 
-`hlao doctor` checks Node, the runtime home, config parsing, backend readiness, and the
-supervisor when one is running. It never starts a supervisor by default; `hlao doctor --start`
-launches one and probes it.
+`hlao doctor` checks Node, the runtime home, config parsing, adapter command presence, the
+diagnostic log, and the supervisor when one is running. It never starts a supervisor by
+default; `hlao doctor --start` launches one, and `hlao doctor --probe` also starts each
+available adapter through ACP `initialize` + `session/new` and closes it.
 
 ## Commands
 
@@ -94,19 +95,23 @@ launches one and probes it.
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
 | `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
 | `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the caller's scope. |
-| `hlao agents` | Configured backends, their source, and readiness. Reads config locally; never starts a supervisor. |
+| `hlao agents` | Configured backends, their source, config file, and whether the adapter command is present. Reads config locally; never starts a supervisor. |
 | `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. |
 | `hlao logs [--lines N] [--follow]` | Read the supervisor's diagnostic log directly. |
 | `hlao config show\|path\|validate` | Inspect the local config; backend env values are redacted. |
 | `hlao reload` | Re-read user config in the supervisor for new spawns only. |
+| `hlao doctor [--start] [--probe]` | Diagnose locally; opt in to starting the supervisor or probing adapters. |
 | `hlao whoami` | This shell's role, name, and lineage. |
 | `hlao down [--force]` | Close every session and stop the supervisor. `--force` kills only a process that answers as the supervisor; an unverified stale lock is removed without touching its pid. |
+| `hlao help [command]` | Full help or one command's help. |
+| `hlao version` | Print the CLI version (`--json` for an object). |
 
-Global flags: `--json`, `--home DIR`, `--no-color`, `-h`; they may appear before or after the
-command. `--` ends option parsing, so a message may start with a dash. Durations are `500ms`,
-`30s`, `5m`, `2h`, `1d`, or a bare millisecond count. Exit codes: `0` ok, `1` error, `2` a
-bounded wait expired (the work continues), `3` a `wait` that could not be satisfied because
-the session ended.
+Global flags: `--json`, `--home DIR`, `--no-color`, `-h`; they may appear before or after a
+session command. `help` and `version` honor `--json` too: help returns
+`{topic, help}` and version returns `{version}`. `--` ends option parsing, so a message may
+start with a dash. Durations are `500ms`, `30s`, `5m`, `2h`, `1d`, or a bare millisecond count.
+Exit codes: `0` ok, `1` error, `2` a bounded wait expired (the work continues), `3` a `wait`
+that could not be satisfied because the session ended.
 
 A session is addressable by exact id, then unique name, then unique id prefix. `send`, `mode`,
 and `rename` need `--self` to target the caller, because their first positional means
@@ -129,8 +134,11 @@ owns no timer.
 `hlao status` probes an existing supervisor and `--start` opts into autostart. `hlao logs` reads
 `supervisor.log` directly (rotated at 2 MiB while running, with one previous file) and can
 follow it. `agents`, `config`, and `doctor` are local reads; only `doctor --start` starts a
-supervisor. A long `--wait` prints a progress line on a TTY after two seconds and leaves the
-work running if you press Ctrl-C.
+supervisor and `doctor --probe` starts adapters. A long `--wait` prints a progress line on a
+TTY after two seconds and leaves the work running if you press Ctrl-C.
+
+Set `HLAO_DEBUG=1` in the environment that starts the supervisor to mirror its diagnostic
+lines to stderr as well as the log.
 
 Editing the config does not affect a running supervisor until `hlao reload`. Live sessions keep
 the settings they were spawned with; new spawns use the new values. `doctor` and `status` warn
@@ -319,6 +327,10 @@ common ancestor.
 **`hlao agents` shows an old backend.** `agents` reads the file on disk, while spawns use the
 supervisor's loaded config. Run `hlao reload` for new spawns; live sessions keep their settings.
 `hlao status` and `hlao doctor` warn when the fingerprints differ.
+
+**The CLI and supervisor report different versions.** A command prints one warning when the
+running supervisor's version differs from the CLI. Run `hlao down`; the next command starts the
+current version.
 
 ## What this is not
 

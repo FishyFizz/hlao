@@ -62,6 +62,7 @@ export interface SpawnOptions {
   rootId: string;
   depth: number;
   name: string | null;
+  requestedMode?: string;        // mode requested at spawn; recorded in session.created
   env: Record<string, string>;   // includes the HLAO_* identity variables, including HLAO_NAME
   permissionPolicy: "ask" | "allow" | "deny";
   home: string;                  // injected as HLAO_HOME

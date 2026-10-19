@@ -45,6 +45,7 @@ export interface SpawnOptions {
   rootId: string;
   depth: number;
   name: string | null;
+  requestedMode?: string;
   env: Record<string, string>;
   permissionPolicy: PermissionPolicy;
   home: string;
@@ -125,6 +126,7 @@ export class Session {
   readonly rootId: string;
   readonly depth: number;
   readonly createdAt: string;
+  readonly requestedMode: string | null;
 
   #child: ChildProcess | null = null;
   #conn: ClientConnection | null = null;
@@ -167,6 +169,7 @@ export class Session {
     this.rootId = options.rootId;
     this.depth = options.depth;
     this.createdAt = nowIso();
+    this.requestedMode = options.requestedMode ?? null;
     this.#lastActivityAt = this.createdAt;
     this.#config = options.config;
     this.#backendManifest = options.backend;
@@ -825,10 +828,18 @@ export class Session {
     this.#emit("session.created", {
       backend: this.backend,
       cwd: this.cwd,
+      name: this.name,
+      mode: this.requestedMode,
       parentId: this.parentId,
       rootId: this.rootId,
       depth: this.depth,
       permissionPolicy: this.#permissionPolicy,
+      envKeys: [
+        ...new Set([
+          ...Object.keys(this.#backendManifest.env),
+          ...Object.keys(this.#env),
+        ]),
+      ].sort(),
     });
 
     const child = spawn(this.#backendManifest.command, this.#backendManifest.args, {
@@ -851,6 +862,7 @@ export class Session {
         );
       });
       child.once("exit", (code, signal) => {
+        this.#exit = { code, signal };
         reject(
           new HlaoError(
             "spawn_failed",
@@ -885,8 +897,6 @@ export class Session {
     } catch (error) {
       const originalCode =
         error instanceof HlaoError ? error.code : undefined;
-      const message = `${this.backend} failed to start: ${describeError(error)}${this.#stderrSuffix()}`;
-      this.#startupError = new Error(message);
       this.#closing = true;
       try {
         this.#conn?.close();
@@ -896,9 +906,21 @@ export class Session {
       if (child.exitCode === null && child.signalCode === null) {
         killProcessTree(child);
       }
+      // Give the exit event a moment so a crash during startup is reported with
+      // its code instead of only "connection closed".
+      await waitForExit(child, 500);
+      if (
+        this.#exit === null &&
+        (child.exitCode !== null || child.signalCode !== null)
+      ) {
+        this.#exit = { code: child.exitCode, signal: child.signalCode };
+      }
+      const message = `${this.backend} failed to start: ${describeError(error)}${this.#stderrSuffix()}`;
+      this.#startupError = new Error(message);
       this.#finalize("failed", this.#startupError);
       throw new HlaoError("spawn_failed", message, {
         stderr: this.#stderrTail,
+        ...(this.#exit ? { exit: this.#exit } : {}),
         ...(originalCode !== undefined ? { cause: originalCode } : {}),
       });
     }
