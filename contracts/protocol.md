@@ -99,6 +99,7 @@ type AgentView = {
   args: string[];
   envKeys: string[];             // values are never returned
   description?: string;
+  configPath?: string;           // defining file for user/project backends
   available: boolean;
   unavailableReason?: string;
 };

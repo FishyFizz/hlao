@@ -23,6 +23,8 @@
 - JSON without `--raw` strips `rawInput`, `rawOutput`, and `content`; human `--verbose` renders
   bounded tool payloads.
 - Agent text, titles, and names are stripped of ANSI/control sequences in human output.
+- `agents` reports the config file that defined each user or project backend.
+- `down` warns before stopping when live sessions will lose their in-memory history.
 - Distinct adapter message ids start distinct agent blocks; pending permissions are summarized
   once; human reads show timestamps; `list` prints a scope footer.
 - Parser guardrails: rejected extra positionals and flag-like path values, unknown help topics,

@@ -1437,6 +1437,14 @@ async function cmdDown(args: string[]): Promise<number> {
       callerSessionId: ctx.callerSessionId,
       autostart: false,
     });
+    if (!ctx.json && ctx.callerSessionId === null) {
+      const hello = await conn.request<HelloResult>("hello", {});
+      if (hello.sessions > 0) {
+        process.stderr.write(
+          `hlao: stopping closes ${hello.sessions} live session${hello.sessions === 1 ? "" : "s"} and discards their in-memory history\n`,
+        );
+      }
+    }
     const result = await conn.request<{ sessionsClosed: number }>(
       "supervisor.shutdown",
       { force },
@@ -1448,7 +1456,10 @@ async function cmdDown(args: string[]): Promise<number> {
       );
     }
     if (ctx.json) writeJson({ stopped: true, ...result });
-    else out(`supervisor stopped (${result.sessionsClosed} sessions closed)`);
+    else
+      out(
+        `supervisor stopped (${result.sessionsClosed} session${result.sessionsClosed === 1 ? "" : "s"} closed)`,
+      );
     return 0;
   } catch (error) {
     if (!force) throw error;
@@ -1810,8 +1821,15 @@ function renderError(error: HlaoError): string {
     const rendered = options
       .map((option) => {
         const id = String(option.optionId ?? option.id ?? option.name ?? "?");
-        const note = option.kind ?? option.description;
-        return note ? `${id} (${String(note)})` : id;
+        const label =
+          option.name !== undefined
+            ? String(option.name)
+            : option.kind !== undefined
+              ? String(option.kind)
+              : option.description !== undefined
+                ? String(option.description)
+                : undefined;
+        return label && label !== id ? `${id} (${label})` : id;
       })
       .join(", ");
     if (rendered.length > 0) text += `  options: ${rendered}\n`;

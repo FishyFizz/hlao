@@ -116,6 +116,7 @@ export interface AgentView {
   args: string[];
   envKeys: string[];
   description?: string;
+  configPath?: string;
   available: boolean;
   unavailableReason?: string;
 }

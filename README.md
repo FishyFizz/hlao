@@ -16,9 +16,9 @@ the plain operations, so the next move is decided when the situation is visible.
 
 ```console
 $ hlao agents
-NAME    SOURCE   READY  COMMAND                              NOTES
-claude  builtin  yes    …\dist\index.js                      Claude Code through the ACP adapter
-codex   builtin  yes    …\dist\index.js                      OpenAI Codex through the ACP adapter
+NAME    SOURCE   READY  CONFIG                    COMMAND                     NOTES
+claude  builtin  yes    —                         …\dist\index.js             Claude Code through the ACP adapter
+codex   builtin  yes    —                         …\dist\index.js             OpenAI Codex through the ACP adapter
 
 $ hlao spawn claude "Audit the build log at build.log and report the first failure." --wait
 spawned k7m2qp (claude) in D:\work\svc
@@ -289,6 +289,36 @@ operator / agent shell
   subagents are not surfaced. The leaf stays the leaf.
 
 More detail: `docs/architecture.md`, `contracts/`, and `docs/adr/`.
+
+## Troubleshooting
+
+**The supervisor will not start.** `hlao doctor` checks Node, home, config, and backends
+without starting anything; `hlao logs --lines 100` shows what the last supervisor said. The
+home directory must be writable; on Unix the socket lives at `<home>/supervisor.sock`. A dead
+or unresponsive lock is recovered automatically, and `hlao status --start` makes the startup
+attempt explicit.
+
+**Every tool call asks for permission.** Check `hlao read <id>` — the session header reports
+`policy`. The default policy is `allow`; `--permission ask` or a config `permissionPolicy` may
+have gated it. Answer once with `hlao permit <id> --allow`, remove the gate with
+`hlao permit <id> --allow --always`, or stop the provider from asking at the source with
+`hlao mode <id> auto` (mode names come from the provider).
+
+**A session is stuck in `waiting_permission`.** `hlao read <id>` shows the tool and its
+options; `hlao permit <id> --option <id>` answers exactly, `--deny` rejects, and `hlao cancel
+<id>` abandons the turn.
+
+**History has gaps.** The event log is bounded by count and bytes; `read` reports `truncated`
+and the first retained sequence. Export anything you need (`hlao read <id> --since 0 --json`)
+before `hlao down`, which ends every session and discards in-memory history.
+
+**An agent cannot see a session.** A spawned session sees itself and its descendants only.
+A sibling or parent is outside its scope by design; coordinate through the operator shell or a
+common ancestor.
+
+**`hlao agents` shows an old backend.** `agents` reads the file on disk, while spawns use the
+supervisor's loaded config. Run `hlao reload` for new spawns; live sessions keep their settings.
+`hlao status` and `hlao doctor` warn when the fingerprints differ.
 
 ## What this is not
 

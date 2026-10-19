@@ -15,6 +15,8 @@ export interface BackendManifest {
   env: Record<string, string>;
   description?: string;
   source: "builtin" | "user" | "project";
+  /** The config file that defined a user or project backend. */
+  configPath?: string;
   available: boolean;
   unavailableReason?: string;
 }
@@ -112,7 +114,7 @@ export function loadConfig(home: string): ConfigLoadResult {
 
     const userBackends = object.backends;
     if (userBackends !== undefined) {
-      const merged = parseBackendMap(userBackends, "user");
+      const merged = parseBackendMap(userBackends, "user", configPath(home));
       for (const [name, manifest] of Object.entries(merged)) {
         next.backends[name] = manifest;
       }
@@ -141,7 +143,7 @@ export function loadProjectBackends(cwd: string): Record<string, BackendManifest
   const object = asObject(readJson(file), "project config");
   checkKeys(object, PROJECT_KEYS, "project config");
   if (object.backends === undefined) return {};
-  return parseBackendMap(object.backends, "project");
+  return parseBackendMap(object.backends, "project", file);
 }
 
 export function mergeBackends(
@@ -184,6 +186,7 @@ export function toAgentView(manifest: BackendManifest): AgentView {
     args: manifest.args,
     envKeys: Object.keys(manifest.env).sort(),
     description: manifest.description,
+    ...(manifest.configPath ? { configPath: manifest.configPath } : {}),
     available: manifest.available,
     unavailableReason: manifest.unavailableReason,
   };
@@ -253,6 +256,7 @@ function builtin(
 function parseBackendMap(
   value: unknown,
   source: "user" | "project",
+  filePath: string,
 ): Record<string, BackendManifest> {
   const object = asObject(value, `${source} backends`);
   const result: Record<string, BackendManifest> = {};
@@ -263,7 +267,7 @@ function parseBackendMap(
         `${source} backend name "${name}" must be 1-64 letters, digits, dot, dash, or underscore`,
       );
     }
-    result[name] = parseBackend(name, raw, source);
+    result[name] = parseBackend(name, raw, source, filePath);
   }
   return result;
 }
@@ -272,6 +276,7 @@ function parseBackend(
   name: string,
   value: unknown,
   source: "user" | "project",
+  filePath: string,
 ): BackendManifest {
   const object = asObject(value, `${source} backend "${name}"`);
   checkKeys(object, BACKEND_KEYS, `${source} backend "${name}"`);
@@ -323,6 +328,7 @@ function parseBackend(
     env,
     description,
     source,
+    configPath: filePath,
     available,
     ...(available
       ? {}

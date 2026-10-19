@@ -76,10 +76,11 @@ the single `sessions.spawn` call and its `firstTurn` result. A long human wait o
 seconds when stderr is a TTY; pipes and JSON never see it.
 
 `agents`, `config`, and `doctor` are local and non-mutating; none autostarts a supervisor.
-`status` probes an existing supervisor and exits 1 when none is running; `--start` opts into
-autostart. `logs` reads `<HLAO_HOME>/supervisor.log` directly, defaulting to the last 50 lines
-(`--lines 0` = whole file); `--follow` polls for appended bytes until interrupted, emitting one
-`{"path","line"}` object per line under `--json`.
+`agents` reports the file that defined each user or project backend, middle-truncated in human
+output. `status` probes an existing supervisor and exits 1 when none is running; `--start` opts
+into autostart. `logs` reads `<HLAO_HOME>/supervisor.log` directly, defaulting to the last 50
+lines (`--lines 0` = whole file); `--follow` polls for appended bytes until interrupted,
+emitting one `{"path","line"}` object per line under `--json`.
 
 `config show` prints the effective config and its backends without mutating anything; backend
 env values are `***`. It exits 0 even when the file is invalid, including an `error` field, so

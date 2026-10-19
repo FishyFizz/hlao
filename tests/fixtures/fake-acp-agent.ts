@@ -262,6 +262,7 @@ const app = agent({ name: "fake-acp" })
       title: "Read the prompt",
       kind: "read",
       status: "in_progress",
+      rawInput: { prompt: text },
     });
     await message(`echo: ${text}`);
     await send({
@@ -269,6 +270,7 @@ const app = agent({ name: "fake-acp" })
       toolCallId: "call-echo",
       status: "completed",
       title: "Read the prompt",
+      rawOutput: { ok: true },
     });
     if (mode === "chunks") {
       await message(" | chunk-2");

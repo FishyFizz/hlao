@@ -494,11 +494,16 @@ export function renderAgentTable(agents: AgentView[], style: Style): string {
       oneLine(agent.name),
       oneLine(agent.source),
       agent.available ? style.green("yes") : style.red("no"),
+      agent.configPath ? truncateMiddle(oneLine(agent.configPath), 40) : "—",
       truncateLeft(oneLine(commandLine), 60),
       agent.available ? oneLine(agent.description ?? "—") : style.red(oneLine(agent.unavailableReason ?? "unavailable")),
     ];
   });
-  return renderTable(["NAME", "SOURCE", "READY", "COMMAND", "NOTES"], rows, style);
+  return renderTable(
+    ["NAME", "SOURCE", "READY", "CONFIG", "COMMAND", "NOTES"],
+    rows,
+    style,
+  );
 }
 
 export interface DoctorCheck {
@@ -636,6 +641,14 @@ function renderPayload(value: unknown, style: Style): string[] {
 function truncateLeft(value: string, max: number): string {
   if (value.length <= max) return value;
   return `…${value.slice(value.length - max + 1)}`;
+}
+
+function truncateMiddle(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const keep = max - 1;
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }
 
 function pad(value: string, width: number): string {

@@ -56,6 +56,10 @@ test("user backends override built-ins and carry their source", () => {
     assert.equal(config.permissionPolicy, "allow");
     assert.equal(config.backends.fake?.source, "user");
     assert.deepEqual(config.backends.fake?.args, ["agent.js"]);
+    assert.equal(
+      config.backends.fake?.configPath,
+      join(home, "config.json"),
+    );
     assert.equal(config.backends.claude?.source, "user");
     assert.deepEqual(config.backends.claude?.args, ["other.js"]);
   } finally {
@@ -140,6 +144,10 @@ test("project backends are read per cwd and override user backends", () => {
     assert.equal(merged.shared?.source, "project");
     assert.deepEqual(merged.shared?.args, ["project.js"]);
     assert.equal(merged.shared?.name, "shared");
+    assert.equal(
+      merged.shared?.configPath,
+      join(project, ".hlao", "agents.json"),
+    );
     assert.deepEqual(loadProjectBackends(project).shared?.args, ["project.js"]);
   } finally {
     rmSync(home, { recursive: true, force: true });
