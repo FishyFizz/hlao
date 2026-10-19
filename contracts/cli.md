@@ -78,9 +78,12 @@ seconds when stderr is a TTY; pipes and JSON never see it.
 `agents`, `config`, and `doctor` are local and non-mutating; none autostarts a supervisor.
 `agents` reports the file that defined each user or project backend, middle-truncated in human
 output. `status` probes an existing supervisor and exits 1 when none is running; `--start` opts
-into autostart. `logs` reads `<HLAO_HOME>/supervisor.log` directly, defaulting to the last 50
-lines (`--lines 0` = whole file); `--follow` polls for appended bytes until interrupted,
-emitting one `{"path","line"}` object per line under `--json`.
+into autostart. When nothing is running, `status --json` prints
+`{running:false, home, hint}` rather than the error envelope: "not running" is the state being
+reported, not a command failure. `logs` reads `<HLAO_HOME>/supervisor.log` directly,
+defaulting to the last 50 lines (`--lines 0` = whole file). Under `--json` a plain read returns
+`{path, lines: string[]}`; `--follow` polls for appended bytes until interrupted and emits one
+`{"path","line"}` object per line (NDJSON), including the initial window.
 
 `config show` prints the effective config and its backends without mutating anything; backend
 env values are `***`. It exits 0 even when the file is invalid, including an `error` field, so
@@ -88,8 +91,9 @@ the effective defaults remain inspectable. `config validate` exits 1 on an inval
 `config path` prints the path whether or not the file exists.
 
 `reload` re-reads user config in the running supervisor. It is operator-only. New spawns use
-the new values; live sessions are untouched. An invalid file makes `reload` exit 1 and leaves
-the supervisor rejecting later spawns with `config_invalid` until a valid file is reloaded.
+the new values; live sessions are untouched. An invalid file makes `reload` exit 1 with
+`config_invalid` and leaves the supervisor rejecting later spawns with `config_invalid` until
+a valid file is reloaded.
 
 `doctor` exits 1 only when a required check fails. Without `--start`, a missing supervisor is a
 warning (`installed`, not running), and backend readiness is checked locally. With `--start`,

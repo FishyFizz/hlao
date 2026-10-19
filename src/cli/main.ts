@@ -247,7 +247,7 @@ async function cmdSpawn(args: string[]): Promise<number> {
 
   if (twoPhase) {
     const sent = await withProgress(
-      `waiting for turn 1 of ${sessionLabel(ctx, session)}`,
+      `waiting for turn 1 of ${session.id}`,
       conn.request<SendResult>(
         "sessions.send",
         {
@@ -514,7 +514,7 @@ async function followRead(
     }
 
     await withProgress(
-      `following ${sessionLabel(ctx, result.session)}`,
+      `following ${result.session.id}`,
       conn.request<WaitResult>(
         "sessions.wait",
         {
@@ -1086,7 +1086,11 @@ async function cmdLogs(args: string[]): Promise<number> {
   }
   const lines = splitLines(content);
   const initial = limit === 0 ? lines : lines.slice(-limit);
-  emitLogLines(ctx, initial, file, exists);
+  if (ctx.json && !follow) {
+    writeJson({ path: file, lines: initial });
+  } else {
+    emitLogLines(ctx, initial, file, exists);
+  }
   if (!follow) return 0;
 
   if (!exists) {
@@ -1144,9 +1148,6 @@ function emitLogLines(
   if (ctx.json) {
     for (const line of lines) {
       process.stdout.write(`${JSON.stringify({ path: file, line })}\n`);
-    }
-    if (lines.length === 0 && !exists) {
-      process.stdout.write(`${JSON.stringify({ path: file, lines: [] })}\n`);
     }
     return;
   }
@@ -1217,12 +1218,14 @@ async function cmdReload(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
   const result = await conn.request<ReloadResult>("supervisor.reload", {});
+  if (result.configError) {
+    throw new HlaoError("config_invalid", result.configError, {
+      configHash: result.configHash,
+    });
+  }
   if (ctx.json) {
     writeJson(result);
-    return result.configError ? 1 : 0;
-  }
-  if (result.configError) {
-    throw new HlaoError("config_invalid", result.configError);
+    return 0;
   }
   out(
     `config reloaded · new spawns use ${configPath(ctx.home)}; live sessions keep their settings`,
@@ -2082,7 +2085,8 @@ Exits 1 when nothing is running. --start autostarts the supervisor first.`,
 
 Read the supervisor's diagnostic log directly; no supervisor is needed. The
 default is the last 50 lines; --lines 0 prints the whole file. --follow polls
-for appended lines until Ctrl-C. With --json, each line is {"path","line"}.`,
+for appended lines until Ctrl-C. With --json, a plain read returns
+{"path","lines"}; --follow emits one {"path","line"} object per line.`,
     config: `hlao config show|path|validate
 
 Local, non-mutating configuration inspection.

@@ -97,16 +97,14 @@ test("logs reads the supervisor log directly, without a supervisor", async (t) =
   ]);
   assert.equal(spawned.code, 0);
 
-  const logs = await harness.run(["logs", "--lines", "200"], { json: true });
+  const logs = await harness.json<{ path: string; lines: string[] }>([
+    "logs",
+    "--lines",
+    "200",
+  ]);
   assert.equal(logs.code, 0);
-  const records = logs.stdout
-    .trim()
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as { path: string; line: string });
-  assert.ok(records.length > 0);
-  assert.ok(records.some((record) => record.line.includes("spawned")));
-  assert.ok(records.every((record) => record.path.endsWith("supervisor.log")));
+  assert.ok(logs.value.lines.some((line) => line.includes("spawned")));
+  assert.ok(logs.value.path.endsWith("supervisor.log"));
 });
 
 test("config can be inspected locally and validates", async (t) => {
@@ -219,9 +217,10 @@ test("an invalid reload blocks new spawns until the file is fixed", async (t) =>
     join(harness.home, "config.json"),
     JSON.stringify({ permissionPolicy: "sometimes" }),
   );
-  const failed = await harness.json<{ configError: string | null }>(["reload"]);
+  const failed = await harness.json<JsonError>(["reload"]);
   assert.equal(failed.code, 1);
-  assert.match(failed.value.configError ?? "", /permissionPolicy/);
+  assert.equal(failed.value.error.code, "config_invalid");
+  assert.match(failed.value.error.message, /permissionPolicy/);
 
   const blocked = await harness.json<JsonError>(["spawn", "fake"]);
   assert.equal(blocked.code, 1);
