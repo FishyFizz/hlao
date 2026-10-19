@@ -181,6 +181,7 @@ export interface SessionValue {
   rootId: string;
   depth: number;
   turn: number;
+  turnStartedAt: string | null;
   queued: number;
   lastSeq: number;
   endedAt: string | null;
@@ -195,6 +196,14 @@ export interface SessionValue {
     currentModeId: string;
     availableModes: { id: string; name: string; description?: string }[];
   } | null;
+  configOptions: {
+    id: string;
+    name: string;
+    category?: string;
+    type: "select" | "boolean";
+    currentValue: string | boolean;
+    values: { value: string; name: string; group?: string }[];
+  }[] | null;
 }
 
 export interface ListValue {

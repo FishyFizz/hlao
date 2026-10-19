@@ -67,6 +67,14 @@ All `sessionId` params accept an exact handle first, then a unique session name,
 handle prefix, resolved within the caller's scope. Duplicate names are `ambiguous_id` with
 `details.candidates`; the full handle still resolves.
 
+`sessions.send` has one deliberate scope exception: a caller may target its **direct parent**
+by exact id, exact name, or a prefix that uniquely identifies the parent. No other method may
+reach an ancestor; reads, waits, cancel, close, permit, policy, mode, option, and rename remain
+`forbidden` there.
+
+Scope is enforced against the caller's live session when one is named. If `callerSessionId` is
+absent, the request is an operator request and sees every session.
+
 ### `hello`
 
 Params: `{}`.
@@ -118,6 +126,8 @@ Params:
   wait?: boolean;                // wait for the first turn when prompt is present
   timeoutMs?: number;            // bound on that wait; defaults to sendWaitTimeoutMs
   mode?: string;                 // provider mode to select before returning (sessions.set_mode)
+  model?: string;                // value for the option whose category is "model"
+  config?: Record<string, string | boolean>; // session config options applied before the prompt
   parentSessionId?: string;      // defaults to callerSessionId
   permissionPolicy?: "ask" | "allow" | "deny"; // defaults to config
   env?: Record<string, string>;  // extra environment for the adapter
@@ -166,7 +176,8 @@ Params:
 { sessionId: string; text: string; wait?: boolean; timeoutMs?: number }
 ```
 
-`timeoutMs` defaults to `config.sendWaitTimeoutMs`; `0` means no timeout.
+`timeoutMs` defaults to `config.sendWaitTimeoutMs`; `0` means no timeout. The caller's session
+id (or `"operator"`) is recorded as `prompt.sent.from` / `prompt.queued.from`.
 
 Result:
 
@@ -250,11 +261,12 @@ timeout never changes the session.
 
 ### `sessions.cancel`
 
-Params: `{ sessionId: string }`. Result: `{ session: SessionView; discarded: number }`.
+Params: `{ sessionId: string; keepQueue?: boolean }`.
+Result: `{ session: SessionView; discarded: number }`.
 
-Requests an ACP `session/cancel`, resolves any pending permission as `cancelled`, and
-settles queued prompts as `cancelled` (`discarded` counts them). It does not kill the
-process.
+Requests an ACP `session/cancel`, resolves any pending permission as `cancelled`, and settles
+queued prompts as `cancelled` (`discarded` counts them). With `keepQueue: true`, the queue is
+kept and the next message runs after the active turn settles. It does not kill the process.
 
 ### `sessions.close`
 
@@ -286,6 +298,51 @@ Switches the provider's native session mode when the adapter advertises modes. T
 view reports `modes: { currentModeId, availableModes }`. Errors: `bad_request` when the
 backend advertises no modes, `bad_option` when the mode is not in the advertised list, and
 `session_closed` for a terminal session.
+
+### `sessions.set_policy`
+
+Params: `{ sessionId: string; permissionPolicy: "ask" | "allow" | "deny" }`.
+Result: `{ session: SessionView }`.
+
+Changes the live HLAO permission policy without requiring a pending request. Emits
+`policy.changed` with the acting caller. It does not alter provider-native modes or config
+options.
+
+### `sessions.set_config_option`
+
+Params: `{ sessionId: string; configId: string; value: string | boolean }`.
+Result: `{ session: SessionView }`.
+
+Sends ACP `session/set_config_option` and replaces the session's `configOptions` from the
+response. Boolean options accept a boolean or the strings `"true"`/`"false"`. A select option
+requires one of the advertised value ids. Errors: `bad_request` when the option is not
+advertised or the type is wrong, `bad_option` when the value is not offered,
+`session_not_ready` before ACP is ready, `session_closed` for a terminal session.
+
+### `sessions.queue`
+
+Params: `{ sessionId: string }`.
+Result: `{ session: SessionView; active: QueueItemView | null; queue: QueueItemView[] }`.
+
+```ts
+type QueueItemView = {
+  position: number | null;       // 1-based queue order; null for the active turn
+  textPreview: string;           // at most 200 characters, whitespace collapsed
+  textLength: number;            // full original length
+  from: string;                  // sender session id or "operator"
+  queuedMs: number;
+  turn: number | null;
+};
+```
+
+### `sessions.queue_drop`
+
+Params: `{ sessionId: string; position: number }` (1..1000).
+Result: `{ session: SessionView; dropped: QueueItemView; discarded: number }`.
+
+Removes one queued prompt. The prompt is settled as cancelled before it runs and emits
+`prompt.discarded` with `reason: "dropped"`, `position`, and the actor. Out-of-range positions
+are `bad_request` and do not change the queue.
 
 ### `supervisor.reload`
 
@@ -332,6 +389,18 @@ type EventType =
 Event ordering per session is total and monotonic. An event is appended before any waiter
 that depends on it is notified.
 
+Actor fields are explicit:
+
+- `prompt.sent` and `prompt.queued` carry `from`: a session id or `"operator"`.
+- `prompt.discarded` carries the original `from`, the acting `by`, `reason`, and a bounded
+  `textPreview`.
+- `permission.resolved`, `policy.changed`, `mode`, `config`, `cancel.requested`,
+  `session.renamed`, and `session.closed` carry `by`: the caller session id, `"operator"`,
+  `"policy:<name>"` for an automatic answer, or `"agent"` when the adapter itself changed a
+  mode/config option.
+- `permission.resolved` with `optionId: null` also carries `reason` (for example `"cancel"`,
+  `"close"`, `"turn-ended"`).
+
 ## Session view
 
 ```ts
@@ -348,6 +417,7 @@ type SessionView = {
   lastActivityAt: string;
   endedAt: string | null;
   turn: number;
+  turnStartedAt: string | null;  // set while busy or waiting_permission
   queued: number;
   lastSeq: number;
   pendingPermission: PermissionView | null;
@@ -360,6 +430,15 @@ type SessionView = {
     currentModeId: string;
     availableModes: { id: string; name: string; description?: string }[];
   } | null;
+  configOptions: {
+    id: string;
+    name: string;
+    description?: string;
+    category?: string;
+    type: "select" | "boolean";
+    currentValue: string | boolean;
+    values: { value: string; name: string; description?: string; group?: string }[];
+  }[] | null;
 };
 
 type PermissionView = {

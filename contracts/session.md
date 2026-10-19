@@ -48,6 +48,15 @@ export interface ReadResult {
   truncated: boolean;
 }
 
+export interface QueueItemView {
+  position: number | null;       // null = active turn
+  textPreview: string;           // <= 200 chars, whitespace collapsed
+  textLength: number;
+  from: string;                  // sender session id or "operator"
+  queuedMs: number;
+  turn: number | null;
+}
+
 export interface WaitResult {
   satisfied: boolean;
   reason: WaitUntil | "timeout";
@@ -87,8 +96,9 @@ export class Session {
    * Queue a prompt; one turn at a time.
    * Throws session_closed / session_not_ready for a terminal or unready session.
    * Once queued, every prompt settles exactly once; a running session does not reject.
+   * `from` is recorded on prompt events.
    */
-  send(text: string, wait: boolean, timeoutMs: number): Promise<SendResult>;
+  send(text: string, wait: boolean, timeoutMs: number, from?: string): Promise<SendResult>;
 
   /** Cursor-addressed or tail read. Pure: does not consume the log. A tail read reports
    *  `truncated` when any earlier event was evicted; `raw: false` strips private payloads. */
@@ -101,22 +111,39 @@ export class Session {
   waitFor(until: WaitUntil, since: number | undefined, timeoutMs: number,
           signal?: AbortSignal): Promise<WaitResult>;
 
-  /** ACP session/cancel plus discard of queued prompts. */
-  cancel(): Promise<{ discarded: number }>;
+  /** ACP session/cancel plus discard of queued prompts. keepQueue leaves the backlog. */
+  cancel(keepQueue?: boolean, by?: string): Promise<{ discarded: number }>;
 
   /** Protocol close when supported, then terminate; idempotent. */
-  close(force?: boolean): Promise<{ killed: boolean; wasTerminal: boolean }>;
+  close(force?: boolean, by?: string): Promise<{ killed: boolean; wasTerminal: boolean }>;
 
   /** Answer the pending permission request. Throws no_pending_permission / bad_option.
    *  `always` also switches the session policy to allow and prefers allow_always. */
-  permit(optionId?: string, requestId?: string, always?: boolean): {
+  permit(optionId?: string, requestId?: string, always?: boolean, by?: string): {
     requestId: string;
     optionId: string;
   };
 
+  /** Read or switch the live HLAO permission policy. */
+  setPolicy(policy: "ask" | "allow" | "deny", by?: string): void;
+
   /** Read or switch the provider's native mode. Throws bad_request when the
    *  backend advertises no modes, bad_option for an unknown mode. */
-  setMode(modeId: string): Promise<SessionModes>;
+  setMode(modeId: string, by?: string): Promise<SessionModes>;
+
+  /** Set a provider config option; values are validated against the advertised list. */
+  setConfigOption(configId: string, value: string | boolean, by?: string):
+    Promise<SessionConfigOptionView[]>;
+
+  /** Set the option whose category is "model". */
+  setModel(model: string, by?: string): Promise<SessionConfigOptionView[]>;
+
+  /** Snapshot of the queue: the active item plus 1-based queued items. */
+  queueView(): { active: QueueItemView | null; queue: QueueItemView[] };
+
+  /** Remove one queued prompt, settling it as cancelled before it runs. */
+  dropQueued(position: number, by?: string):
+    { dropped: QueueItemView; discarded: number };
 
   /** Snapshot; never exposes mutable internals. */
   view(): SessionView;
@@ -136,13 +163,17 @@ export class Session {
 5. **Permission requests are data.** An unanswered request appears in `view()` and produces
    `permission.requested`; it blocks only that session's turn. The policy is `allow` by
    default, `ask` opt-in, and `permit(..., always)` can switch a live session to `allow`.
-6. **Provider modes are data.** `view().modes` reports the adapter's current and available
-   modes; `setMode` changes one when the adapter advertises them.
+6. **Provider modes and config options are data.** `view().modes` and `view().configOptions`
+   report what the adapter advertises; setters change them and record the actor.
 7. **Names are labels.** `setName` changes `name` and emits an event; the handle, scope, and
    the environment already injected into the running adapter (`HLAO_NAME`) are unchanged.
 8. **Events are monotonic.** `append` assigns the next sequence before waiters run.
 9. **Reads never mutate.** A read does not acknowledge or consume anything.
 10. **Timeouts are bounds, not schedules.** Nothing in this module starts a recurring timer.
+11. **Cancel is explicit about the queue.** The default discards the backlog; `keepQueue`
+    stops only the active turn. Every discard is attributed and previewed.
+12. **One upward channel.** This module has no scope logic; the supervisor allows only
+    `send` to a direct parent.
 
 ## Dependencies the session expects
 

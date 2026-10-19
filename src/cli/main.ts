@@ -28,9 +28,13 @@ import type {
   ListResult,
   PermissionPolicy,
   PermitResult,
+  QueueDropResult,
+  QueueResult,
   ReadResult,
   ReloadResult,
   RenameResult,
+  SetConfigOptionResult,
+  SetPolicyResult,
   SendResult,
   SessionView,
   SetModeResult,
@@ -141,6 +145,12 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdPermit(args);
       case "mode":
         return await cmdMode(args);
+      case "policy":
+        return await cmdPolicy(args);
+      case "option":
+        return await cmdOption(args);
+      case "queue":
+        return await cmdQueue(args);
       case "rename":
         return await cmdRename(args);
       case "agents":
@@ -195,6 +205,8 @@ async function cmdSpawn(args: string[]): Promise<number> {
     { name: "wait", type: "boolean" },
     { name: "timeout", type: "duration", valueName: "DUR" },
     { name: "mode", type: "string", valueName: "ID" },
+    { name: "model", type: "string", valueName: "VALUE" },
+    { name: "config", type: "string", valueName: "KEY=VALUE", multiple: true },
     { name: "parent", type: "string", valueName: "SESSION" },
     { name: "permission", type: "string", valueName: "POLICY" },
     { name: "env", type: "string", valueName: "K=V", multiple: true },
@@ -205,6 +217,8 @@ async function cmdSpawn(args: string[]): Promise<number> {
   const backend = parsed.positionals[0]!;
   const ctx = contextFrom(parsed);
   const prompt = await resolveMessage(parsed.positionals.slice(1), parsed);
+  const model = stringOption(parsed, "model");
+  const config = parseConfigValues(multipleOption(parsed, "config"));
   const permission = stringOption(parsed, "permission");
   if (permission !== undefined && !["ask", "allow", "deny"].includes(permission)) {
     throw usageError("--permission must be ask, allow, or deny");
@@ -232,6 +246,8 @@ async function cmdSpawn(args: string[]): Promise<number> {
       wait: twoPhase ? false : wait,
       timeoutMs: numberOption(parsed, "timeout"),
       mode: stringOption(parsed, "mode"),
+      model,
+      config,
       parentSessionId: stringOption(parsed, "parent"),
       permissionPolicy: permission as PermissionPolicy | undefined,
       env: parseEnv(multipleOption(parsed, "env")),
@@ -245,10 +261,15 @@ async function cmdSpawn(args: string[]): Promise<number> {
   }
 
   const session = result.session;
+  const configKeys = Object.keys(config ?? {});
   out(
     `spawned ${sessionLabel(ctx, session)} (${session.backend}) in ${session.cwd}` +
       (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
-      ctx.style.dim(`  policy ${session.permissionPolicy}`),
+      ctx.style.dim(`  policy ${session.permissionPolicy}`) +
+      (model ? ctx.style.dim(`  model ${sanitize(model)}`) : "") +
+      (configKeys.length > 0
+        ? ctx.style.dim(`  config ${configKeys.join(",")}`)
+        : ""),
   );
 
   if (twoPhase) {
@@ -672,13 +693,21 @@ async function cmdList(args: string[]): Promise<number> {
 }
 
 async function cmdCancel(args: string[]): Promise<number> {
-  const parsed = parseArgs(args, [...COMMON, { name: "self", type: "boolean" }]);
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+    { name: "keep-queue", type: "boolean" },
+  ]);
   if (helpRequested(parsed, "cancel")) return 0;
   expectPositionals(parsed, "cancel", 0, 1);
   const sessionId = resolveTarget(parsed, "cancel", "selfDefault");
   const ctx = contextFrom(parsed);
+  const keepQueue = booleanOption(parsed, "keep-queue") === true;
   const conn = await connect(ctx);
-  const result = await conn.request<CancelResult>("sessions.cancel", { sessionId });
+  const result = await conn.request<CancelResult>("sessions.cancel", {
+    sessionId,
+    ...(keepQueue ? { keepQueue: true } : {}),
+  });
 
   if (ctx.json) {
     writeJson(result);
@@ -695,9 +724,13 @@ async function cmdCancel(args: string[]): Promise<number> {
   }
   out(
     `cancel requested for ${label}` +
-      (result.discarded > 0
-        ? ctx.style.dim(` (${result.discarded} queued message${result.discarded === 1 ? "" : "s"} discarded)`)
-        : ""),
+      (keepQueue && result.session.queued > 0
+        ? ctx.style.dim(
+            ` (queue kept: ${result.session.queued} message${result.session.queued === 1 ? "" : "s"})`,
+          )
+        : result.discarded > 0
+          ? ctx.style.dim(` (${result.discarded} queued message${result.discarded === 1 ? "" : "s"} discarded)`)
+          : ""),
   );
   return 0;
 }
@@ -920,6 +953,281 @@ async function cmdMode(args: string[]): Promise<number> {
     )}`,
   );
   return 0;
+}
+
+async function cmdPolicy(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "policy")) return 0;
+  const selfUsed = booleanOption(parsed, "self") === true;
+  const caller = process.env.HLAO_SESSION_ID?.trim();
+  const positionals = parsed.positionals;
+  let sessionId: string;
+  let policy: PermissionPolicy | undefined;
+
+  if (selfUsed) {
+    if (!caller) throw usageError("policy: --self requires HLAO_SESSION_ID");
+    if (positionals.length > 1) {
+      throw usageError("policy: --self takes at most one policy");
+    }
+    sessionId = caller;
+    policy = parsePolicy(positionals[0]);
+  } else if (positionals.length === 0) {
+    if (!caller) throw usageError("policy needs a session id");
+    sessionId = caller;
+  } else if (positionals.length === 1) {
+    const candidate = parsePolicy(positionals[0]);
+    if (candidate !== undefined && caller) {
+      sessionId = caller;
+      policy = candidate;
+    } else {
+      sessionId = positionals[0]!;
+    }
+  } else if (positionals.length === 2) {
+    sessionId = positionals[0]!;
+    policy = parsePolicy(positionals[1]);
+    if (policy === undefined) {
+      throw usageError("policy must be allow, ask, or deny");
+    }
+  } else {
+    throw usageError("policy takes a session id and one optional allow|ask|deny");
+  }
+
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+  if (policy === undefined) {
+    const got = await conn.request<GetResult>("sessions.get", { sessionId });
+    if (ctx.json) {
+      writeJson({ session: got.session });
+      return 0;
+    }
+    out(
+      `policy of ${sessionLabel(ctx, got.session)}: ${ctx.style.cyan(
+        got.session.permissionPolicy,
+      )}`,
+    );
+    return 0;
+  }
+
+  const result = await conn.request<SetPolicyResult>("sessions.set_policy", {
+    sessionId,
+    permissionPolicy: policy,
+  });
+  if (ctx.json) {
+    writeJson(result);
+    return 0;
+  }
+  out(
+    `policy of ${sessionLabel(ctx, result.session)}: ${ctx.style.cyan(
+      result.session.permissionPolicy,
+    )}`,
+  );
+  return 0;
+}
+
+async function cmdOption(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "option")) return 0;
+  const selfUsed = booleanOption(parsed, "self") === true;
+  const caller = process.env.HLAO_SESSION_ID?.trim();
+  const positionals = parsed.positionals;
+  let sessionId: string;
+  let configId: string | undefined;
+  let value: string | undefined;
+
+  if (selfUsed) {
+    if (!caller) throw usageError("option: --self requires HLAO_SESSION_ID");
+    sessionId = caller;
+    if (positionals.length === 2) {
+      configId = positionals[0]!;
+      value = positionals[1]!;
+    } else if (positionals.length !== 0) {
+      throw usageError("option --self takes either no arguments or <key> <value>");
+    }
+  } else if (positionals.length === 0) {
+    if (!caller) throw usageError("option needs a session id");
+    sessionId = caller;
+  } else if (positionals.length === 1) {
+    sessionId = positionals[0]!;
+  } else if (positionals.length === 3) {
+    sessionId = positionals[0]!;
+    configId = positionals[1]!;
+    value = positionals[2]!;
+  } else {
+    throw usageError(
+      "option takes <id>, <id> <key> <value>, or --self <key> <value>",
+    );
+  }
+
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+
+  if (configId === undefined || value === undefined) {
+    const got = await conn.request<GetResult>("sessions.get", { sessionId });
+    if (ctx.json) {
+      writeJson({ session: got.session });
+      return 0;
+    }
+    const options = got.session.configOptions;
+    if (!options || options.length === 0) {
+      out(
+        ctx.style.dim(
+          `backend "${got.session.backend}" advertises no config options`,
+        ),
+      );
+      return 0;
+    }
+    out(`config options for ${sessionLabel(ctx, got.session)}`);
+    for (const option of options) {
+      out(
+        `  ${ctx.style.bold(option.id.padEnd(16))} ${sanitize(option.name)} ` +
+          ctx.style.dim(`[${option.type}]`) +
+          ` current ${ctx.style.cyan(String(option.currentValue))}` +
+          (option.category ? ctx.style.dim(` · ${option.category}`) : ""),
+      );
+      for (const candidate of option.values) {
+        out(
+          `    ${candidate.value.padEnd(16)} ${sanitize(candidate.name)}` +
+            (candidate.group ? ctx.style.dim(` (${candidate.group})`) : "") +
+            (candidate.description
+              ? ctx.style.dim(` — ${sanitize(candidate.description)}`)
+              : ""),
+        );
+      }
+    }
+    return 0;
+  }
+
+  const result = await conn.request<SetConfigOptionResult>(
+    "sessions.set_config_option",
+    { sessionId, configId, value },
+  );
+  if (ctx.json) {
+    writeJson(result);
+    return 0;
+  }
+  const current = result.session.configOptions?.find(
+    (option) => option.id === configId,
+  );
+  out(
+    `option ${configId} of ${sessionLabel(ctx, result.session)}: ${ctx.style.cyan(
+      String(current?.currentValue ?? value),
+    )}`,
+  );
+  return 0;
+}
+
+async function cmdQueue(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "queue")) return 0;
+  const selfUsed = booleanOption(parsed, "self") === true;
+  const caller = process.env.HLAO_SESSION_ID?.trim();
+  const positionals = [...parsed.positionals];
+  const drop = positionals[0] === "drop";
+  if (drop) positionals.shift();
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+
+  if (!drop) {
+    if (positionals.length > 1) {
+      throw usageError("queue takes at most one session id");
+    }
+    let sessionId: string;
+    if (selfUsed) {
+      if (!caller) throw usageError("queue: --self requires HLAO_SESSION_ID");
+      sessionId = caller;
+    } else if (positionals[0] !== undefined) {
+      sessionId = positionals[0];
+    } else if (caller) {
+      sessionId = caller;
+    } else {
+      throw usageError("queue needs a session id");
+    }
+
+    const result = await conn.request<QueueResult>("sessions.queue", {
+      sessionId,
+    });
+    if (ctx.json) {
+      writeJson(result);
+      return 0;
+    }
+    out(renderQueue(result, ctx));
+    return 0;
+  }
+
+  let sessionId: string;
+  let positionRaw: string | undefined;
+  if (selfUsed) {
+    if (!caller) throw usageError("queue: --self requires HLAO_SESSION_ID");
+    if (positionals.length !== 1) {
+      throw usageError("queue drop --self expects one position");
+    }
+    sessionId = caller;
+    positionRaw = positionals[0];
+  } else if (positionals.length === 2) {
+    sessionId = positionals[0]!;
+    positionRaw = positionals[1];
+  } else if (positionals.length === 1 && caller) {
+    sessionId = caller;
+    positionRaw = positionals[0];
+  } else {
+    throw usageError("queue drop needs [<id>] <position>");
+  }
+
+  const position = Number(positionRaw);
+  if (!Number.isInteger(position) || position < 1 || position > 1_000) {
+    throw usageError("queue position must be an integer from 1 to 1000");
+  }
+  const result = await conn.request<QueueDropResult>("sessions.queue_drop", {
+    sessionId,
+    position,
+  });
+  if (ctx.json) {
+    writeJson(result);
+    return 0;
+  }
+  out(
+    `dropped #${result.dropped.position} from ${sessionLabel(ctx, result.session)}: ` +
+      sanitize(result.dropped.textPreview),
+  );
+  return 0;
+}
+
+function renderQueue(result: QueueResult, ctx: CommandContext): string {
+  const label = sessionLabel(ctx, result.session);
+  if (!result.active && result.queue.length === 0) {
+    return `queue of ${label} is empty`;
+  }
+  const lines = [`queue of ${label} · ${result.queue.length} queued`];
+  if (result.active) {
+    lines.push(
+      `  active turn ${result.active.turn ?? "?"} from ${sanitize(result.active.from)} · ${formatDuration(result.active.queuedMs)}`,
+    );
+  }
+  for (const item of result.queue) {
+    lines.push(
+      `  #${item.position}  ${sanitize(item.from)}  ${formatDuration(item.queuedMs)}  ` +
+        sanitize(item.textPreview) +
+        (item.textLength > item.textPreview.length
+          ? ctx.style.dim(` (${item.textLength} chars)`)
+          : ""),
+    );
+  }
+  return lines.join("\n");
+}
+
+function parsePolicy(value: string | undefined): PermissionPolicy | undefined {
+  return value === "allow" || value === "ask" || value === "deny"
+    ? value
+    : undefined;
 }
 
 async function cmdRename(args: string[]): Promise<number> {
@@ -1829,6 +2137,25 @@ function parseEnv(pairs: string[]): Record<string, string> | undefined {
   return env;
 }
 
+function parseConfigValues(
+  pairs: string[],
+): Record<string, string> | undefined {
+  if (pairs.length === 0) return undefined;
+  const config: Record<string, string> = {};
+  for (const pair of pairs) {
+    const equals = pair.indexOf("=");
+    if (equals <= 0) {
+      throw usageError(`--config expects KEY=VALUE, got "${pair}"`);
+    }
+    const key = pair.slice(0, equals);
+    if (!/^[A-Za-z0-9_.-]{1,100}$/.test(key)) {
+      throw usageError(`--config key "${key}" is not a valid option id`);
+    }
+    config[key] = pair.slice(equals + 1);
+  }
+  return config;
+}
+
 function collectSubtree(target: SessionView, sessions: SessionView[]): SessionView[] {
   const allowed = new Set<string>([target.id]);
   let changed = true;
@@ -1994,6 +2321,9 @@ Usage:
   hlao close [<id>] [--force] [--tree]         end a session
   hlao permit [<id>] --allow|--deny|--option ID  answer a permission request
   hlao mode [<id>] [modeId]                    read or switch a provider mode
+  hlao policy [<id>] [allow|ask|deny]          read or set the live permission policy
+  hlao option [<id>] [key value]               read or set provider config options
+  hlao queue [<id>] | queue drop [<id>] N      inspect or drop queued prompts
   hlao rename <id> <name> | --clear            label a session
   hlao agents [--cwd DIR]                      configured backends (local)
   hlao status [--start]                        supervisor state without starting one
@@ -2054,6 +2384,9 @@ const COMMAND_HELP_NAMES = new Set([
   "close",
   "permit",
   "mode",
+  "policy",
+  "option",
+  "queue",
   "rename",
   "agents",
   "status",
@@ -2081,6 +2414,8 @@ Options:
   --wait                 wait for the first turn to end
   --timeout DUR          bound the first-turn wait (0 = no bound)
   --mode ID              provider permission mode (see "hlao mode <id>")
+  --model VALUE          select the model category of provider config options
+  --config KEY=VALUE     set a provider config option (repeatable)
   --parent SESSION       spawn under another visible session
   --permission POLICY    allow (default), ask, or deny
   --env K=V              extra environment for the adapter (repeatable)
@@ -2139,17 +2474,19 @@ agent sees itself and its descendants, and an operator sees all. The footer
 reports the scope, and a scoped view marks the caller's own session with *.
 --all includes sessions that have closed but are still retained for reading.
 --cwd filters to one working directory.`,
-    cancel: `hlao cancel [<id>]
+    cancel: `hlao cancel [<id>] [--keep-queue]
 
-Request ACP session/cancel for the active turn and discard queued messages.
-The session survives. Queued messages settle as cancelled. Inside a session,
-omit <id> or pass --self.`,
+Request ACP session/cancel for the active turn. By default every queued message
+is discarded as well; --keep-queue stops only the active turn and lets the next
+queued message run. The session survives. Inside a session, omit <id> or pass
+--self.`,
     close: `hlao close [<id>] [--force] [--tree]
 
 Close a session. ACP session/close is attempted when advertised, then the
 adapter process is terminated. --force skips the protocol close. --tree closes
 this session's descendants first (a CLI assembly over list + close). Inside a
-session, omit <id> or pass --self.`,
+session, omit <id> or pass --self. Closing discards the session's queued
+messages and, once retention ends, its in-memory history.`,
     permit: `hlao permit [<id>] --allow|--deny|--option ID [--always]
 
 Answer the session's pending permission request. --allow picks the first allow
@@ -2169,6 +2506,31 @@ Without modeId: print the current mode and the available modes.
 With modeId: request session/set_mode and report the result.
 Inside a session, omit <id> to read your own; use --self <modeId> to set it.
 `,
+    policy: `hlao policy [<id>] [allow|ask|deny]
+
+Read a session's live HLAO permission policy, or set it without needing a
+pending request. allow answers provider requests automatically, ask parks them,
+and deny rejects them. Inside a session, omit <id> to read your own policy or
+use --self <policy> to set it; a parent may set a descendant's policy.
+
+permit --always is equivalent to answering the current request and setting the
+policy to allow.`,
+    option: `hlao option [<id>] [key value]
+
+Read or set a provider-advertised session config option (model, reasoning
+effort, and adapter-specific settings). Values shown with "current" come from
+ACP session/new and config_option_update.
+
+Without key value: print every option and its selectable values.
+With key value: request session/set_config_option. Boolean options accept
+true/false. Inside a session, use --self or --self <key> <value>.`,
+    queue: `hlao queue [<id>] [--self]
+hlao queue drop [<id>] <position> [--self]
+
+List queued prompts with sender, age, and a bounded text preview, or drop one
+position (1 is the next message to run). Dropping settles that caller as
+cancelled. Inside a session, omit <id> or pass --self. Cancel with --keep-queue
+stops only the active turn.`,
     rename: `hlao rename <id> <name> [--clear]
 
 Give a session an operator-facing name. A unique name can then be used anywhere

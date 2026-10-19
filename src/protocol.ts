@@ -72,6 +72,23 @@ export interface SessionModeOption {
   description?: string;
 }
 
+export interface SessionConfigValueView {
+  value: string;
+  name: string;
+  description?: string;
+  group?: string;
+}
+
+export interface SessionConfigOptionView {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: "select" | "boolean";
+  currentValue: string | boolean;
+  values: SessionConfigValueView[];
+}
+
 export interface SessionModes {
   currentModeId: string;
   availableModes: SessionModeOption[];
@@ -90,6 +107,7 @@ export interface SessionView {
   lastActivityAt: string;
   endedAt: string | null;
   turn: number;
+  turnStartedAt: string | null;
   queued: number;
   lastSeq: number;
   pendingPermission: PermissionView | null;
@@ -99,6 +117,7 @@ export interface SessionView {
   exit: { code: number | null; signal: string | null } | null;
   permissionPolicy: PermissionPolicy;
   modes: SessionModes | null;
+  configOptions: SessionConfigOptionView[] | null;
 }
 
 export interface EventView {
@@ -152,6 +171,10 @@ export const METHODS = [
   "sessions.close",
   "sessions.permit",
   "sessions.set_mode",
+  "sessions.set_policy",
+  "sessions.set_config_option",
+  "sessions.queue",
+  "sessions.queue_drop",
   "sessions.rename",
   "supervisor.reload",
   "supervisor.shutdown",
@@ -183,6 +206,8 @@ export interface SpawnParams {
   wait?: boolean;
   timeoutMs?: number;
   mode?: string;
+  model?: string;
+  config?: Record<string, string | boolean>;
   parentSessionId?: string;
   permissionPolicy?: PermissionPolicy;
   env?: Record<string, string>;
@@ -255,6 +280,7 @@ export interface WaitResult {
 }
 export interface CancelParams {
   sessionId: string;
+  keepQueue?: boolean;
 }
 export interface CancelResult {
   session: SessionView;
@@ -279,13 +305,53 @@ export interface PermitResult {
   session: SessionView;
   requestId: string;
   optionId: string;
-  by: "operator";
+  by: string;
+}
+export interface SetPolicyParams {
+  sessionId: string;
+  permissionPolicy: PermissionPolicy;
+}
+export interface SetPolicyResult {
+  session: SessionView;
+}
+export interface QueueItemView {
+  position: number | null;
+  textPreview: string;
+  textLength: number;
+  from: string;
+  queuedMs: number;
+  turn: number | null;
+}
+export interface QueueParams {
+  sessionId: string;
+}
+export interface QueueResult {
+  session: SessionView;
+  active: QueueItemView | null;
+  queue: QueueItemView[];
+}
+export interface QueueDropParams {
+  sessionId: string;
+  position: number;
+}
+export interface QueueDropResult {
+  session: SessionView;
+  dropped: QueueItemView;
+  discarded: number;
 }
 export interface SetModeParams {
   sessionId: string;
   modeId: string;
 }
 export interface SetModeResult {
+  session: SessionView;
+}
+export interface SetConfigOptionParams {
+  sessionId: string;
+  configId: string;
+  value: string | boolean;
+}
+export interface SetConfigOptionResult {
   session: SessionView;
 }
 export interface RenameParams {
@@ -320,6 +386,10 @@ type ParamsByMethod = {
   "sessions.close": CloseParams;
   "sessions.permit": PermitParams;
   "sessions.set_mode": SetModeParams;
+  "sessions.set_policy": SetPolicyParams;
+  "sessions.set_config_option": SetConfigOptionParams;
+  "sessions.queue": QueueParams;
+  "sessions.queue_drop": QueueDropParams;
   "sessions.rename": RenameParams;
   "supervisor.reload": ReloadParams;
   "supervisor.shutdown": ShutdownParams;
@@ -415,6 +485,20 @@ function optInt(
   return value;
 }
 
+function reqInt(
+  object: JsonObject,
+  key: string,
+  what: string,
+  min: number,
+  max: number,
+): number {
+  const value = optInt(object, key, what, min, max);
+  if (value === undefined) {
+    throw new HlaoError("bad_request", `${what}.${key} is required`);
+  }
+  return value;
+}
+
 function optEnum<T extends string>(
   object: JsonObject,
   key: string,
@@ -430,6 +514,19 @@ function optEnum<T extends string>(
     );
   }
   return value as T;
+}
+
+function reqEnum<T extends string>(
+  object: JsonObject,
+  key: string,
+  what: string,
+  allowed: readonly T[],
+): T {
+  const value = optEnum(object, key, what, allowed);
+  if (value === undefined) {
+    throw new HlaoError("bad_request", `${what}.${key} is required`);
+  }
+  return value;
 }
 
 function absolutePath(value: string | undefined, what: string): string | undefined {
@@ -459,6 +556,46 @@ function stringRecord(
     }
     if (typeof entry !== "string" || entry.length > 32_768) {
       throw new HlaoError("bad_request", `${what}.${key}.${name} must be a string`);
+    }
+    result[name] = entry;
+  }
+  return result;
+}
+
+function configRecord(
+  object: JsonObject,
+  key: string,
+  what: string,
+): Record<string, string | boolean> | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  const record = asObject(value, `${what}.${key}`);
+  const entries = Object.entries(record);
+  if (entries.length > 50) {
+    throw new HlaoError(
+      "bad_request",
+      `${what}.${key} must have at most 50 entries`,
+    );
+  }
+  const result: Record<string, string | boolean> = {};
+  for (const [name, entry] of entries) {
+    if (!/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key} has an invalid option name "${name}"`,
+      );
+    }
+    if (typeof entry !== "string" && typeof entry !== "boolean") {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key}.${name} must be a string or boolean`,
+      );
+    }
+    if (typeof entry === "string" && entry.length > 500) {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key}.${name} is too long`,
+      );
     }
     result[name] = entry;
   }
@@ -521,6 +658,8 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           "wait",
           "timeoutMs",
           "mode",
+          "model",
+          "config",
           "parentSessionId",
           "permissionPolicy",
           "env",
@@ -539,6 +678,8 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         wait: optBoolean(object, "wait", what),
         timeoutMs: optInt(object, "timeoutMs", what, 0, MAX_TIMEOUT_MS),
         mode: optString(object, "mode", what, 100),
+        model: optString(object, "model", what, 200),
+        config: configRecord(object, "config", what),
         parentSessionId: optString(object, "parentSessionId", what, 64),
         permissionPolicy: optEnum(object, "permissionPolicy", what, [
           "ask",
@@ -556,12 +697,19 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         cwd: absolutePath(optString(object, "cwd", what, 1_000), `${what}.cwd`),
       } as ParamsByMethod[M];
     }
-    case "sessions.get":
-    case "sessions.cancel": {
+    case "sessions.get": {
       const object = asObject(raw, what);
       checkKeys(object, ["sessionId"], what);
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
+      } as ParamsByMethod[M];
+    }
+    case "sessions.cancel": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId", "keepQueue"], what);
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+        keepQueue: optBoolean(object, "keepQueue", what),
       } as ParamsByMethod[M];
     }
     case "sessions.send": {
@@ -620,6 +768,55 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
         modeId: reqString(object, "modeId", what, 1, 100),
+      } as ParamsByMethod[M];
+    }
+    case "sessions.set_policy": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId", "permissionPolicy"], what);
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+        permissionPolicy: reqEnum(object, "permissionPolicy", what, [
+          "ask",
+          "allow",
+          "deny",
+        ] as const),
+      } as ParamsByMethod[M];
+    }
+    case "sessions.set_config_option": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId", "configId", "value"], what);
+      const value = object.value;
+      if (typeof value !== "string" && typeof value !== "boolean") {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.value must be a string or boolean`,
+        );
+      }
+      if (typeof value === "string" && value.length > 500) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.value must be at most 500 characters`,
+        );
+      }
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+        configId: reqString(object, "configId", what, 1, 100),
+        value,
+      } as ParamsByMethod[M];
+    }
+    case "sessions.queue": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId"], what);
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+      } as ParamsByMethod[M];
+    }
+    case "sessions.queue_drop": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId", "position"], what);
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+        position: reqInt(object, "position", what, 1, 1_000),
       } as ParamsByMethod[M];
     }
     case "sessions.rename": {

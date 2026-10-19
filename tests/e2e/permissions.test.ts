@@ -192,7 +192,8 @@ test("cancel resolves a pending permission instead of leaving it hanging", async
     (event) => event.type === "permission.resolved",
   );
   assert.equal(resolved?.data.optionId, null);
-  assert.equal(resolved?.data.by, "cancel");
+  assert.equal(resolved?.data.by, "operator");
+  assert.equal(resolved?.data.reason, "cancel");
   assert.ok(
     read.value.events.some(
       (event) =>

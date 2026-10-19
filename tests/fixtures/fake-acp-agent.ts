@@ -23,6 +23,36 @@ const doneAt = Number(process.env.FAKE_DONE_AT ?? 2);
 let nextSession = 0;
 let cancelActive: (() => void) | null = null;
 let currentMode = "default";
+let promptCount = 0;
+let configValues: Record<string, string | boolean> = {
+  model: "sonnet",
+  verbose: false,
+};
+
+function configOptions(): Array<Record<string, unknown>> {
+  return [
+    {
+      type: "select",
+      id: "model",
+      name: "Model",
+      description: "Provider model",
+      category: "model",
+      currentValue: String(configValues.model),
+      options: [
+        { value: "sonnet", name: "Sonnet", description: "balanced" },
+        { value: "opus", name: "Opus", description: "deep" },
+      ],
+    },
+    {
+      type: "boolean",
+      id: "verbose",
+      name: "Verbose",
+      description: "Emit extra diagnostics",
+      category: "model_config",
+      currentValue: Boolean(configValues.verbose),
+    },
+  ];
+}
 
 const availableModes = [
   { id: "default", name: "Manual", description: "Always ask" },
@@ -59,6 +89,8 @@ const app = agent({ name: "fake-acp" })
         currentModeId: currentMode,
         availableModes,
       },
+      configOptions:
+        process.env.FAKE_NO_CONFIG === "1" ? undefined : (configOptions() as never),
       _meta: { cwd: params.cwd },
     };
   })
@@ -72,6 +104,18 @@ const app = agent({ name: "fake-acp" })
       } as never,
     });
     return {};
+  })
+  .onRequest("session/set_config_option", async ({ params, client }) => {
+    configValues = { ...configValues, [params.configId]: params.value };
+    const options = configOptions();
+    await client.notify("session/update", {
+      sessionId: params.sessionId,
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: options,
+      } as never,
+    });
+    return { configOptions: options as never };
   })
   .onRequest("session/list", () => ({ sessions: [] }))
   .onRequest("session/close", () => ({}))
@@ -89,6 +133,21 @@ const app = agent({ name: "fake-acp" })
         sessionId,
         update: update as never,
       });
+
+    promptCount += 1;
+    if (mode === "slow-first" && promptCount > 1) {
+      await send({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "working…" },
+        messageId: "m1",
+      });
+      await send({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "stopped: end_turn" },
+        messageId: "m2",
+      });
+      return { stopReason: "end_turn" };
+    }
 
     const message = (content: string, messageId = "m1"): Promise<void> =>
       send({
@@ -135,7 +194,7 @@ const app = agent({ name: "fake-acp" })
       return { stopReason: "end_turn" };
     }
 
-    if (mode === "slow" || mode === "never") {
+    if (mode === "slow" || mode === "never" || mode === "slow-first") {
       await message("working…");
       const stop = await new Promise<StopReason>((resolve) => {
         if (mode === "slow") {

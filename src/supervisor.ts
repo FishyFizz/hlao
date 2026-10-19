@@ -41,6 +41,10 @@ import {
   type ListResult,
   type PermitParams,
   type PermitResult,
+  type QueueDropParams,
+  type QueueDropResult,
+  type QueueParams,
+  type QueueResult,
   type ReadParams,
   type ReadResult,
   type ReloadParams,
@@ -51,8 +55,12 @@ import {
   type SendResult,
   type RenameParams,
   type RenameResult,
+  type SetConfigOptionParams,
+  type SetConfigOptionResult,
   type SetModeParams,
   type SetModeResult,
+  type SetPolicyParams,
+  type SetPolicyResult,
   type ShutdownParams,
   type ShutdownResult,
   type SpawnParams,
@@ -61,6 +69,10 @@ import {
   type WaitResult,
 } from "./protocol.js";
 import { Session } from "./session.js";
+
+function actor(caller: string | null): string {
+  return caller ?? "operator";
+}
 
 export class AlreadyRunningError extends Error {
   override readonly name = "AlreadyRunningError";
@@ -423,6 +435,14 @@ export class SupervisorServer {
         return this.#permit(params as PermitParams, caller);
       case "sessions.set_mode":
         return this.#setMode(params as SetModeParams, caller);
+      case "sessions.set_policy":
+        return this.#setPolicy(params as SetPolicyParams, caller);
+      case "sessions.set_config_option":
+        return this.#setConfigOption(params as SetConfigOptionParams, caller);
+      case "sessions.queue":
+        return this.#queue(params as QueueParams, caller);
+      case "sessions.queue_drop":
+        return this.#queueDrop(params as QueueDropParams, caller);
       case "sessions.rename":
         return this.#rename(params as RenameParams, caller);
       case "supervisor.reload":
@@ -533,9 +553,27 @@ export class SupervisorServer {
 
     if (params.mode !== undefined) {
       try {
-        await session.setMode(params.mode);
+        await session.setMode(params.mode, actor(caller));
       } catch (error) {
-        await session.close(true);
+        await session.close(true, actor(caller));
+        throw error;
+      }
+    }
+
+    if (params.model !== undefined) {
+      try {
+        await session.setModel(params.model, actor(caller));
+      } catch (error) {
+        await session.close(true, actor(caller));
+        throw error;
+      }
+    }
+
+    for (const [configId, value] of Object.entries(params.config ?? {})) {
+      try {
+        await session.setConfigOption(configId, value, actor(caller));
+      } catch (error) {
+        await session.close(true, actor(caller));
         throw error;
       }
     }
@@ -556,6 +594,7 @@ export class SupervisorServer {
           params.prompt,
           params.wait ?? false,
           params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
+          actor(caller),
         );
         if (params.wait) {
           result.firstTurn = {
@@ -603,11 +642,12 @@ export class SupervisorServer {
   }
 
   async #send(params: SendParams, caller: string | null): Promise<SendResult> {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolveSendTarget(caller, params.sessionId);
     const sent = await session.send(
       params.text,
       params.wait ?? false,
       params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
+      actor(caller),
     );
     return {
       session: session.view(),
@@ -659,13 +699,19 @@ export class SupervisorServer {
 
   async #cancel(params: CancelParams, caller: string | null): Promise<CancelResult> {
     const session = this.#resolve(caller, params.sessionId);
-    const { discarded } = await session.cancel();
+    const { discarded } = await session.cancel(
+      params.keepQueue ?? false,
+      actor(caller),
+    );
     return { session: session.view(), discarded };
   }
 
   async #close(params: CloseParams, caller: string | null): Promise<CloseResult> {
     const session = this.#resolve(caller, params.sessionId);
-    const { killed, wasTerminal } = await session.close(params.force ?? false);
+    const { killed, wasTerminal } = await session.close(
+      params.force ?? false,
+      actor(caller),
+    );
     return { session: session.view(), killed, wasTerminal };
   }
 
@@ -675,24 +721,55 @@ export class SupervisorServer {
       params.optionId,
       params.requestId,
       params.always ?? false,
+      actor(caller),
     );
     return {
       session: session.view(),
       requestId: resolved.requestId,
       optionId: resolved.optionId,
-      by: "operator",
+      by: actor(caller),
     };
   }
 
   async #setMode(params: SetModeParams, caller: string | null): Promise<SetModeResult> {
     const session = this.#resolve(caller, params.sessionId);
-    await session.setMode(params.modeId);
+    await session.setMode(params.modeId, actor(caller));
     return { session: session.view() };
+  }
+
+  #setPolicy(params: SetPolicyParams, caller: string | null): SetPolicyResult {
+    const session = this.#resolve(caller, params.sessionId);
+    session.setPolicy(params.permissionPolicy, actor(caller));
+    return { session: session.view() };
+  }
+
+  async #setConfigOption(
+    params: SetConfigOptionParams,
+    caller: string | null,
+  ): Promise<SetConfigOptionResult> {
+    const session = this.#resolve(caller, params.sessionId);
+    await session.setConfigOption(params.configId, params.value, actor(caller));
+    return { session: session.view() };
+  }
+
+  #queue(params: QueueParams, caller: string | null): QueueResult {
+    const session = this.#resolve(caller, params.sessionId);
+    const { active, queue } = session.queueView();
+    return { session: session.view(), active, queue };
+  }
+
+  #queueDrop(params: QueueDropParams, caller: string | null): QueueDropResult {
+    const session = this.#resolve(caller, params.sessionId);
+    const { dropped, discarded } = session.dropQueued(
+      params.position,
+      actor(caller),
+    );
+    return { session: session.view(), dropped, discarded };
   }
 
   #rename(params: RenameParams, caller: string | null): RenameResult {
     const session = this.#resolve(caller, params.sessionId);
-    session.setName(params.name);
+    session.setName(params.name, actor(caller));
     return { session: session.view() };
   }
 
@@ -755,6 +832,32 @@ export class SupervisorServer {
       }
     }
     return all.filter((session) => allowed.has(session.id));
+  }
+
+  /**
+   * The one deliberate exception to visibility: a session may send a message
+   * to its direct parent, so a finding or a blocking question can travel upward.
+   * Reads, waits, cancel, close, and permit remain forbidden on ancestors.
+   */
+  #resolveSendTarget(caller: string | null, token: string): Session {
+    try {
+      return this.#resolve(caller, token);
+    } catch (error) {
+      if (caller === null) throw error;
+      const self = this.#sessions.get(caller);
+      const parent = self?.parentId
+        ? this.#sessions.get(self.parentId)
+        : undefined;
+      if (!parent) throw error;
+      if (token === parent.id || token === parent.name) return parent;
+      const prefixMatches = [...this.#sessions.values()].filter((session) =>
+        session.id.startsWith(token),
+      );
+      if (prefixMatches.length === 1 && prefixMatches[0] === parent) {
+        return parent;
+      }
+      throw error;
+    }
   }
 
   #resolve(caller: string | null, token: string): Session {

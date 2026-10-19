@@ -7,6 +7,7 @@ import type {
   PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionConfigOption,
   SessionNotification,
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
@@ -20,6 +21,9 @@ import type {
   EventView,
   PermissionPolicy,
   PermissionView,
+  QueueItemView,
+  SessionConfigOptionView,
+  SessionConfigValueView,
   SessionModes,
   SessionStatus,
   SessionView,
@@ -95,6 +99,7 @@ export interface WaitResult {
 
 interface QueueItem {
   text: string;
+  from: string;
   enqueuedAt: number;
   turn: number | null;
   wasQueued: boolean;
@@ -133,9 +138,11 @@ export class Session {
   #agentSessionId: string | null = null;
   #caps: AgentCapabilities = {};
   #modes: SessionModes | null = null;
+  #configOptions: SessionConfigOptionView[] | null = null;
   #log: EventLog;
   #status: SessionStatus = "starting";
   #turn = 0;
+  #turnStartedAt: string | null = null;
   #queue: QueueItem[] = [];
   #active: QueueItem | null = null;
   #pumping = false;
@@ -147,6 +154,7 @@ export class Session {
   #endedAt: string | null = null;
   #exit: { code: number | null; signal: string | null } | null = null;
   #closing = false;
+  #closingBy: string | null = null;
   #cancelling = false;
   #ready = false;
   #waiters = new Set<() => void>();
@@ -210,6 +218,7 @@ export class Session {
       lastActivityAt: this.#lastActivityAt,
       endedAt: this.#endedAt,
       turn: this.#turn,
+      turnStartedAt: this.#turnStartedAt,
       queued: this.#queue.length,
       lastSeq: this.#log.lastSeq,
       pendingPermission: pending
@@ -226,6 +235,12 @@ export class Session {
             availableModes: this.#modes.availableModes.map((mode) => ({ ...mode })),
           }
         : null,
+      configOptions: this.#configOptions
+        ? this.#configOptions.map((option) => ({
+            ...option,
+            values: option.values.map((value) => ({ ...value })),
+          }))
+        : null,
     };
   }
 
@@ -233,7 +248,12 @@ export class Session {
   // prompt queue
   // -------------------------------------------------------------------------
 
-  async send(text: string, wait: boolean, timeoutMs: number): Promise<SendResult> {
+  async send(
+    text: string,
+    wait: boolean,
+    timeoutMs: number,
+    from = "operator",
+  ): Promise<SendResult> {
     if (this.isTerminal || this.#closing) {
       throw new HlaoError(
         "session_closed",
@@ -253,14 +273,16 @@ export class Session {
       );
     }
 
-    const item = createQueueItem(text);
+    const item = createQueueItem(text, from);
     const queuedAhead = this.#active !== null;
     item.wasQueued = queuedAhead;
     this.#queue.push(item);
     if (queuedAhead) {
       this.#emit("prompt.queued", {
         position: this.#queue.length + (this.#active ? 1 : 0),
+        textPreview: previewText(text),
         textLength: text.length,
+        from,
       });
     }
     void this.#pump();
@@ -319,12 +341,14 @@ export class Session {
         this.#turnText = "";
         this.#lastMessageId = null;
         this.#status = "busy";
+        this.#turnStartedAt = nowIso();
         this.#lastStopReason = null;
         const waitedMs = Date.now() - item.enqueuedAt;
         this.#emit(
           "prompt.sent",
           {
             text: item.text,
+            from: item.from,
             wasQueued: item.wasQueued,
             waitedMs,
             queuedMs: waitedMs,
@@ -390,6 +414,7 @@ export class Session {
       this.#turnText = "";
       if (!this.isTerminal) {
         this.#status = this.#pending ? "waiting_permission" : "idle";
+        if (!this.#pending) this.#turnStartedAt = null;
         this.#changed();
         void this.#pump();
       }
@@ -412,11 +437,14 @@ export class Session {
     item.settle(completion);
   }
 
-  #discardQueue(reason: "cancel" | "close"): number {
+  #discardQueue(reason: "cancel" | "close" | "failed", by: string): number {
     const items = this.#queue.splice(0);
     for (const item of items) {
       this.#emit("prompt.discarded", {
         text: item.text,
+        textPreview: previewText(item.text),
+        from: item.from,
+        by,
         queuedMs: Date.now() - item.enqueuedAt,
         reason,
       });
@@ -506,13 +534,20 @@ export class Session {
   // cancel, close, permissions
   // -------------------------------------------------------------------------
 
-  async cancel(): Promise<{ discarded: number }> {
+  async cancel(
+    keepQueue = false,
+    by = "operator",
+  ): Promise<{ discarded: number }> {
     if (this.isTerminal) return { discarded: 0 };
-    const discarded = this.#discardQueue("cancel");
-    this.#clearPending("cancel");
+    const discarded = keepQueue ? 0 : this.#discardQueue("cancel", by);
+    this.#clearPending("cancel", by);
     if (this.#active) {
       this.#cancelling = true;
-      this.#emit("cancel.requested", { turn: this.#active.turn });
+      this.#emit("cancel.requested", {
+        turn: this.#active.turn,
+        by,
+        keepQueue,
+      });
       try {
         await this.#conn?.agent.notify("session/cancel", {
           sessionId: this.#agentSessionId!,
@@ -524,11 +559,15 @@ export class Session {
     return { discarded };
   }
 
-  async close(force = false): Promise<{ killed: boolean; wasTerminal: boolean }> {
+  async close(
+    force = false,
+    by = "operator",
+  ): Promise<{ killed: boolean; wasTerminal: boolean }> {
     if (this.isTerminal) return { killed: false, wasTerminal: true };
     this.#closing = true;
-    this.#discardQueue("close");
-    this.#clearPending("close");
+    this.#closingBy = by;
+    this.#discardQueue("close", by);
+    this.#clearPending("close", by);
 
     if (!force && this.#conn && this.#agentSessionId) {
       const canClose = this.#caps.sessionCapabilities?.close !== undefined &&
@@ -608,7 +647,7 @@ export class Session {
       }
     }
 
-    this.#finalize("closed");
+    this.#finalize("closed", undefined, by);
     return { killed, wasTerminal: false };
   }
 
@@ -616,6 +655,7 @@ export class Session {
     optionId?: string,
     requestId?: string,
     always = false,
+    by = "operator",
   ): { requestId: string; optionId: string } {
     const pending = this.#pending;
     if (!pending) {
@@ -680,17 +720,13 @@ export class Session {
       this.#status = this.#active ? "busy" : "idle";
     }
     if (always) {
-      this.#permissionPolicy = "allow";
-      this.#emit("policy.changed", {
-        permissionPolicy: "allow",
-        by: "operator",
-      });
+      this.#changePolicy("allow", by);
     }
     this.#emit("permission.resolved", {
       requestId: pending.requestId,
       optionId: chosen.optionId,
       optionName: chosen.name,
-      by: "operator",
+      by,
     });
     pending.resolve(selectedResponse(chosen.optionId));
     this.#changed();
@@ -698,7 +734,7 @@ export class Session {
   }
 
   /** Changes the operator-facing label. The id and env identity do not change. */
-  setName(name: string | null): void {
+  setName(name: string | null, by = "operator"): void {
     if (this.isTerminal || this.#closing) {
       throw new HlaoError("session_closed", `session ${this.id} is closing`);
     }
@@ -706,12 +742,27 @@ export class Session {
       throw new HlaoError("bad_request", "a session name must not be empty; pass null to clear");
     }
     this.#name = name;
-    this.#emit("session.renamed", { name });
+    this.#emit("session.renamed", { name, by });
+    this.#changed();
+  }
+
+  /** Reads or writes the live HLAO permission policy. */
+  setPolicy(policy: PermissionPolicy, by = "operator"): void {
+    if (this.isTerminal || this.#closing) {
+      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+    }
+    this.#changePolicy(policy, by);
+  }
+
+  #changePolicy(policy: PermissionPolicy, by: string): void {
+    if (this.#permissionPolicy === policy) return;
+    this.#permissionPolicy = policy;
+    this.#emit("policy.changed", { permissionPolicy: policy, by });
     this.#changed();
   }
 
   /** Switches a provider-native mode when the backend advertises modes. */
-  async setMode(modeId: string): Promise<SessionModes> {
+  async setMode(modeId: string, by = "operator"): Promise<SessionModes> {
     if (this.isTerminal || this.#closing) {
       throw new HlaoError("session_closed", `session ${this.id} is closing`);
     }
@@ -735,10 +786,139 @@ export class Session {
         modeId,
       });
       this.#modes = { ...this.#modes, currentModeId: modeId };
-      this.#emit("mode", { currentModeId: modeId, by: "operator" });
+      this.#emit("mode", { currentModeId: modeId, by });
       this.#changed();
     }
     return this.#modes;
+  }
+
+  /** Sets a provider-advertised session config option. */
+  async setConfigOption(
+    configId: string,
+    value: string | boolean,
+    by = "operator",
+  ): Promise<SessionConfigOptionView[]> {
+    if (this.isTerminal || this.#closing) {
+      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+    }
+    if (!this.#ready || !this.#conn || !this.#agentSessionId) {
+      throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);
+    }
+    const options = this.#configOptions;
+    const option = options?.find((candidate) => candidate.id === configId);
+    if (!option) {
+      throw new HlaoError(
+        "bad_request",
+        `config option "${configId}" is not advertised` +
+          (options && options.length > 0
+            ? `; available: ${options.map((candidate) => candidate.id).join(", ")}`
+            : ""),
+      );
+    }
+    let resolvedValue: string | boolean = value;
+    if (option.type === "boolean") {
+      if (typeof value === "string" && (value === "true" || value === "false")) {
+        resolvedValue = value === "true";
+      }
+      if (typeof resolvedValue !== "boolean") {
+        throw new HlaoError(
+          "bad_request",
+          `config option "${configId}" takes true or false`,
+        );
+      }
+    } else {
+      if (typeof value !== "string") {
+        throw new HlaoError(
+          "bad_request",
+          `config option "${configId}" takes a value id`,
+        );
+      }
+      if (!option.values.some((candidate) => candidate.value === value)) {
+        throw new HlaoError(
+          "bad_option",
+          `value "${value}" is not offered by config option "${configId}"`,
+          {
+            options: option.values.map((candidate) => ({
+              optionId: candidate.value,
+              name: candidate.name,
+              kind: "value",
+            })),
+          },
+        );
+      }
+    }
+
+    const response = await this.#conn.agent.request(
+      "session/set_config_option",
+      typeof resolvedValue === "boolean"
+        ? {
+            sessionId: this.#agentSessionId,
+            configId,
+            type: "boolean" as const,
+            value: resolvedValue,
+          }
+        : { sessionId: this.#agentSessionId, configId, value: resolvedValue },
+    );
+    this.#configOptions = toConfigOptionViews(response.configOptions);
+    this.#emit("config", { configOptions: this.#configOptions, by });
+    this.#changed();
+    return this.#configOptions ?? [];
+  }
+
+  /** Selects a value from the option whose category is `model`. */
+  async setModel(model: string, by = "operator"): Promise<SessionConfigOptionView[]> {
+    const option = this.#configOptions?.find(
+      (candidate) => candidate.category === "model",
+    );
+    if (!option) {
+      throw new HlaoError(
+        "bad_request",
+        `backend "${this.backend}" does not advertise a model option`,
+      );
+    }
+    return await this.setConfigOption(option.id, model, by);
+  }
+
+  queueView(): { active: QueueItemView | null; queue: QueueItemView[] } {
+    return {
+      active: this.#active ? queueItemView(this.#active, null) : null,
+      queue: this.#queue.map((item, index) => queueItemView(item, index + 1)),
+    };
+  }
+
+  dropQueued(
+    position: number,
+    by = "operator",
+  ): { dropped: QueueItemView; discarded: number } {
+    const index = position - 1;
+    if (index < 0 || index >= this.#queue.length) {
+      throw new HlaoError(
+        "bad_request",
+        `queue position ${position} is out of range (1..${this.#queue.length})`,
+      );
+    }
+    const [item] = this.#queue.splice(index, 1);
+    if (!item) {
+      throw new HlaoError("bad_request", `queue position ${position} is empty`);
+    }
+    this.#emit("prompt.discarded", {
+      text: item.text,
+      textPreview: previewText(item.text),
+      from: item.from,
+      by,
+      queuedMs: Date.now() - item.enqueuedAt,
+      reason: "dropped",
+      position,
+    });
+    this.#settleItem(item, {
+      ok: true,
+      turn: null,
+      stopReason: "cancelled",
+      text: "",
+      cancelledBeforeStart: true,
+    });
+    this.#changed();
+    return { dropped: queueItemView(item, position), discarded: 1 };
   }
 
   #onPermission(
@@ -804,7 +984,7 @@ export class Session {
     });
   }
 
-  #clearPending(by: string): void {
+  #clearPending(reason: string, by = "system"): void {
     const pending = this.#pending;
     if (!pending) return;
     this.#pending = null;
@@ -815,6 +995,7 @@ export class Session {
       requestId: pending.requestId,
       optionId: null,
       by,
+      reason,
     });
     pending.resolve(cancelledResponse());
     this.#changed();
@@ -888,6 +1069,7 @@ export class Session {
           this.#finalize(
             this.#closing ? "closed" : "failed",
             new Error(`adapter process error: ${describeError(error)}`),
+            this.#closing ? this.#closingBy ?? "system" : "system",
           );
         }
       });
@@ -989,6 +1171,7 @@ export class Session {
         })),
       };
     }
+    this.#configOptions = toConfigOptionViews(created.configOptions);
     this.#ready = true;
     this.#status = "idle";
     this.#emit("session.initialized", {
@@ -1024,6 +1207,20 @@ export class Session {
       if (messageId !== null) this.#lastMessageId = messageId;
     }
     const mapped = projectUpdate(update);
+    if (
+      mapped.type === "config" &&
+      update.sessionUpdate === "config_option_update"
+    ) {
+      this.#configOptions = toConfigOptionViews(update.configOptions);
+      mapped.data.configOptions = this.#configOptions;
+      mapped.data.by = "agent";
+    }
+    if (
+      mapped.type === "mode" &&
+      update.sessionUpdate === "current_mode_update"
+    ) {
+      mapped.data.by = "agent";
+    }
     if (mapped.textDelta) this.#turnText += mapped.textDelta;
     const event = this.#emit(
       mapped.type,
@@ -1038,7 +1235,7 @@ export class Session {
   #onConnectionClosed(error?: unknown): void {
     if (this.isTerminal) return;
     if (this.#closing) {
-      this.#finalize("closed");
+      this.#finalize("closed", undefined, this.#closingBy ?? "system");
       return;
     }
     const reason = error ? describeError(error) : "ACP connection closed";
@@ -1051,7 +1248,7 @@ export class Session {
     this.#exit = { code, signal };
     if (this.isTerminal) return;
     if (this.#closing) {
-      this.#finalize("closed");
+      this.#finalize("closed", undefined, this.#closingBy ?? "system");
       return;
     }
     const detail = `adapter exited (${signal ?? code ?? "unknown"})${this.#stderrSuffix()}`;
@@ -1059,11 +1256,16 @@ export class Session {
     this.#finalize("failed", new Error(detail));
   }
 
-  #finalize(status: "closed" | "failed", error?: Error): void {
+  #finalize(
+    status: "closed" | "failed",
+    error?: Error,
+    by = "system",
+  ): void {
     if (this.isTerminal) return;
     this.#status = status;
     this.#endedAt = nowIso();
     this.#lastActivityAt = this.#endedAt;
+    this.#turnStartedAt = null;
 
     const cancelledCompletion: PromptCompletion = {
       ok: status === "closed",
@@ -1079,7 +1281,7 @@ export class Session {
           : undefined,
     };
 
-    this.#clearPending(status);
+    this.#clearPending(status, by);
 
     if (this.#active) {
       const active = this.#active;
@@ -1087,11 +1289,20 @@ export class Session {
       this.#active = null;
     }
     for (const item of this.#queue.splice(0)) {
+      this.#emit("prompt.discarded", {
+        text: item.text,
+        textPreview: previewText(item.text),
+        from: item.from,
+        by,
+        queuedMs: Date.now() - item.enqueuedAt,
+        reason: status === "closed" ? "close" : "failed",
+      });
       this.#settleItem(item, cancelledCompletion);
     }
 
     this.#emit(status === "closed" ? "session.closed" : "session.failed", {
       message: error?.message ?? status,
+      by,
       exit: this.#exit,
       stderr: this.#stderrTail,
     });
@@ -1191,13 +1402,14 @@ export class Session {
 // pure helpers
 // ---------------------------------------------------------------------------
 
-function createQueueItem(text: string): QueueItem {
+function createQueueItem(text: string, from: string): QueueItem {
   let settle!: (completion: PromptCompletion) => void;
   const promise = new Promise<PromptCompletion>((resolve) => {
     settle = resolve;
   });
   return {
     text,
+    from,
     enqueuedAt: Date.now(),
     turn: null,
     wasQueued: false,
@@ -1312,6 +1524,64 @@ function chooseByPolicy(
     options.find((option) => option.kind === "reject_once") ??
     options.find((option) => option.kind === "reject_always");
   return reject ?? "cancelled";
+}
+
+const TEXT_PREVIEW_CHARS = 200;
+
+function previewText(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > TEXT_PREVIEW_CHARS
+    ? `${oneLine.slice(0, TEXT_PREVIEW_CHARS)}…`
+    : oneLine;
+}
+
+function queueItemView(item: QueueItem, position: number | null): QueueItemView {
+  return {
+    position,
+    textPreview: previewText(item.text),
+    textLength: item.text.length,
+    from: item.from,
+    queuedMs: Math.max(0, Date.now() - item.enqueuedAt),
+    turn: item.turn,
+  };
+}
+
+function toConfigOptionViews(
+  options: SessionConfigOption[] | null | undefined,
+): SessionConfigOptionView[] | null {
+  if (!options) return null;
+  return options.map((option) => {
+    const values: SessionConfigValueView[] = [];
+    if (option.type === "select") {
+      for (const entry of option.options) {
+        if ("group" in entry) {
+          for (const value of entry.options) {
+            values.push({
+              value: value.value,
+              name: value.name,
+              ...(value.description ? { description: value.description } : {}),
+              group: entry.name,
+            });
+          }
+        } else {
+          values.push({
+            value: entry.value,
+            name: entry.name,
+            ...(entry.description ? { description: entry.description } : {}),
+          });
+        }
+      }
+    }
+    return {
+      id: option.id,
+      name: option.name,
+      ...(option.description ? { description: option.description } : {}),
+      ...(option.category ? { category: option.category } : {}),
+      type: option.type,
+      currentValue: option.currentValue,
+      values,
+    };
+  });
 }
 
 function toPermissionView(

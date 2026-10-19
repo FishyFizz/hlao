@@ -49,10 +49,12 @@ renamed builder (k7m2qp)
 $ hlao spawn claude "Check whether the retry package is declared in package.json." --name check
 spawned check (3f9xw2) (claude) in D:\work\svc  parent k7m2qp  policy allow
 
-An agent sees itself and its descendants. An operator shell has no `HLAO_SESSION_ID` and sees
-everything. That scope is also the halt authority: a session can `cancel` or `close` itself
-and its descendants, never its parent or a sibling. Authority follows visibility instead of
-being granted by a separate policy.
+An agent sees itself and its descendants, and may `send` a message to its direct parent so a
+finding or a blocking question can travel upward. It cannot read, wait on, stop, or re-policy
+an ancestor. An operator shell has no `HLAO_SESSION_ID` and sees everything. That scope is also
+the halt authority: a session can `cancel` or `close` itself and its descendants, never its
+parent or a sibling. Authority follows visibility instead of being granted by a separate
+policy.
 
 ## Requirements
 
@@ -90,10 +92,13 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--follow` keeps reading; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
 | `hlao wait [<id>] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`. A timeout returns 2; a session that ended first returns 3. |
 | `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. |
-| `hlao cancel [<id>]` | Stop the active turn and discard queued messages. |
+| `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
 | `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
+| `hlao policy [<id>] [allow\|ask\|deny]` | Read or set the live HLAO permission policy. |
+| `hlao option [<id>] [key value]` | Read or set provider config options such as model and reasoning effort. |
+| `hlao queue [<id>]` / `hlao queue drop [<id>] N` | Inspect queued prompts with sender and preview, or drop one. |
 | `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the caller's scope. |
 | `hlao agents` | Configured backends, their source, config file, and whether the adapter command is present. Reads config locally; never starts a supervisor. |
 | `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. |
@@ -173,13 +178,20 @@ A provider may ask before running a tool. HLAO's `permissionPolicy` decides how 
 `hlao permit <id> --allow --always` answers the current request and switches that live
 session's policy to `allow`, so later requests are answered automatically. When the provider
 offers an allow-always option, it is preferred, which can stop the provider from asking at all
-for matching commands.
+for matching commands. `hlao policy <id> [allow|ask|deny]` reads or changes the live policy
+without needing a pending request; a parent may re-policy a descendant.
 
 Provider-native modes are a separate layer. `hlao spawn claude ... --mode auto` starts a
 session in the adapter's Auto mode; `hlao mode <id>` lists the modes and `hlao mode <id> auto`
 switches a live one. In Claude Code these are Manual, Accept edits, Plan, Auto, and (where
 allowed) Bypass permissions. Using a provider mode is the way to stop the provider from
 asking at the source; the HLAO policy is the guarantee that a request cannot silently hang.
+
+Provider config options are a third layer: model, reasoning effort, and adapter-specific
+settings. `hlao option <id>` lists them and `hlao option <id> model opus` sets one;
+`spawn --model opus` and `spawn --config key=value` apply them before the first prompt. They
+come from ACP `session/new` and `config_option_update`; a backend that advertises none shows
+nothing here.
 
 ## Using it from an agent
 
@@ -203,6 +215,7 @@ globally. A typical worker loop:
 hlao send --self "Check the log again." --wait --timeout 20m
 hlao read --since 42
 hlao wait --until permission --timeout 10m
+hlao send "$HLAO_PARENT_ID" "Blocked: the lock file is held by another worker."
 ```
 
 `--json` makes every command machine-readable. Success prints the result object; failure

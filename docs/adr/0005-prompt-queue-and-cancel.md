@@ -40,3 +40,11 @@ has not sent yet.
 - A parent that sends and never waits can build a queue; `list` shows it.
 - The settled outcome of a discarded prompt is explicit, so a waiting caller is never left
   hanging.
+
+## Amendment — 2026-10-19 (milestone 0.3)
+
+`cancel --keep-queue` is an explicit opt-in that stops only the active turn. The default is
+unchanged: plain `cancel` clears the queue, so "stop" remains unambiguous. The caller who
+wants the backlog kept says so. `cancel.requested` records `keepQueue` and the actor, and every
+discard records `by`, `reason`, and the original sender. `queue` and `queue drop` make the
+backlog inspectable and let one entry be removed without cancelling the turn.

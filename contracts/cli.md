@@ -7,18 +7,23 @@ rendering, never the semantics.
 
 ```
 hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-file F]
-                [--stdin] [--wait] [--timeout DUR] [--mode ID]
-                [--parent SESSION] [--permission allow|ask|deny] [--env K=V]...
+                [--stdin] [--wait] [--timeout DUR] [--mode ID] [--model VALUE]
+                [--config KEY=VALUE]... [--parent SESSION]
+                [--permission allow|ask|deny] [--env K=V]...
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR]
 hlao read [<id>] [--self] [--since N] [--limit N] [--raw] [--verbose]
                 [--timestamps] [--follow]
 hlao wait [<id>] [--self] [--until idle|permission|exit|change] [--since N] [--timeout DUR]
 hlao list [--all] [--cwd DIR]
-hlao cancel [<id>] [--self]
+hlao cancel [<id>] [--self] [--keep-queue]
 hlao close [<id>] [--self] [--force] [--tree]
 hlao permit [<id>] [--self] [--allow | --deny | --option ID] [--always]
 hlao mode [<id>] [modeId] [--self]
+hlao policy [<id>] [allow|ask|deny] [--self]
+hlao option [<id>] [key value] [--self]
+hlao queue [<id>] [--self]
+hlao queue drop [<id>] <position> [--self]
 hlao rename <id> <name>
 hlao rename <id> --clear
 hlao rename --self <name>
@@ -61,6 +66,27 @@ permission mode; an unknown mode is `bad_option`, and a backend with no modes is
 `rename` sets an operator label or clears it. A name is stored on the live session and in the
 event log (`session.renamed`); it is injected into the adapter environment as `HLAO_NAME` at
 spawn. Renaming does not change identity or scope.
+
+`policy` reads a live session's HLAO permission policy or sets it without a pending request.
+Inside a session, `policy` with no id reads self and `policy --self <policy>` sets it; a parent
+may re-policy a descendant.
+
+`option` lists provider config options or sets one (`option <id> <key> <value>`; `--self` for
+the caller). Boolean options accept `true`/`false`; select values must match an advertised
+value id. `spawn --model VALUE` selects the option whose category is `model`;
+`spawn --config KEY=VALUE` applies any option before the first prompt.
+
+`queue` lists the active turn and every queued prompt with sender, age, and a bounded preview;
+`queue drop <position>` removes one (1 is next) and settles its caller as cancelled.
+`cancel --keep-queue` stops only the active turn, leaving the backlog to run. Plain `cancel`
+still discards the queue.
+
+A child may `send` to its direct parent (exact id, exact name, or a prefix that uniquely
+identifies it). No other command may target an ancestor: reads, waits, cancel, close, permit,
+policy, mode, option, and rename stay `forbidden` outside the caller's visible scope.
+
+Every mutating event records the acting caller as `by` (a session id or `"operator"`), and
+prompt events record the sender as `from`.
 
 `read --follow` is a CLI-owned loop, not a supervisor method: read a page, then one-shot
 `wait --until change` from the page's `lastSeq`, repeating until the session is closed or

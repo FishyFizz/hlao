@@ -30,6 +30,7 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     lastActivityAt: AT,
     endedAt: null,
     turn: 1,
+    turnStartedAt: null,
     queued: 0,
     lastSeq: 3,
     pendingPermission: null,
@@ -39,6 +40,7 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     exit: null,
     permissionPolicy: "allow",
     modes: null,
+    configOptions: null,
     ...overrides,
   };
 }
