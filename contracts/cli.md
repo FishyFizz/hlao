@@ -12,11 +12,13 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--permission allow|ask|deny] [--env K=V]...
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR]
-hlao read [<id>] [--self] [--since N] [--limit N] [--raw] [--verbose]
-                [--timestamps] [--follow] [--out FILE]
-hlao wait [<id>] [--self] [--until idle|permission|exit|change] [--since N] [--timeout DUR]
+hlao read [<id>] [--self] [--since N | --before N] [--limit N]
+                [--type TYPE]... [--turn N] [--grep TEXT]
+                [--raw] [--verbose] [--timestamps] [--jsonl] [--follow] [--out FILE]
+hlao wait [<id>...] [--self] [--any | --all]
+                [--until idle|permission|exit|change] [--since N] [--timeout DUR]
 hlao list [--all] [--cwd DIR] [--cwd-prefix DIR] [--status S] [--backend NAME]
-                [--root SESSION] [--name TEXT] [--pending] [--wide] [--tree]
+                [--root SESSION] [--name TEXT] [--pending] [--wide] [--tree] [--usage]
                 [--sort created|activity] [--watch] [--interval DUR]
 hlao cancel [<id>] [--self] [--keep-queue]
 hlao close [<id>] [--self] [--force] [--tree] [--forget]
@@ -103,6 +105,26 @@ that still has retained descendants is an error, so forget descendants first.
 `read --out FILE` writes the current JSON page to FILE and continues normal output (`saved
 <file>` in human mode, a stderr note with `--json`). It cannot be combined with `--follow`.
 
+`read` filters are sent to the supervisor and applied before the page limit: `--type TYPE`
+(repeatable), `--turn N`, and `--grep TEXT` (case-insensitive literal over the event type and
+data JSON; private payloads require `--raw`). `--before N` pages backward and is mutually
+exclusive with `--since`. A tail page reports `nextBefore`; pass it to `--before` for the next
+older page. `--jsonl` writes one event object per line instead of one page object; it cannot be
+combined with `--json` or `--out`. With `--follow`, `--jsonl` streams events and re-arms a
+one-shot `wait --until change`.
+
+`wait` accepts one id or a list. For several ids, `--any` (the default) resolves on the first
+target that satisfies and `--all` when every target does. The JSON result always includes
+`results` in request order, each with the target's view, `satisfied`, and `reason`; a target
+still waiting when the aggregate resolves is `pending`. `--since` is only valid with one id.
+The aggregate exit code follows the same rule as a single wait: `2` for timeout, `3` when a
+target ended before the condition, `0` otherwise.
+
+`list --usage` adds USAGE (latest `used/size`) and COST columns and a footer that sums the
+latest snapshots across visible sessions. Costs are totalled per currency and never mixed;
+`used/size` is a snapshot sum, not an additive token counter. The JSON session view always
+carries `usage`, whether or not `--usage` is passed.
+
 A child may `send` to its direct parent (exact id, exact name, or a prefix that uniquely
 identifies it). No other command may target an ancestor: reads, waits, cancel, close, permit,
 policy, mode, option, and rename stay `forbidden` outside the caller's visible scope.
@@ -125,7 +147,9 @@ seconds when stderr is a TTY; pipes and JSON never see it.
 
 `agents`, `config`, and `doctor` are local and non-mutating; none autostarts a supervisor.
 `agents` reports the file that defined each user or project backend, middle-truncated in human
-output. `status` probes an existing supervisor and exits 1 when none is running; `--start` opts
+output. The same merged view is available to any client over `backends.list`; the local command
+exists so it works without a supervisor. `status` probes an existing supervisor, reports the
+wire protocol version and capability count, and exits 1 when none is running; `--start` opts
 into autostart. When nothing is running, `status --json` prints
 `{running:false, home, hint}` rather than the error envelope: "not running" is the state being
 reported, not a command failure. `logs` reads `<HLAO_HOME>/supervisor.log` directly,

@@ -15,18 +15,21 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 ## Runtime shape
 
 ```
- operator shell / agent shell
-            │  hlao <command> --json
-            ▼
-       cli (process)
-            │  NDJSON over a per-user named pipe / Unix socket
-            ▼
+ human                   agent
+   │                       │
+ dashboard / TUI        CLI / MCP
+   └──────────┬────────────┘
+              │  NDJSON over a per-user named pipe / Unix socket (the client contract)
+              ▼
    supervisor (one per HLAO_HOME, detached)
-            │  ACP v1 over stdio, one adapter process per session
-            ▼
+              │  ACP v1 over stdio, one adapter process per session
+              ▼
    provider adapter ──► provider runtime ──► leaf tools
 ```
 
+- The socket protocol is the product boundary (ADR 0007). The bundled CLI is the reference
+  client; a dashboard, TUI, or MCP server is another client and must not need private access.
+  If a client needs a capability the wire lacks, the wire is extended deliberately.
 - The CLI is a thin request/response client. It holds no orchestration state. Its only loops
   are caller-owned watches (`read --follow` over read + one-shot wait, and `logs --follow` over
   the supervisor's file), which end with the CLI process.
@@ -49,15 +52,15 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `ids` | Session handle generation/validation | — | — |
 | `version` | Package version at runtime | — | — |
 | `paths` | Runtime file and socket locations | location naming | `errors` |
-| `protocol` | CLI↔supervisor wire types and boundary validation | wire schema | `errors` |
+| `protocol` | Client↔supervisor wire contract and boundary validation | wire schema, version, capabilities | `errors` |
 | `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `errors` |
 | `logger` | Supervisor diagnostics log | log rotation | `paths` |
 | `config` | Backend manifests and user/project config | config merge rules | `paths`, `errors` |
 | `events` | Bounded, seq-addressed event log | retention and cursors | — |
 | `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
 | `supervisor` | Process lifecycle, lock/socket, dispatch, self-and-descendants scope | live session table | `session`, `config`, `lock`, `logger`, `paths`, `protocol`, `errors` |
-| `client` | CLI-side transport and autostart | — | `lock`, `protocol`, `paths`, `errors` |
-| `cli` | Argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
+| `client` | Client-side transport and autostart | — | `lock`, `protocol`, `paths`, `errors` |
+| `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
 The CLI is split by responsibility: `main.ts` dispatches and owns global exits; `context.ts`
 resolves the runtime home, caller identity, and targets, and formats errors; `args.ts` and
@@ -66,7 +69,12 @@ and events; and `commands/{prompts,list,control,ops}.ts` implement command group
 module owns orchestration state.
 
 Edges point one way. `session` does not import `supervisor`; `client` does not import
-`session`. A module's public surface is enumerated in `contracts/`.
+`session`; no core module imports `src/cli/*` (guarded by a unit test). A module's public
+surface is enumerated in `contracts/`.
+
+Presentation clients live outside that dependency graph. The bundle ships the CLI; a future
+dashboard or TUI is a separate package that speaks the socket and can be replaced without
+touching core.
 
 ## The identity chicken-and-egg, and its answer
 

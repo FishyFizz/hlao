@@ -1,14 +1,17 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-19 after milestones 0.2 and 0.3.
+**Updated:** 2026-10-20 after milestones 0.2, 0.3, and 0.4.
 **Scope:** unresolved findings only. Resolved items were removed; the original review is in git
 history, and the shipped fixes are described in `docs/milestones/0.2.md`,
-`docs/milestones/0.3.md`, ADR 0005 (amendment), and ADR 0006.
+`docs/milestones/0.3.md`, `docs/milestones/0.4.md`, ADR 0005 (amendment), ADR 0006, and
+ADR 0007.
 
 The substrate is unchanged: five primitives, a per-user supervisor, a bounded cursor-addressed
 event log, identity at spawn, and one-shot waits. The gaps below are affordances around those
-primitives, not requests for a scheduler, store, or registry.
+primitives, not requests for a scheduler, store, or registry. Since 0.4 the socket protocol is
+the client boundary: a dashboard, TUI, or MCP server is a client, and any capability it needs
+must be added to the wire deliberately.
 
 ---
 
@@ -19,7 +22,7 @@ primitives, not requests for a scheduler, store, or registry.
 **Expect:** after an adapter crash or supervisor restart, either resume the session or have a
 documented recovery path; at minimum, the loss is signalled.
 
-**Current (0.3.0):** a failed session is terminal. `read` retains it for `retainClosedMs` (one
+**Current (0.4.0):** a failed session is terminal. `read` retains it for `retainClosedMs` (one
 hour), `read --out FILE` exports a page, `down` warns before stopping, and `close --help`
 documents the loss. There is still no `hlao resume` and no ACP `session/load`/`resume` path, so a
 long job cannot continue after its adapter process dies.
@@ -44,18 +47,13 @@ table still owns identity.
 |---|---|---|---|
 | `@last` / `last` | Quick return to the most recent session | None | Alias to the most recently active visible session |
 | Tags/groups | Organize parallel jobs beyond cwd | Names, cwd, and cwd-prefix filters only | `--tag` at spawn, `list --tag`; a flat label |
-| Multi-session wait | Wait for any/all of N workers | One id; extra positionals are rejected | `wait --any <id...>` / `--all` (one-shot) |
 | Broadcast/announce | `PRODUCT.md` calls announcement `list + send × n` | The caller writes the loop | `send --tree <id>` assembly or an example helper |
 
 ### Observability
 
 | Feature | Why expected | Current | Suggested shape |
 |---|---|---|---|
-| Event filters | Find the failure in a long log | Bounded pages only | `--type tool.call`, `--turn N`, `--grep TEXT` |
-| Backward paging | Read older pages | Forward `--since` only | `--before` or `--page` |
-| Aggregate usage/cost | Know spend and context | Per-event `usage` line, cost included | Aggregate in `SessionView` / `list` |
-| Pending duration | Know how long a session has been blocked | Pending title in `list --wide`; no duration | `pendingSince` / blocked-for |
-| Per-event JSONL | Pipe events line-by-line | `read --follow --json` emits one page per line | `--jsonl` event stream |
+| Pending duration | Know how long a session has been blocked | `pendingPermission.requestedAt` is in the view; human output shows the title, not the age | Compute blocked-for in `list --wide` / `status` |
 | `--quiet` | Script without chatter | None | Suppress human hints |
 
 ### Control and lifecycle
@@ -65,7 +63,7 @@ table still owns identity.
 | Interrupt-and-send | Replace a running turn with a new instruction | Manual `cancel` + `send` | `send --interrupt` assembly |
 | `cancel --wait` | Confirm the active turn actually stopped | Fire-and-return | Wait for `idle`/turn end, bounded |
 | Per-turn timeout | Stop a hung turn | `--timeout` bounds the wait, not the turn | Documented cancel assembly, or `--turn-timeout` with product sign-off |
-| Cross-session permission | Operator with many gated workers | One request at a time | `permit --all-pending` or `wait --any permission` |
+| Cross-session permission | Operator with many gated workers | One request at a time | `permit --all-pending` client assembly over `list` + `permit` |
 | Resume | Recover a crashed session | None (see P0-14) | ACP load/resume, warm-host only |
 
 ### Operations and configuration
@@ -128,6 +126,6 @@ Original numbering is preserved for traceability.
 
 ## Note
 
-Everything above is outside the shipped 0.3.0 surface. The implementation and its tests
-(42 unit, 74 end-to-end) are described in `README.md`, `contracts/`, and
-`docs/milestones/0.3.md`.
+Everything above is outside the shipped 0.4.0 surface. The implementation and its tests
+(54 unit, 79 end-to-end) are described in `README.md`, `contracts/`, and
+`docs/milestones/0.4.md`.

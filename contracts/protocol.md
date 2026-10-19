@@ -1,7 +1,14 @@
 # Contract — `protocol`
 
-The wire between the CLI and the supervisor. Both sides are HLAO code; there is no third
-party. Nothing outside this file is part of the protocol.
+The wire between the supervisor and any client. The bundled CLI is the reference client; a
+TUI, web dashboard, or MCP server is another client and must not need private access. Core owns
+session state, authority, and these methods. It owns no presentation.
+
+```
+human  -> dashboard / TUI  --\
+                              >-- socket protocol -> core (supervisor)
+agent  -> CLI / MCP        --/
+```
 
 ## Transport
 
@@ -9,8 +16,23 @@ party. Nothing outside this file is part of the protocol.
 - Frames are a single JSON object followed by `\n`.
 - Endpoint: named pipe on Windows (`\\.\pipe\hlao-<hash of HLAO_HOME>`), Unix domain socket
   at `<HLAO_HOME>/supervisor.sock` elsewhere.
-- Authentication: every request carries the token from `<HLAO_HOME>/supervisor.json`.
+- Authentication: every request carries the token from `<HLAO_HOME>/supervisor.json`. Any
+  local process holding that token is an operator; the token is the authority.
 - Maximum request frame: 16 MiB. Longer frames are rejected with `bad_request`.
+
+## Client model
+
+- Call `hello` first. It reports the protocol version, capabilities, and supervisor health.
+- Poll `sessions.list` for a fleet view and `sessions.read` with `nextSeq`/`nextBefore` for a
+  session's log. There is no push subscription in protocol 1.x. A live client should poll at a
+  cadence it chooses; the supervisor owns no recurring timer.
+- Use `sessions.wait` when a client would otherwise poll a blocking condition. It is one-shot:
+  it resolves once and must be re-armed.
+- All timestamps are ISO-8601 strings. Durations such as "pending for" are computed by the
+  client.
+- A client that wants a composite operation (`cancel` then wait, broadcast to a subtree, bulk
+  permit) loops over these methods. Such compositions are client assemblies, not protocol
+  concepts.
 
 ## Envelope
 
@@ -61,6 +83,22 @@ caller can see; it is not a security boundary.
 | `supervisor_unavailable` | client-side: the supervisor could not be reached or started |
 | `internal` | an unexpected supervisor error; message is safe to display |
 
+## Versioning
+
+`protocolVersion` is `{ major, minor }`.
+
+- **Major** changes only when a client written for the previous major can no longer work.
+  A client must require major equality. `hello` with a different major returns
+  `version_mismatch` with `details.client` and `details.supervisor`.
+- **Minor** grows with additive methods, fields, and event types. A newer supervisor is
+  compatible with an older client; a newer client must use capabilities or version checks
+  before relying on an addition.
+- `capabilities` lists additive features this supervisor implements. Unknown capabilities must
+  be ignored. Known values in 1.1: `backends.list`, `session.usage`, `read.filters`,
+  `read.before`, `wait.multi`.
+- Adding an optional request field, a result field, a method, or an event type is a minor
+  change. Changing or removing existing semantics is a major change.
+
 ## Methods
 
 All `sessionId` params accept an exact handle first, then a unique session name, then a unique
@@ -77,13 +115,20 @@ absent, the request is an operator request and sees every session.
 
 ### `hello`
 
-Params: `{}`.
+Params:
+
+```ts
+{
+  protocolVersion?: { major: number; minor: number }; // the client's version
+}
+```
 
 Result:
 
 ```ts
 {
-  protocolVersion: 1,
+  protocolVersion: { major: number, minor: number },
+  capabilities: string[],
   pid: number,
   startedAt: string,
   version: string,
@@ -91,6 +136,35 @@ Result:
   configHash: string,         // sha256 of the user config file, or "missing"
   configError?: string        // present when user config failed validation
 }
+```
+
+If `protocolVersion` is present and its major differs, the response is `version_mismatch`.
+The pre-1.1 numeric form (`protocolVersion: 1`) is accepted for a supervisor that has not
+restarted; new clients should send the object form.
+
+### `backends.list`
+
+Params: `{ cwd?: string }`.
+
+Result: `{ backends: AgentView[] }`.
+
+The same merged view (builtin, user, project) as the bundled `hlao agents` command, sorted by
+name. `cwd` must be absolute; when omitted it defaults to the caller session's cwd, or the
+supervisor's cwd for an operator. A scoped caller sees the same list it could spawn from. This
+exists so a dashboard or MCP client does not reimplement config merging or read config files.
+
+```ts
+type AgentView = {
+  name: string;
+  source: "builtin" | "user" | "project";
+  command: string;
+  args: string[];
+  envKeys: string[];          // names only, never values
+  description?: string;
+  configPath?: string;
+  available: boolean;
+  unavailableReason?: string;
+};
 ```
 
 ### `sessions.spawn`
@@ -193,11 +267,20 @@ Params:
 ```ts
 {
   sessionId: string;
-  since?: number;                // absent = tail
+  since?: number;                // forward: seq > since
+  before?: number;               // backward: seq < before; exclusive with since
   limit?: number;                // default 100, maximum 1000
   raw?: boolean;                 // include original ACP update payloads in the result
+  types?: EventType[];           // keep only these event types
+  turn?: number;                 // keep only this turn
+  grep?: string;                 // case-insensitive literal over type + data JSON
 }
 ```
+
+Filters are ANDed and applied while scanning, before the page limit and byte budget. A cursor
+always advances past scanned events, not only returned events, so a filtered follower does not
+rescan the same non-matching range. `grep` searches the event as returned: private payloads
+require `raw: true`.
 
 A page is also bounded by a byte budget (8 MiB). Fewer than `limit` events may be returned,
 with `hasMore: true`; a single event larger than the budget is returned alone. Without
@@ -209,18 +292,20 @@ Result:
 ```ts
 {
   session: SessionView;
-  events: EventView[];
+  events: EventView[];            // ascending seq in both directions
   earliestRetainedSeq: number;
   lastSeq: number;
-  nextSeq: number;               // cursor for the following read
-  hasMore: boolean;
-  truncated: boolean;            // history before the page was evicted
+  nextSeq: number;                // forward cursor: pass as since
+  nextBefore: number | null;      // backward cursor: pass as before; null = no older page
+  hasMore: boolean;               // more events in the scan direction
+  truncated: boolean;             // history before the page was evicted
 }
 ```
 
-For a tail read, `truncated` is true whenever any event before the returned page was evicted
-(`earliestRetainedSeq > 1`), not only when the page itself starts late. For a `since` read,
-it is true when `since + 1 < earliestRetainedSeq`.
+For a tail read (no cursor), `nextSeq` is `lastSeq + 1` and `hasMore` is false; use
+`nextBefore` to page backward. For a `since` read, `truncated` is true when
+`since + 1 < earliestRetainedSeq`. For a `before` read, it is true when the scan reached the
+oldest retained event and earlier history was evicted.
 
 ### `sessions.wait`
 
@@ -228,9 +313,11 @@ Params:
 
 ```ts
 {
-  sessionId: string;
+  sessionId?: string;            // exactly one of sessionId or sessionIds
+  sessionIds?: string[];         // 1..100; no duplicate ids
+  mode?: "any" | "all";          // default "any"; ignored for one id
   until: "idle" | "permission" | "exit" | "change";
-  since?: number;                // only for "change"; defaults to lastSeq at call time
+  since?: number;                // only for "change" with a single id
   timeoutMs?: number;            // defaults to config.waitTimeoutMs; 0 = no timeout
 }
 ```
@@ -239,15 +326,27 @@ Result:
 
 ```ts
 {
-  satisfied: boolean;
+  satisfied: boolean;            // aggregate
   reason: "idle" | "permission" | "exit" | "change" | "timeout";
   waitedMs: number;
-  session: SessionView;
+  results: {
+    session: SessionView;
+    satisfied: boolean;
+    reason: "idle" | "permission" | "exit" | "change" | "timeout" | "pending";
+  }[];
+  session?: SessionView;         // present only for a single-id request
 }
 ```
 
 The wait is one-shot: it resolves at the first matching condition and never re-arms. A
-timeout never changes the session.
+timeout never changes a session.
+
+With several ids, `any` resolves on the first target that satisfies and `all` when every target
+does. A target that ends before satisfying `idle`, `permission`, or `change` is unsatisfied
+with reason `exit`; for `all`, that resolves the whole wait immediately. Unresolved targets are
+reported with reason `pending` when the aggregate resolves early. `change` uses each target's
+`lastSeq` at call time as its baseline; `since` is rejected with more than one id. All ids are
+resolved in the caller's scope before waiting; one forbidden or unknown id fails the request.
 
 ### `sessions.cancel`
 
@@ -429,6 +528,12 @@ type SessionView = {
     currentValue: string | boolean;
     values: { value: string; name: string; description?: string; group?: string }[];
   }[] | null;
+  usage: {
+    used: number;
+    size: number;
+    cost: { amount: number; currency: string } | null; // amount in minor units
+    at: string;                                       // usage event timestamp
+  } | null;
 };
 
 type PermissionView = {

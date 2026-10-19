@@ -89,9 +89,9 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 |---|---|
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. `--name` gives it a label. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
-| `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--follow` keeps reading; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
-| `hlao wait [<id>] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`. A timeout returns 2; a session that ended first returns 3. |
-| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
+| `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
+| `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3. |
+| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
@@ -100,8 +100,8 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao option [<id>] [key value]` | Read or set provider config options such as model and reasoning effort. |
 | `hlao queue [<id>]` / `hlao queue drop [<id>] N` | Inspect queued prompts with sender and preview, or drop one. |
 | `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the caller's scope. |
-| `hlao agents` | Configured backends, their source, config file, and whether the adapter command is present. Reads config locally; never starts a supervisor. |
-| `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. |
+| `hlao agents` | Configured backends, their source, config file, and whether the adapter command is present. Reads config locally so it works without a supervisor; the same view is on the wire as `backends.list`. |
+| `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. Reports the wire protocol version and capabilities. |
 | `hlao logs [--lines N] [--follow]` | Read the supervisor's diagnostic log directly. |
 | `hlao config show\|path\|validate` | Inspect the local config; backend env values are redacted. |
 | `hlao reload` | Re-read user config in the supervisor for new spawns only. |
@@ -156,6 +156,26 @@ Editing the config does not affect a running supervisor until `hlao reload`. Liv
 the settings they were spawned with; new spawns use the new values. `doctor` and `status` warn
 when the file on disk differs from what the supervisor loaded. Backend environment values are
 never printed by `agents` or `config show`.
+
+## Client contract
+
+The supervisor listens on a per-user named pipe (Windows) or Unix socket, speaks NDJSON, and
+is the only boundary a client needs. The bundled CLI is the reference client; a dashboard,
+TUI, or MCP server is another client and can talk to the same wire without private access.
+
+```
+human  -> dashboard / TUI  --\
+                              >-- socket protocol -> core (supervisor)
+agent  -> CLI / MCP        --/
+```
+
+Call `hello` first: it returns `protocolVersion: { major, minor }` and a capability list.
+Major versions must match; minor versions are additive. `contracts/protocol.md` is the full
+contract, including `backends.list`, filtered and backward reads, multi-id `wait`, and the
+`usage` field on every session view. Polling `sessions.list`/`sessions.read` is the supported
+live-update model; the supervisor never runs a client's refresh loop. Client assemblies
+(`cancel` then wait, broadcast, bulk permit, `@last`) are built by looping over wire methods,
+not added to the wire.
 
 ## The two rules under the surface
 

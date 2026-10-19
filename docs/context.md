@@ -7,12 +7,14 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.3.0, built 2026-10-19 on `milestone/0.3-control-and-clarity`
-  (review follow-up: live control, attribution, dashboard, cleanup, CLI split).
+- **Version:** 0.4.0, built 2026-10-20 on `milestone/0.4-socket-contract`
+  (socket protocol as the client boundary; observation completeness).
 - **Status:** the primitive surface, supervisor, CLI, tests, and the four acceptance
-  assemblies are implemented and green.
-- **Verification:** `npm test` runs 116 tests: 42 unit and 74 end-to-end through the real CLI
-  and supervisor against a scripted ACP agent, including the five acceptance-assembly tests.
+  assemblies are implemented and green. The socket is a public client contract: the bundled
+  CLI, a future dashboard/TUI, and an MCP server are interchangeable clients (ADR 0007).
+- **Verification:** `npm test` runs 133 tests: 54 unit and 79 end-to-end through the real CLI
+  and supervisor against a scripted ACP agent, including the five acceptance-assembly tests
+  and a raw-NDJSON conformance test that never invokes the CLI.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through
   `wait --until permission`, resumed after `hlao permit`, and — from inside its own shell —
