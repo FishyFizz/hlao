@@ -377,8 +377,8 @@ npm run test:e2e
 
 | Path | What lives there |
 |---|---|
-| `src/` | supervisor, session, protocol, config, client, CLI |
-| `tests/unit/` | pure modules: time, ids, events, protocol, config |
+| `src/` | supervisor, session, protocol, config, client, CLI (dispatch, context, commands, render) |
+| `tests/unit/` | pure modules: client, config, events, ids, logger, protocol, render, time |
 | `tests/e2e/` | real CLI → real supervisor → scripted ACP agent |
 | `tests/fixtures/fake-acp-agent.ts` | an ACP v1 agent with scripted modes |
 | `contracts/` | the public surface of each module and the wire |

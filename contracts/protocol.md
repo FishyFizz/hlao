@@ -93,26 +93,6 @@ Result:
 }
 ```
 
-### `agents.list`
-
-Params: `{ cwd?: string }` — project backends under `<cwd>/.hlao/agents.json` are merged in.
-
-Result: `{ agents: AgentView[] }`
-
-```ts
-type AgentView = {
-  name: string;
-  source: "builtin" | "user" | "project";
-  command: string;
-  args: string[];
-  envKeys: string[];             // values are never returned
-  description?: string;
-  configPath?: string;           // defining file for user/project backends
-  available: boolean;
-  unavailableReason?: string;
-};
-```
-
 ### `sessions.spawn`
 
 Params:
@@ -363,8 +343,8 @@ Result: `{ configHash: string; configError: string | null }`.
 Re-reads the user config file. Only future spawns are affected; live sessions keep the config
 they were created with. The result's `configHash` is the fingerprint of the file that was read.
 When loading fails, the supervisor falls back to defaults, records `configError`, and rejects
-`agents.list` and `sessions.spawn` with `config_invalid` until a valid config is reloaded.
-`hello.configHash` always reports the last successfully read (or attempted) file.
+`sessions.spawn` with `config_invalid` until a valid config is reloaded. `hello.configHash`
+always reports the last successfully read (or attempted) file.
 
 ### `supervisor.shutdown`
 

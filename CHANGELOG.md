@@ -21,6 +21,8 @@
 
 ### Changed
 
+- The CLI is split into `main`, `context`, `args`, `input`, `help`, `render`, and four command
+  modules; `agents.list` was removed from the wire because `agents` is local. No behavior moved.
 - Read-only probes (`status`, non-start `doctor`) no longer create `HLAO_HOME`.
 - `doctor` reports adapter commands as "present", always shows the log path/size, and treats a
   stopped supervisor as installed rather than failed.

@@ -64,8 +64,8 @@ nothing. Duration fields are milliseconds.
 ```
 
 Only `backends` is accepted in project scope. It exists because a backend often belongs to
-the repository being worked on; it is read at `spawn`/`agents.list` time for the requested
-`cwd`, never cached across directories.
+the repository being worked on; it is read at `spawn` time and by the local `agents` command
+for the requested `cwd`, never cached across directories.
 
 ## Merge order (later wins)
 
@@ -87,11 +87,11 @@ only.
 - `env`: object whose values are strings.
 - Unknown backend keys are rejected.
 - All fields of user config are validated before any is applied; an invalid file applies
-  none of its values. The supervisor still starts, but `agents.list` and `sessions.spawn`
-  fail with `config_invalid`, and `doctor` reports the file and reason. This keeps a typo
-  from silently changing `permissionPolicy` or a timeout.
-- Invalid project config fails only that `spawn`/`agents.list` request with
-  `config_invalid`, naming the file.
+  none of its values. The supervisor still starts, but `sessions.spawn` fails with
+  `config_invalid`, and local `agents`/`doctor`/`config validate` report the file and reason.
+  This keeps a typo from silently changing `permissionPolicy` or a timeout.
+- Invalid project config fails only that `spawn` request with `config_invalid`, naming the
+  file; local `agents`/`doctor` report it too.
 
 ## What config is not
 

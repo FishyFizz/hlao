@@ -59,6 +59,12 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `client` | CLI-side transport and autostart | — | `lock`, `protocol`, `paths`, `errors` |
 | `cli` | Argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
+The CLI is split by responsibility: `main.ts` dispatches and owns global exits; `context.ts`
+resolves the runtime home, caller identity, and targets, and formats errors; `args.ts` and
+`input.ts` parse flags and messages; `help.ts` holds the help text; `render.ts` renders tables
+and events; and `commands/{prompts,list,control,ops}.ts` implement command groups. No command
+module owns orchestration state.
+
 Edges point one way. `session` does not import `supervisor`; `client` does not import
 `session`. A module's public surface is enumerated in `contracts/`.
 

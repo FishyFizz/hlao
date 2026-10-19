@@ -6,7 +6,6 @@ import {
   configFingerprint,
   loadConfig,
   mergeBackends,
-  toAgentView,
   type HlaoConfig,
 } from "./config.js";
 import { HlaoError, describeError, toHlaoError } from "./errors.js";
@@ -28,8 +27,6 @@ import {
   isMethod,
   parseEnvelope,
   parseParams,
-  type AgentsListParams,
-  type AgentsListResult,
   type CancelParams,
   type CancelResult,
   type CloseParams,
@@ -384,10 +381,7 @@ export class SupervisorServer {
     this.#sweep();
 
     const method = envelope.method;
-    if (
-      this.#configError !== null &&
-      (method === "agents.list" || method === "sessions.spawn")
-    ) {
+    if (this.#configError !== null && method === "sessions.spawn") {
       throw new HlaoError("config_invalid", this.#configError);
     }
     const params = parseParams(method, envelope.params);
@@ -404,16 +398,6 @@ export class SupervisorServer {
             .length,
           configHash: this.#configHash,
           configError: this.#configError ?? undefined,
-        };
-        return result;
-      }
-      case "agents.list": {
-        const cwd = (params as AgentsListParams).cwd ?? process.cwd();
-        const merged = mergeBackends(this.#config.backends, cwd);
-        const result: AgentsListResult = {
-          agents: Object.values(merged)
-            .map(toAgentView)
-            .sort((left, right) => left.name.localeCompare(right.name)),
         };
         return result;
       }

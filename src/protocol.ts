@@ -160,7 +160,6 @@ export type ResponseEnvelope =
 
 export const METHODS = [
   "hello",
-  "agents.list",
   "sessions.spawn",
   "sessions.list",
   "sessions.get",
@@ -192,12 +191,6 @@ export interface HelloResult {
   sessions: number;
   configHash: string;
   configError?: string;
-}
-export interface AgentsListParams {
-  cwd?: string;
-}
-export interface AgentsListResult {
-  agents: AgentView[];
 }
 export interface SpawnParams {
   backend: string;
@@ -383,7 +376,6 @@ export interface ReloadResult {
 
 type ParamsByMethod = {
   hello: HelloParams;
-  "agents.list": AgentsListParams;
   "sessions.spawn": SpawnParams;
   "sessions.list": ListParams;
   "sessions.get": GetParams;
@@ -647,13 +639,6 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       const object = asObject(raw ?? {}, what);
       checkKeys(object, [], what);
       return object as HelloParams as ParamsByMethod[M];
-    }
-    case "agents.list": {
-      const object = asObject(raw ?? {}, what);
-      checkKeys(object, ["cwd"], what);
-      return {
-        cwd: absolutePath(optString(object, "cwd", what, 1_000), `${what}.cwd`),
-      } as ParamsByMethod[M];
     }
     case "sessions.spawn": {
       const object = asObject(raw, what);

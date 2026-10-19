@@ -7,11 +7,11 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.2.0, built 2026-10-19 on `milestone/0.2-addressable-observable`
-  (addressable handles, truthfulness fixes, and local observation/operations).
+- **Version:** 0.3.0, built 2026-10-19 on `milestone/0.3-control-and-clarity`
+  (review follow-up: live control, attribution, dashboard, cleanup, CLI split).
 - **Status:** the primitive surface, supervisor, CLI, tests, and the four acceptance
   assemblies are implemented and green.
-- **Verification:** `npm test` runs 102 tests: 41 unit and 61 end-to-end through the real CLI
+- **Verification:** `npm test` runs 116 tests: 42 unit and 74 end-to-end through the real CLI
   and supervisor against a scripted ACP agent, including the five acceptance-assembly tests.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through
