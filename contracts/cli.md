@@ -11,7 +11,8 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--parent SESSION] [--permission allow|ask|deny] [--env K=V]...
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR]
-hlao read [<id>] [--self] [--since N] [--limit N] [--raw] [--verbose] [--timestamps]
+hlao read [<id>] [--self] [--since N] [--limit N] [--raw] [--verbose]
+                [--timestamps] [--follow]
 hlao wait [<id>] [--self] [--until idle|permission|exit|change] [--since N] [--timeout DUR]
 hlao list [--all] [--cwd DIR]
 hlao cancel [<id>] [--self]
@@ -23,7 +24,11 @@ hlao rename <id> --clear
 hlao rename --self <name>
 hlao rename --self --clear
 hlao agents [--cwd DIR]
-hlao doctor
+hlao status [--start]
+hlao logs [--lines N] [--follow]
+hlao config show|path|validate
+hlao reload
+hlao doctor [--start]
 hlao whoami
 hlao down [--force]
 hlao help [command]
@@ -56,6 +61,39 @@ permission mode; an unknown mode is `bad_option`, and a backend with no modes is
 `rename` sets an operator label or clears it. A name is stored on the live session and in the
 event log (`session.renamed`); it is injected into the adapter environment as `HLAO_NAME` at
 spawn. Renaming does not change identity or scope.
+
+`read --follow` is a CLI-owned loop, not a supervisor method: read a page, then one-shot
+`wait --until change` from the page's `lastSeq`, repeating until the session is closed or
+failed, or the CLI is interrupted. If a page has `hasMore`, the loop reads again immediately
+instead of waiting. In human mode the header is printed once and later pages contain only
+events; in JSON mode each complete `ReadResult` is emitted on its own line (NDJSON). Closing
+the CLI aborts the pending wait; nothing else is cancelled.
+
+`spawn --wait` in human mode is assembled in two calls: `sessions.spawn` without the prompt
+(so the handle is printed immediately), then `sessions.send` with `wait: true`. JSON mode keeps
+the single `sessions.spawn` call and its `firstTurn` result. A long human wait on `spawn
+--wait`, `send --wait`, `wait`, or `read --follow` writes one progress line to stderr after two
+seconds when stderr is a TTY; pipes and JSON never see it.
+
+`agents`, `config`, and `doctor` are local and non-mutating; none autostarts a supervisor.
+`status` probes an existing supervisor and exits 1 when none is running; `--start` opts into
+autostart. `logs` reads `<HLAO_HOME>/supervisor.log` directly, defaulting to the last 50 lines
+(`--lines 0` = whole file); `--follow` polls for appended bytes until interrupted, emitting one
+`{"path","line"}` object per line under `--json`.
+
+`config show` prints the effective config and its backends without mutating anything; backend
+env values are `***`. It exits 0 even when the file is invalid, including an `error` field, so
+the effective defaults remain inspectable. `config validate` exits 1 on an invalid file, and
+`config path` prints the path whether or not the file exists.
+
+`reload` re-reads user config in the running supervisor. It is operator-only. New spawns use
+the new values; live sessions are untouched. An invalid file makes `reload` exit 1 and leaves
+the supervisor rejecting later spawns with `config_invalid` until a valid file is reloaded.
+
+`doctor` exits 1 only when a required check fails. Without `--start`, a missing supervisor is a
+warning (`installed`, not running), and backend readiness is checked locally. With `--start`,
+connectivity and the wire version are checked too. `doctor` and `status` warn when the config
+on disk has a different fingerprint from the one the supervisor loaded.
 
 `down --json` reports one of:
 - `{ stopped: true, sessionsClosed: number }`
@@ -121,6 +159,8 @@ There are no ANSI escapes when stdout is not a TTY, when `NO_COLOR` is set, or u
   adapter diagnostics are stripped from human output.
 - `list` colours status only in a TTY, always prints a header, marks the caller with `*` when
   one is known, and ends with a scope footer (`operator` or `self+descendants`).
+- A long human wait prints one progress line to stderr after two seconds, only when stderr is
+  a TTY; it is cleared when the wait ends.
 - Every command that mutates orchestration state prints what changed, not just "ok".
 - `doctor` prints one line per check with `✓`/`✗`/`!`, and exits non-zero only when a
   required check fails.

@@ -1,8 +1,21 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connectSupervisor, type SupervisorConnection } from "../client.js";
-import { loadConfig } from "../config.js";
+import {
+  configFingerprint,
+  loadConfig,
+  mergeBackends,
+  redactConfig,
+  toAgentView,
+} from "../config.js";
 import { HlaoError, toHlaoError } from "../errors.js";
 import { pidAlive, probeSupervisor, readLock, removeLock } from "../lock.js";
 import { configPath, logPath, resolveHome } from "../paths.js";
@@ -16,6 +29,7 @@ import type {
   PermissionPolicy,
   PermitResult,
   ReadResult,
+  ReloadResult,
   RenameResult,
   SendResult,
   SessionView,
@@ -42,6 +56,7 @@ import {
   createStyle,
   renderAgentTable,
   renderDoctor,
+  renderEvents,
   renderPermission,
   renderReadResult,
   renderSessionTable,
@@ -124,6 +139,14 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdRename(args);
       case "agents":
         return await cmdAgents(args);
+      case "status":
+        return await cmdStatus(args);
+      case "logs":
+        return await cmdLogs(args);
+      case "config":
+        return await cmdConfig(args);
+      case "reload":
+        return await cmdReload(args);
       case "doctor":
         return await cmdDoctor(args);
       case "whoami":
@@ -181,20 +204,26 @@ async function cmdSpawn(args: string[]): Promise<number> {
     throw usageError("--permission must be ask, allow, or deny");
   }
   const wait = booleanOption(parsed, "wait") ?? false;
+  const promptGiven = prompt !== undefined;
+  const effectiveWait = wait && promptGiven;
   warnInert(
-    !wait && numberOption(parsed, "timeout") !== undefined,
-    "--timeout has no effect without --wait",
+    !effectiveWait && numberOption(parsed, "timeout") !== undefined,
+    "--timeout has no effect without a waitable first turn",
   );
+  warnInert(wait && !promptGiven, "--wait has no effect without a message");
 
   const conn = await connect(ctx);
+  // In human mode, wait in two phases so the handle is printed as soon as the
+  // session exists. JSON keeps the single-call shape with firstTurn.
+  const twoPhase = !ctx.json && effectiveWait;
   const result = await conn.request<SpawnResult>(
     "sessions.spawn",
     {
       backend,
       cwd: resolve(stringOption(parsed, "cwd") ?? process.cwd()),
       name: stringOption(parsed, "name"),
-      prompt,
-      wait,
+      prompt: twoPhase ? undefined : prompt,
+      wait: twoPhase ? false : wait,
       timeoutMs: numberOption(parsed, "timeout"),
       mode: stringOption(parsed, "mode"),
       parentSessionId: stringOption(parsed, "parent"),
@@ -215,6 +244,40 @@ async function cmdSpawn(args: string[]): Promise<number> {
       (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
       ctx.style.dim(`  policy ${session.permissionPolicy}`),
   );
+
+  if (twoPhase) {
+    const sent = await withProgress(
+      `waiting for turn 1 of ${sessionLabel(ctx, session)}`,
+      conn.request<SendResult>(
+        "sessions.send",
+        {
+          sessionId: session.id,
+          text: prompt!,
+          wait: true,
+          ...(numberOption(parsed, "timeout") !== undefined
+            ? { timeoutMs: numberOption(parsed, "timeout") }
+            : {}),
+        },
+        { timeoutMs: 0 },
+      ),
+    );
+    if (sent.timedOut) {
+      out(ctx.style.yellow("the first turn is still running"));
+      out(styleHint(ctx, `hlao read ${session.id} --since 0`));
+      return 2;
+    }
+    if (sent.text && sent.text.trim().length > 0) {
+      out(sanitize(sent.text).trimEnd());
+    }
+    out(
+      ctx.style.dim(
+        `— turn ${sent.turn ?? 1} ended: ${sent.stopReason ?? "unknown"} —`,
+      ),
+    );
+    out(styleHint(ctx, `hlao read ${session.id} --since 0`));
+    return 0;
+  }
+
   if (result.firstTurn) {
     if (result.firstTurn.text.trim().length > 0) {
       out(sanitize(result.firstTurn.text).trimEnd());
@@ -270,7 +333,7 @@ async function cmdSend(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
 
   const conn = await connect(ctx);
-  const result = await conn.request<SendResult>(
+  const request = conn.request<SendResult>(
     "sessions.send",
     {
       sessionId,
@@ -280,6 +343,10 @@ async function cmdSend(args: string[]): Promise<number> {
     },
     { timeoutMs: wait ? 0 : 60_000 },
   );
+  const result =
+    wait && !ctx.json
+      ? await withProgress(`waiting for ${sessionId} to finish its turn`, request)
+      : await request;
 
   if (ctx.json) {
     writeJson(result);
@@ -335,6 +402,7 @@ async function cmdRead(args: string[]): Promise<number> {
     { name: "raw", type: "boolean" },
     { name: "verbose", type: "boolean" },
     { name: "timestamps", type: "boolean" },
+    { name: "follow", type: "boolean" },
   ]);
   if (helpRequested(parsed, "read")) return 0;
   expectPositionals(parsed, "read", 0, 1);
@@ -344,11 +412,25 @@ async function cmdRead(args: string[]): Promise<number> {
   const verbose = booleanOption(parsed, "verbose") === true;
   const raw = booleanOption(parsed, "raw") === true || verbose;
   const timestamps = booleanOption(parsed, "timestamps") === true;
+  const follow = booleanOption(parsed, "follow") === true;
+  const since = numberOption(parsed, "since");
+  const limit = numberOption(parsed, "limit");
   const conn = await connect(ctx);
+
+  if (follow) {
+    return await followRead(conn, ctx, sessionId, {
+      since,
+      limit,
+      raw,
+      verbose: verbose || raw,
+      timestamps,
+    });
+  }
+
   const result = await conn.request<ReadResult>("sessions.read", {
     sessionId,
-    since: numberOption(parsed, "since"),
-    limit: numberOption(parsed, "limit"),
+    since,
+    limit,
     raw,
   });
 
@@ -363,6 +445,88 @@ async function cmdRead(args: string[]): Promise<number> {
     }),
   );
   return 0;
+}
+
+interface FollowOptions {
+  since?: number;
+  limit?: number;
+  raw: boolean;
+  verbose: boolean;
+  timestamps: boolean;
+}
+
+/**
+ * A caller-owned watch loop: read a page, then one-shot wait for a change.
+ * The supervisor owns no timer; closing the CLI aborts the pending wait.
+ */
+async function followRead(
+  conn: SupervisorConnection,
+  ctx: CommandContext,
+  sessionId: string,
+  options: FollowOptions,
+): Promise<number> {
+  let since = options.since;
+  let first = true;
+  for (;;) {
+    const result = await conn.request<ReadResult>("sessions.read", {
+      sessionId,
+      since,
+      limit: options.limit,
+      raw: options.raw,
+    });
+
+    if (ctx.json) {
+      // One complete page per line: a stream consumer can parse without framing.
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else if (first) {
+      out(
+        renderReadResult(result, ctx.style, "hlao", {
+          verbose: options.verbose,
+          fullTimestamps: options.timestamps,
+        }),
+      );
+    } else {
+      const lines = renderEvents(
+        result.events,
+        ctx.style,
+        result.session.id,
+        "hlao",
+        {
+          verbose: options.verbose,
+          fullTimestamps: options.timestamps,
+        },
+      );
+      if (lines.length > 0) out(lines.join("\n"));
+      if (result.truncated) {
+        out(
+          ctx.style.yellow(
+            `history was evicted before #${result.earliestRetainedSeq}`,
+          ),
+        );
+      }
+    }
+    first = false;
+    since = result.nextSeq;
+
+    if (result.hasMore) continue;
+    if (result.session.status === "closed" || result.session.status === "failed") {
+      return 0;
+    }
+
+    await withProgress(
+      `following ${sessionLabel(ctx, result.session)}`,
+      conn.request<WaitResult>(
+        "sessions.wait",
+        {
+          sessionId,
+          until: "change",
+          since: result.lastSeq,
+          timeoutMs: 0,
+        },
+        { timeoutMs: 0 },
+      ),
+    );
+  }
 }
 
 async function cmdWait(args: string[]): Promise<number> {
@@ -387,7 +551,7 @@ async function cmdWait(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
   const timeoutMs = numberOption(parsed, "timeout");
   const conn = await connect(ctx);
-  const result = await conn.request<WaitResult>(
+  const request = conn.request<WaitResult>(
     "sessions.wait",
     {
       sessionId,
@@ -397,6 +561,9 @@ async function cmdWait(args: string[]): Promise<number> {
     },
     { timeoutMs: 0 },
   );
+  const result = ctx.json
+    ? await request
+    : await withProgress(`waiting for ${sessionId} (${until})`, request);
 
   if (ctx.json) {
     writeJson(result);
@@ -815,10 +982,16 @@ async function cmdAgents(args: string[]): Promise<number> {
   if (helpRequested(parsed, "agents")) return 0;
   expectPositionals(parsed, "agents", 0, 0);
   const ctx = contextFrom(parsed);
-  const conn = await connect(ctx);
-  const result = await conn.request<AgentsListResult>("agents.list", {
-    cwd: resolve(stringOption(parsed, "cwd") ?? process.cwd()),
-  });
+  // Local and non-mutating: `agents` never starts a supervisor.
+  const loaded = loadConfig(ctx.home);
+  if (loaded.error) throw loaded.error;
+  const cwd = resolve(stringOption(parsed, "cwd") ?? process.cwd());
+  const merged = mergeBackends(loaded.config.backends, cwd);
+  const result: AgentsListResult = {
+    agents: Object.values(merged)
+      .map(toAgentView)
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  };
   if (ctx.json) {
     writeJson(result);
     return 0;
@@ -827,11 +1000,245 @@ async function cmdAgents(args: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdDoctor(args: string[]): Promise<number> {
+async function cmdStatus(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "start", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "status")) return 0;
+  expectPositionals(parsed, "status", 0, 0);
+  const ctx = contextFrom(parsed);
+  const start = booleanOption(parsed, "start") === true;
+
+  let conn: SupervisorConnection;
+  try {
+    conn = await connect(ctx, start);
+  } catch (error) {
+    const converted = toHlaoError(error);
+    if (converted.code !== "supervisor_unavailable") throw converted;
+    if (ctx.json) {
+      writeJson({
+        running: false,
+        home: ctx.home,
+        hint: start ? null : "hlao status --start",
+      });
+    } else {
+      out(`not running · home ${ctx.home}`);
+      if (!start) out(ctx.style.dim("start: hlao status --start"));
+    }
+    return 1;
+  }
+
+  const hello = await conn.request<HelloResult>("hello", {});
+  const startedAt = Date.parse(hello.startedAt);
+  const up = Number.isFinite(startedAt)
+    ? formatDuration(Math.max(0, Date.now() - startedAt))
+    : "unknown";
+  if (ctx.json) {
+    writeJson({
+      running: true,
+      home: ctx.home,
+      endpoint: conn.lock.endpoint,
+      ...hello,
+    });
+    return 0;
+  }
+  out(
+    `running · pid ${hello.pid} · supervisor ${hello.version} · up ${up}` +
+      ctx.style.dim(` · ${hello.sessions} live session${hello.sessions === 1 ? "" : "s"}`),
+  );
+  out(ctx.style.dim(`protocol v${hello.protocolVersion} · ${conn.lock.endpoint}`));
+  if (hello.configError) out(ctx.style.red(`config error: ${hello.configError}`));
+  if (hello.configHash !== configFingerprint(ctx.home)) {
+    out(ctx.style.yellow("config on disk differs from the supervisor; run: hlao reload"));
+  }
+  return 0;
+}
+
+async function cmdLogs(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "lines", short: "n", type: "number", valueName: "N" },
+    { name: "follow", short: "f", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "logs")) return 0;
+  expectPositionals(parsed, "logs", 0, 0);
+  const ctx = contextFrom(parsed);
+  const file = logPath(ctx.home);
+  const requested = numberOption(parsed, "lines");
+  if (requested !== undefined && requested < 0) {
+    throw usageError("--lines must be zero or greater");
+  }
+  const follow = booleanOption(parsed, "follow") === true;
+  const limit = requested ?? 50;
+
+  let exists = existsSync(file);
+  let content = "";
+  if (exists) {
+    try {
+      content = readFileSync(file, "utf8");
+    } catch (error) {
+      throw new HlaoError(
+        "internal",
+        `cannot read ${file}: ${(error as Error).message}`,
+      );
+    }
+  }
+  const lines = splitLines(content);
+  const initial = limit === 0 ? lines : lines.slice(-limit);
+  emitLogLines(ctx, initial, file, exists);
+  if (!follow) return 0;
+
+  if (!exists) {
+    if (!ctx.json) out(ctx.style.dim(`waiting for ${file}…`));
+    while (!existsSync(file)) await sleepMs(250);
+    exists = true;
+  }
+
+  let offset = exists ? byteLength(content) : 0;
+  for (;;) {
+    await sleepMs(400);
+    let size: number;
+    try {
+      size = statSync(file).size;
+    } catch {
+      continue;
+    }
+    if (size < offset) offset = 0;
+    if (size === offset) continue;
+    let chunk: string;
+    try {
+      const length = size - offset;
+      const buffer = Buffer.alloc(length);
+      const handle = openSync(file, "r");
+      try {
+        readSync(handle, buffer, 0, length, offset);
+      } finally {
+        closeSync(handle);
+      }
+      chunk = buffer.toString("utf8");
+    } catch {
+      continue;
+    }
+    offset = size;
+    emitLogLines(ctx, splitLines(chunk), file, true);
+  }
+}
+
+function splitLines(content: string): string[] {
+  const lines = content.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function emitLogLines(
+  ctx: CommandContext,
+  lines: string[],
+  file: string,
+  exists: boolean,
+): void {
+  if (ctx.json) {
+    for (const line of lines) {
+      process.stdout.write(`${JSON.stringify({ path: file, line })}\n`);
+    }
+    if (lines.length === 0 && !exists) {
+      process.stdout.write(`${JSON.stringify({ path: file, lines: [] })}\n`);
+    }
+    return;
+  }
+  if (lines.length === 0) {
+    if (!exists) out(ctx.style.dim(`no supervisor log at ${file}`));
+    return;
+  }
+  for (const line of lines) out(line);
+}
+
+async function cmdConfig(args: string[]): Promise<number> {
   const parsed = parseArgs(args, COMMON);
+  if (helpRequested(parsed, "config")) return 0;
+  expectPositionals(parsed, "config", 1, 1);
+  const sub = parsed.positionals[0]!;
+  if (!["show", "path", "validate"].includes(sub)) {
+    throw usageError(`unknown config subcommand "${sub}" (show, path, validate)`);
+  }
+  const ctx = contextFrom(parsed);
+  const file = configPath(ctx.home);
+
+  if (sub === "path") {
+    if (ctx.json) writeJson({ path: file });
+    else out(file);
+    return 0;
+  }
+
+  const loaded = loadConfig(ctx.home);
+  if (sub === "validate") {
+    if (loaded.error) throw loaded.error;
+    if (ctx.json) writeJson({ ok: true, path: file });
+    else out(`config OK · ${existsSync(file) ? file : "no config.json — built-in defaults"}`);
+    return 0;
+  }
+
+  const redacted = redactConfig(loaded.config);
+  if (ctx.json) {
+    writeJson({
+      path: file,
+      exists: existsSync(file),
+      config: redacted,
+      error: loaded.error
+        ? { code: loaded.error.code, message: loaded.error.message }
+        : null,
+    });
+    return 0;
+  }
+
+  out(`config ${file}${existsSync(file) ? "" : " (missing; defaults)"}`);
+  if (loaded.error) out(ctx.style.red(`invalid: ${loaded.error.message}`));
+  out(`  permissionPolicy   ${redacted.permissionPolicy}`);
+  out(`  waitTimeoutMs      ${formatDuration(redacted.waitTimeoutMs)}`);
+  out(`  sendWaitTimeoutMs  ${formatDuration(redacted.sendWaitTimeoutMs)}`);
+  out(`  startupTimeoutMs   ${formatDuration(redacted.startupTimeoutMs)}`);
+  out(`  maxEventsPerSession ${redacted.maxEventsPerSession}`);
+  out(`  maxEventLogBytes   ${redacted.maxEventLogBytes}`);
+  out(`  maxEventBytes      ${redacted.maxEventBytes}`);
+  out(`  retainClosedMs     ${formatDuration(redacted.retainClosedMs)}`);
+  out("");
+  out(renderAgentTable(Object.values(redacted.backends).map(toAgentView), ctx.style));
+  return 0;
+}
+
+async function cmdReload(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, COMMON);
+  if (helpRequested(parsed, "reload")) return 0;
+  expectPositionals(parsed, "reload", 0, 0);
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+  const result = await conn.request<ReloadResult>("supervisor.reload", {});
+  if (ctx.json) {
+    writeJson(result);
+    return result.configError ? 1 : 0;
+  }
+  if (result.configError) {
+    throw new HlaoError("config_invalid", result.configError);
+  }
+  out(
+    `config reloaded · new spawns use ${configPath(ctx.home)}; live sessions keep their settings`,
+  );
+  return 0;
+}
+
+async function cmdDoctor(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "start", type: "boolean" },
+  ]);
   if (helpRequested(parsed, "doctor")) return 0;
   expectPositionals(parsed, "doctor", 0, 0);
   const ctx = contextFrom(parsed);
+  const start = booleanOption(parsed, "start") === true;
   const checks: DoctorCheck[] = [];
 
   const nodeOk = nodeVersionAtLeast(22, 13, 0);
@@ -872,17 +1279,22 @@ async function cmdDoctor(args: string[]): Promise<number> {
 
   let conn: SupervisorConnection | null = null;
   try {
-    conn = await connect(ctx);
+    conn = await connect(ctx, start);
     checks.push({
       name: "supervisor",
       status: "ok",
       detail: `pid ${conn.lock.pid} · ${conn.lock.endpoint}`,
     });
   } catch (error) {
+    const converted = toHlaoError(error);
     checks.push({
       name: "supervisor",
-      status: "fail",
-      detail: `${toHlaoError(error).message} · log: ${logPath(ctx.home)}`,
+      status:
+        !start && converted.code === "supervisor_unavailable" ? "warn" : "fail",
+      detail:
+        !start && converted.code === "supervisor_unavailable"
+          ? `not running · installed · start with "hlao doctor --start" or any session command`
+          : `${converted.message} · log: ${logPath(ctx.home)}`,
     });
   }
 
@@ -903,18 +1315,34 @@ async function cmdDoctor(args: string[]): Promise<number> {
     if (hello.configError) {
       checks.push({ name: "config load", status: "fail", detail: hello.configError });
     }
-
-    try {
-      const agents = await conn.request<AgentsListResult>("agents.list", {
-        cwd: process.cwd(),
+    if (hello.configHash !== configFingerprint(ctx.home)) {
+      checks.push({
+        name: "config freshness",
+        status: "warn",
+        detail: "config on disk differs from the supervisor; run: hlao reload",
       });
-      const available = agents.agents.filter((agent) => agent.available);
-      const unavailable = agents.agents.filter((agent) => !agent.available);
+    }
+  }
+
+  // Backend readiness is a local property of the manifest and PATH; checking it
+  // must not require (or start) a supervisor.
+  if (loaded.error) {
+    checks.push({
+      name: "backends",
+      status: "fail",
+      detail: `user config is invalid: ${loaded.error.message}`,
+    });
+  } else {
+    try {
+      const merged = mergeBackends(loaded.config.backends, process.cwd());
+      const agents = Object.values(merged).map(toAgentView);
+      const available = agents.filter((agent) => agent.available);
+      const unavailable = agents.filter((agent) => !agent.available);
       checks.push({
         name: "backends",
         status: available.length > 0 ? "ok" : "fail",
         detail:
-          `${available.length}/${agents.agents.length} ready` +
+          `${available.length}/${agents.length} ready` +
           (available.length > 0
             ? ` (${available.map((agent) => agent.name).join(", ")})`
             : ""),
@@ -1170,11 +1598,55 @@ function warnInert(condition: boolean, message: string): void {
   if (condition) process.stderr.write(`hlao: ${message}\n`);
 }
 
-function connect(ctx: CommandContext): Promise<SupervisorConnection> {
+const PROGRESS_DELAY_MS = 2_000;
+
+/**
+ * A long wait should not look hung. The line goes to stderr only when it is a
+ * TTY, so pipes and tests never see it.
+ */
+function withProgress<T>(label: string, work: Promise<T>): Promise<T> {
+  if (process.stderr.isTTY !== true) return work;
+  let shown = false;
+  let width = 0;
+  const timer = setTimeout(() => {
+    shown = true;
+    const text = `hlao: ${label}… (Ctrl-C stops watching; the work continues)`;
+    width = text.length;
+    process.stderr.write(`\r${text}`);
+  }, PROGRESS_DELAY_MS);
+  timer.unref?.();
+  const clear = (): void => {
+    clearTimeout(timer);
+    if (!shown) return;
+    process.stderr.write(`\r${" ".repeat(width)}\r`);
+  };
+  return work.then(
+    (value) => {
+      clear();
+      return value;
+    },
+    (error: unknown) => {
+      clear();
+      throw error;
+    },
+  );
+}
+
+function connect(
+  ctx: CommandContext,
+  autostart = true,
+): Promise<SupervisorConnection> {
   return connectSupervisor({
     home: ctx.home,
     cliPath: ctx.cliPath,
     callerSessionId: ctx.callerSessionId,
+    autostart,
+  });
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, ms);
   });
 }
 
@@ -1399,7 +1871,11 @@ Usage:
   hlao permit [<id>] --allow|--deny|--option ID  answer a permission request
   hlao mode [<id>] [modeId]                    read or switch a provider mode
   hlao rename <id> <name> | --clear            label a session
-  hlao agents [--cwd DIR]                      configured backends
+  hlao agents [--cwd DIR]                      configured backends (local)
+  hlao status [--start]                        supervisor state without starting one
+  hlao logs [--lines N] [--follow]             supervisor diagnostics
+  hlao config show|path|validate               local configuration
+  hlao reload                                  re-read config for new spawns
   hlao doctor                                  environment and connectivity checks
   hlao whoami                                  this shell's scope and lineage
   hlao down [--force]                          stop the supervisor
@@ -1456,6 +1932,10 @@ const COMMAND_HELP_NAMES = new Set([
   "mode",
   "rename",
   "agents",
+  "status",
+  "logs",
+  "config",
+  "reload",
   "doctor",
   "whoami",
   "down",
@@ -1481,8 +1961,9 @@ Options:
   --permission POLICY    allow (default), ask, or deny
   --env K=V              extra environment for the adapter (repeatable)
 
-A session can be addressed by id, id prefix, or name. The spawn result includes
-the handle, label, policy, and the cursor to read from 0.`,
+A session can be addressed by id, id prefix, or name. In human mode --wait
+prints the new handle before it starts waiting, so a long first turn is
+observable. The spawn result includes the handle, label, policy, and cursor.`,
     send: `hlao send [<id>] [message] [options]
 
 Queue a prompt. One turn runs at a time; a message sent while busy waits in a
@@ -1510,6 +1991,8 @@ Options:
   --raw                  with --json, include original ACP payloads; in human
                          mode, reveal adapter stderr and command updates
   --timestamps           show full ISO timestamps instead of HH:MM:SS
+  --follow               keep reading, then one-shot wait, until the session
+                         ends or you press Ctrl-C; --json emits one page per line
 
 The response reports earliestRetainedSeq, lastSeq, nextSeq, hasMore, and
 truncated. Tool payloads are omitted unless --raw/--verbose.`,
@@ -1570,11 +2053,36 @@ the name. Inside a session, use --self <name> (or --self --clear).`,
     agents: `hlao agents [--cwd DIR]
 
 Show built-in, user, and project backends with their source and readiness.
-Environment values are never printed, only their names.`,
-    doctor: `hlao doctor
+Reads configuration locally and never starts a supervisor. Environment values
+are never printed, only their names.`,
+    status: `hlao status [--start]
 
-Check node, runtime home, config, supervisor connectivity, wire version, and
-backend readiness. Exits 1 only when a required check fails.`,
+Probe the supervisor without starting one and report pid, version, uptime, live
+sessions, protocol, config errors, and whether the config on disk is fresher.
+Exits 1 when nothing is running. --start autostarts the supervisor first.`,
+    logs: `hlao logs [--lines N] [--follow]
+
+Read the supervisor's diagnostic log directly; no supervisor is needed. The
+default is the last 50 lines; --lines 0 prints the whole file. --follow polls
+for appended lines until Ctrl-C. With --json, each line is {"path","line"}.`,
+    config: `hlao config show|path|validate
+
+Local, non-mutating configuration inspection.
+
+  show       effective values and backends; backend env values are redacted
+  path       the user config path (whether or not it exists)
+  validate   parse and validate the file; exits 1 on an invalid config`,
+    reload: `hlao reload
+
+Re-read the user config in the running supervisor. New spawns use the new
+values; live sessions keep the settings they started with. Operator only.
+An invalid file is reported and makes later spawns fail until fixed.`,
+    doctor: `hlao doctor [--start]
+
+Check node, runtime home, config, supervisor connectivity, wire version, config
+freshness, and backend readiness. By default it never starts a supervisor; a
+stopped supervisor is a warning ("installed"), not a failure. --start launches
+one and probes it. Exits 1 only when a required check fails.`,
     whoami: `hlao whoami
 
 Report this shell's role, session id, parent, root, depth, and backend from the

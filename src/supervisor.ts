@@ -2,7 +2,13 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { resolve } from "node:path";
-import { loadConfig, mergeBackends, toAgentView, type HlaoConfig } from "./config.js";
+import {
+  configFingerprint,
+  loadConfig,
+  mergeBackends,
+  toAgentView,
+  type HlaoConfig,
+} from "./config.js";
 import { HlaoError, describeError, toHlaoError } from "./errors.js";
 import { generateSessionId } from "./ids.js";
 import {
@@ -37,6 +43,8 @@ import {
   type PermitResult,
   type ReadParams,
   type ReadResult,
+  type ReloadParams,
+  type ReloadResult,
   type RequestEnvelope,
   type ResponseEnvelope,
   type SendParams,
@@ -77,6 +85,7 @@ export class SupervisorServer {
   #startedAt: string;
   #logger: Logger;
   #config: HlaoConfig;
+  #configHash: string;
   #configError: string | null;
   #sessions = new Map<string, Session>();
   #server: Server | null = null;
@@ -98,6 +107,7 @@ export class SupervisorServer {
     this.#logger = new Logger(options.home);
     const loaded = loadConfig(options.home);
     this.#config = loaded.config;
+    this.#configHash = configFingerprint(options.home);
     this.#configError = loaded.error ? loaded.error.message : null;
     if (loaded.error) this.#logger.error(`config: ${loaded.error.message}`);
 
@@ -378,6 +388,7 @@ export class SupervisorServer {
           version: this.#version,
           sessions: [...this.#sessions.values()].filter((session) => !session.isTerminal)
             .length,
+          configHash: this.#configHash,
           configError: this.#configError ?? undefined,
         };
         return result;
@@ -414,6 +425,8 @@ export class SupervisorServer {
         return this.#setMode(params as SetModeParams, caller);
       case "sessions.rename":
         return this.#rename(params as RenameParams, caller);
+      case "supervisor.reload":
+        return this.#reload(params as ReloadParams, caller);
       case "supervisor.shutdown":
         return this.#shutdown(params as ShutdownParams, caller);
       default: {
@@ -680,6 +693,24 @@ export class SupervisorServer {
     const session = this.#resolve(caller, params.sessionId);
     session.setName(params.name);
     return { session: session.view() };
+  }
+
+  #reload(_params: ReloadParams, caller: string | null): ReloadResult {
+    if (caller !== null) {
+      throw new HlaoError(
+        "operator_only",
+        "only an operator shell without HLAO_SESSION_ID may reload config",
+      );
+    }
+    const loaded = loadConfig(this.#home);
+    this.#config = loaded.config;
+    this.#configError = loaded.error ? loaded.error.message : null;
+    this.#configHash = configFingerprint(this.#home);
+    if (loaded.error) this.#logger.error(`config reload: ${loaded.error.message}`);
+    else this.#logger.info(`config reloaded (${this.#configHash.slice(0, 12)})`);
+    // Live sessions keep the config they were spawned with; only new spawns
+    // see the reloaded values.
+    return { configHash: this.#configHash, configError: this.#configError };
   }
 
   #shutdown(params: ShutdownParams, caller: string | null): ShutdownResult {

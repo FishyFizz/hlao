@@ -80,6 +80,7 @@ Result:
   startedAt: string,
   version: string,
   sessions: number,
+  configHash: string,         // sha256 of the user config file, or "missing"
   configError?: string        // present when user config failed validation
 }
 ```
@@ -284,6 +285,18 @@ Switches the provider's native session mode when the adapter advertises modes. T
 view reports `modes: { currentModeId, availableModes }`. Errors: `bad_request` when the
 backend advertises no modes, `bad_option` when the mode is not in the advertised list, and
 `session_closed` for a terminal session.
+
+### `supervisor.reload`
+
+Params: `{}`. Operator only.
+
+Result: `{ configHash: string; configError: string | null }`.
+
+Re-reads the user config file. Only future spawns are affected; live sessions keep the config
+they were created with. The result's `configHash` is the fingerprint of the file that was read.
+When loading fails, the supervisor falls back to defaults, records `configError`, and rejects
+`agents.list` and `sessions.spawn` with `config_invalid` until a valid config is reloaded.
+`hello.configHash` always reports the last successfully read (or attempted) file.
 
 ### `supervisor.shutdown`
 

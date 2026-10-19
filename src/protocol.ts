@@ -152,6 +152,7 @@ export const METHODS = [
   "sessions.permit",
   "sessions.set_mode",
   "sessions.rename",
+  "supervisor.reload",
   "supervisor.shutdown",
 ] as const;
 
@@ -164,6 +165,7 @@ export interface HelloResult {
   startedAt: string;
   version: string;
   sessions: number;
+  configHash: string;
   configError?: string;
 }
 export interface AgentsListParams {
@@ -298,6 +300,11 @@ export interface ShutdownParams {
 export interface ShutdownResult {
   sessionsClosed: number;
 }
+export interface ReloadParams {}
+export interface ReloadResult {
+  configHash: string;
+  configError: string | null;
+}
 
 type ParamsByMethod = {
   hello: HelloParams;
@@ -313,6 +320,7 @@ type ParamsByMethod = {
   "sessions.permit": PermitParams;
   "sessions.set_mode": SetModeParams;
   "sessions.rename": RenameParams;
+  "supervisor.reload": ReloadParams;
   "supervisor.shutdown": ShutdownParams;
 };
 
@@ -633,6 +641,11 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         sessionId: reqString(object, "sessionId", what, 1, 64),
         name: name as string | null,
       } as ParamsByMethod[M];
+    }
+    case "supervisor.reload": {
+      const object = asObject(raw ?? {}, what);
+      checkKeys(object, [], what);
+      return object as ReloadParams as ParamsByMethod[M];
     }
     case "supervisor.shutdown": {
       const object = asObject(raw ?? {}, what);

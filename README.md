@@ -76,8 +76,9 @@ npm link          # or: npm install -g .
 hlao doctor
 ```
 
-`hlao doctor` checks Node, the runtime home, config parsing, supervisor connectivity, the wire
-protocol version, and backend readiness.
+`hlao doctor` checks Node, the runtime home, config parsing, backend readiness, and the
+supervisor when one is running. It never starts a supervisor by default; `hlao doctor --start`
+launches one and probes it.
 
 ## Commands
 
@@ -85,7 +86,7 @@ protocol version, and backend readiness.
 |---|---|
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. `--name` gives it a label. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
-| `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
+| `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--follow` keeps reading; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
 | `hlao wait [<id>] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`. A timeout returns 2; a session that ended first returns 3. |
 | `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. |
@@ -93,7 +94,11 @@ protocol version, and backend readiness.
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
 | `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
 | `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the caller's scope. |
-| `hlao agents` | Configured backends, their source, and readiness. |
+| `hlao agents` | Configured backends, their source, and readiness. Reads config locally; never starts a supervisor. |
+| `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. |
+| `hlao logs [--lines N] [--follow]` | Read the supervisor's diagnostic log directly. |
+| `hlao config show\|path\|validate` | Inspect the local config; backend env values are redacted. |
+| `hlao reload` | Re-read user config in the supervisor for new spawns only. |
 | `hlao whoami` | This shell's role, name, and lineage. |
 | `hlao down [--force]` | Close every session and stop the supervisor. `--force` kills only a process that answers as the supervisor; an unverified stale lock is removed without touching its pid. |
 
@@ -113,6 +118,24 @@ message into one block and start a new block when the adapter's message id chang
 ANSI/control sequences from agent-provided text. A tail read that lost history says how many
 events were evicted. `hlao list` marks the caller with `*` and states whether the scope is the
 operator view or self-plus-descendants.
+
+### Watching and operating a supervisor
+
+`hlao read <id> --follow` is a caller-owned loop: one `read` page, then one-shot
+`wait --until change`, repeating until the session ends or Ctrl-C. With `--json`, each page is
+one JSON object per line, so a stream can be consumed without framing. The supervisor still
+owns no timer.
+
+`hlao status` probes an existing supervisor and `--start` opts into autostart. `hlao logs` reads
+`supervisor.log` directly (rotated at 2 MiB while running, with one previous file) and can
+follow it. `agents`, `config`, and `doctor` are local reads; only `doctor --start` starts a
+supervisor. A long `--wait` prints a progress line on a TTY after two seconds and leaves the
+work running if you press Ctrl-C.
+
+Editing the config does not affect a running supervisor until `hlao reload`. Live sessions keep
+the settings they were spawned with; new spawns use the new values. `doctor` and `status` warn
+when the file on disk differs from what the supervisor loaded. Backend environment values are
+never printed by `agents` or `config show`.
 
 ## The two rules under the surface
 

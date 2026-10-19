@@ -210,6 +210,13 @@ const app = agent({ name: "fake-acp" })
       return { stopReason: "end_turn" };
     }
 
+    if (mode === "delayed-crash") {
+      await message("about to fail", "m1");
+      setTimeout(() => process.exit(4), delayMs);
+      await new Promise<void>(() => {});
+      return { stopReason: "end_turn" };
+    }
+
     if (mode === "messages") {
       await message("first message", "m1");
       await message("second message", "m2");

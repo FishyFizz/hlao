@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
@@ -151,6 +152,28 @@ export function mergeBackends(
   const project = loadProjectBackends(cwd);
   for (const [name, manifest] of Object.entries(project)) merged[name] = manifest;
   return merged;
+}
+
+/** Fingerprint of the on-disk user config; "missing" when there is no file. */
+export function configFingerprint(home: string): string {
+  try {
+    return createHash("sha256")
+      .update(readFileSync(configPath(home)))
+      .digest("hex");
+  } catch {
+    return "missing";
+  }
+}
+
+/** A config safe to show: backend environment values are never printable. */
+export function redactConfig(config: HlaoConfig): HlaoConfig {
+  const backends: Record<string, BackendManifest> = {};
+  for (const [name, manifest] of Object.entries(config.backends)) {
+    const env: Record<string, string> = {};
+    for (const key of Object.keys(manifest.env)) env[key] = "***";
+    backends[name] = { ...manifest, env };
+  }
+  return { ...config, backends };
 }
 
 export function toAgentView(manifest: BackendManifest): AgentView {

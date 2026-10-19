@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+### Added
+
+- Session names: `rename`, name resolution in the caller's scope (exact id, then unique name,
+  then prefix), `HLAO_NAME`, and `*`/**self** addressing hints. Human and JSON outputs show
+  names alongside handles.
+- `--self` for `send`/`mode`/`rename`; self-defaulting for `read`, `wait`, `cancel`, `close`,
+  and `permit` when `HLAO_SESSION_ID` is set.
+- `read --follow`: a caller-owned read + one-shot wait loop, with NDJSON pages under `--json`.
+- Operations without autostart: `status`, `logs`, local `agents`, local `config
+  show|path|validate`, non-mutating `doctor`, and operator-only `reload` for new spawns.
+- Long human waits print a TTY progress line after two seconds.
+- Supervisor log rotation by size while running (one previous file retained).
+- `spawn --wait` prints the handle before waiting in human mode.
+
+### Changed
+
+- `wait` exits 3 when the session ended before the awaited condition; `--until exit` still 0.
+- Tail reads report eviction whenever earlier history is missing.
+- JSON without `--raw` strips `rawInput`, `rawOutput`, and `content`; human `--verbose` renders
+  bounded tool payloads.
+- Agent text, titles, and names are stripped of ANSI/control sequences in human output.
+- Distinct adapter message ids start distinct agent blocks; pending permissions are summarized
+  once; human reads show timestamps; `list` prints a scope footer.
+- Parser guardrails: rejected extra positionals and flag-like path values, unknown help topics,
+  and warnings for inert `--timeout`/`--since`; `send --prompt`/`--prompt-file` added.
+
 ## 0.1.0 — 2026-10-19
 
 First complete release of the primitive surface.
