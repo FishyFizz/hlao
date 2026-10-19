@@ -1,0 +1,53 @@
+{
+  "name": "hlao",
+  "version": "0.1.0",
+  "description": "A primitive surface for agent orchestration: spawn, send, read, wait, list.",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test --test-concurrency=4 dist-test/tests",
+    "test:unit": "npm run build && tsc -p tsconfig.test.json && node --test --test-concurrency=4 dist-test/tests/unit",
+    "test:e2e": "npm run build && tsc -p tsconfig.test.json && node --test --test-concurrency=4 dist-test/tests/e2e",
+    "start": "node dist/cli.js",
+    "clean": "node -e \"const fs=require('fs');for(const d of ['dist','dist-test'])fs.rmSync(d,{recursive:true,force:true})\"",
+    "prepublishOnly": "npm run check && npm test"
+  },
+  "keywords": [
+    "agents",
+    "orchestration",
+    "acp",
+    "cli",
+    "supervisor"
+  ],
+  "author": "HLAO contributors",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.93.0",
+    "@agentclientprotocol/codex-acp": "2.2.2",
+    "@agentclientprotocol/sdk": "1.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  },
+  "private": false,
+  "bin": {
+    "hlao": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "contracts",
+    "examples",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
+}

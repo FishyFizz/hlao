@@ -1,0 +1,20 @@
+{
+  "permissionPolicy": "allow",
+  "waitTimeoutMs": 1800000,
+  "sendWaitTimeoutMs": 1800000,
+  "startupTimeoutMs": 120000,
+  "maxEventsPerSession": 5000,
+  "maxEventLogBytes": 16777216,
+  "maxEventBytes": 262144,
+  "retainClosedMs": 3600000,
+  "backends": {
+    "my-agent": {
+      "command": "node",
+      "args": ["tools/my-acp-agent.js"],
+      "env": {
+        "MY_FLAG": "1"
+      },
+      "description": "an in-repo ACP agent"
+    }
+  }
+}
