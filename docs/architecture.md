@@ -27,7 +27,9 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
    provider adapter ──► provider runtime ──► leaf tools
 ```
 
-- The CLI is a thin request/response client. It holds no orchestration state.
+- The CLI is a thin request/response client. It holds no orchestration state. Its only loops
+  are caller-owned watches (`read --follow` over read + one-shot wait, and `logs --follow` over
+  the supervisor's file), which end with the CLI process.
 - The supervisor owns live sessions and their child processes. Its in-memory process table
   is the state; there is no session database and no global session registry.
 - Each HLAO session is one adapter process running one ACP session. Isolation is deliberate:

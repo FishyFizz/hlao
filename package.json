@@ -1,6 +1,6 @@
 {
   "name": "hlao",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A primitive surface for agent orchestration: spawn, send, read, wait, list.",
   "directories": {
     "doc": "docs"

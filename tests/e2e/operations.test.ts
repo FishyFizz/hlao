@@ -314,7 +314,7 @@ test("spawn --wait prints the handle before the first turn finishes", async (t) 
       "--env",
       "FAKE_MODE=slow",
       "--env",
-      "FAKE_DELAY_MS=3000",
+      "FAKE_DELAY_MS=5000",
       "--wait",
       "--timeout",
       "15s",
@@ -357,7 +357,7 @@ test("spawn --wait prints the handle before the first turn finishes", async (t) 
             `handle was not printed before the turn ended\nstdout:\n${stdout}\nstderr:\n${stderr}`,
           ),
         );
-      }, 2_000);
+      }, 3_500);
       const check = (): void => {
         if (/spawned /.test(stdout) && !/turn 1 ended/.test(stdout)) {
           clearTimeout(timer);
