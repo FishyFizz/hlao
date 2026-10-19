@@ -139,8 +139,10 @@ Result:
 ```
 
 If `protocolVersion` is present and its major differs, the response is `version_mismatch`.
-The pre-1.1 numeric form (`protocolVersion: 1`) is accepted for a supervisor that has not
-restarted; new clients should send the object form.
+The field was added in 1.1; a client that may meet a 1.0 supervisor should call `hello` with
+`{}` first, then use the returned version and capabilities. The pre-1.1 numeric form
+(`protocolVersion: 1`) is accepted for a supervisor that has not restarted; new clients should
+send the object form.
 
 ### `backends.list`
 
