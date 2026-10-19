@@ -44,8 +44,8 @@ caller can see; it is not a security boundary.
 | `bad_request` | malformed envelope or invalid params |
 | `unauthorized` | wrong or missing token |
 | `version_mismatch` | CLI and supervisor protocol versions differ |
-| `not_found` | no session matching the id/prefix in scope |
-| `ambiguous_id` | prefix matches more than one session in scope (`details.candidates`) |
+| `not_found` | no session matching the id, name, or prefix in scope |
+| `ambiguous_id` | a name or prefix matches more than one session in scope (`details.candidates`) |
 | `forbidden` | target session is outside the caller's scope |
 | `operator_only` | method is reserved for an unscoped operator shell |
 | `backend_not_found` | no such backend manifest |
@@ -63,7 +63,9 @@ caller can see; it is not a security boundary.
 
 ## Methods
 
-All session ids accept an exact handle or an unambiguous prefix.
+All `sessionId` params accept an exact handle first, then a unique session name, then a unique
+handle prefix, resolved within the caller's scope. Duplicate names are `ambiguous_id` with
+`details.candidates`; the full handle still resolves.
 
 ### `hello`
 
@@ -146,6 +148,14 @@ Operator scope lists all sessions. Session scope lists the caller and its descen
 
 Params: `{ sessionId: string }`. Result: `{ session: SessionView }`.
 
+### `sessions.rename`
+
+Params: `{ sessionId: string; name: string | null }` (`null` clears the name).
+
+Result: `{ session: SessionView }`. Appends a `session.renamed` event with
+`{ name, by: "operator" }`. Names are mutable labels, not identity: they do not affect scope,
+the handle, or `HLAO_SESSION_ID`.
+
 ### `sessions.send`
 
 Params:
@@ -187,7 +197,9 @@ Params:
 ```
 
 A page is also bounded by a byte budget (8 MiB). Fewer than `limit` events may be returned,
-with `hasMore: true`; a single event larger than the budget is returned alone.
+with `hasMore: true`; a single event larger than the budget is returned alone. Without
+`raw: true`, the private payload keys `raw`, `rawInput`, `rawOutput`, and `content` are
+removed from each event's `data`; orchestration fields remain.
 
 Result:
 
@@ -199,9 +211,13 @@ Result:
   lastSeq: number;
   nextSeq: number;               // cursor for the following read
   hasMore: boolean;
-  truncated: boolean;            // events in [since+1, earliestRetainedSeq-1] were evicted
+  truncated: boolean;            // history before the page was evicted
 }
 ```
+
+For a tail read, `truncated` is true whenever any event before the returned page was evicted
+(`earliestRetainedSeq > 1`), not only when the page itself starts late. For a `since` read,
+it is true when `since + 1 < earliestRetainedSeq`.
 
 ### `sessions.wait`
 
@@ -288,7 +304,8 @@ type EventView = {
 };
 
 type EventType =
-  | "session.created" | "session.initialized" | "session.closed" | "session.failed"
+  | "session.created" | "session.initialized" | "session.renamed"
+  | "session.closed" | "session.failed"
   | "prompt.sent" | "prompt.queued" | "prompt.discarded"
   | "turn.started" | "turn.ended" | "cancel.requested"
   | "agent.message" | "agent.thought" | "user.message"

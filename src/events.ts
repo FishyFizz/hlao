@@ -110,6 +110,8 @@ export class EventLog {
       page = this.#events.slice(start, end);
       nextSeq = this.#lastSeq + 1;
       hasMore = false;
+      // A tail window is still incomplete history if events were evicted before it.
+      truncated = earliest > 1;
     } else {
       truncated = since + 1 < earliest;
       let start = this.#firstIndexAfter(since);
@@ -160,14 +162,17 @@ export class EventLog {
 }
 
 function toView(event: StoredEvent, includeRaw: boolean): EventView {
-  const data = includeRaw ? event.data : stripRaw(event.data);
+  const data = includeRaw ? event.data : stripPrivateData(event.data);
   return { seq: event.seq, at: event.at, type: event.type, turn: event.turn, data };
 }
 
-function stripRaw(data: Record<string, unknown>): Record<string, unknown> {
-  if (!("raw" in data)) return data;
+const PRIVATE_KEYS = ["raw", "rawInput", "rawOutput", "content"] as const;
+
+/** Verbose ACP payloads are available only when the caller asks for raw data. */
+function stripPrivateData(data: Record<string, unknown>): Record<string, unknown> {
+  if (!PRIVATE_KEYS.some((key) => key in data)) return data;
   const copy = { ...data };
-  delete copy.raw;
+  for (const key of PRIVATE_KEYS) delete copy[key];
   return copy;
 }
 

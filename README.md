@@ -27,27 +27,27 @@ next: hlao read k7m2qp --since 0
 
 $ hlao read k7m2qp --since 0
 k7m2qp  claude  idle
-cwd D:\work\svc · turn 1 · seq 12 · root · pid 21840
+cwd D:\work\svc · turn 1 · seq 12 · policy allow · root · pid 21840
 
-#1    session created · claude · D:\work\svc
-#2    ACP session ready
-#3    you › Audit the build log at build.log and report the first failure.
-#4    — turn 1 —
-#5    tool › Read build.log [read]
-#6    tool › Read build.log → completed
-#7    agent › The first failure is at line 41: `tsc: Cannot find module 'retry'`.
-#8    — turn 1 ended: end_turn —
+#1    14:02:03 session created · claude · D:\work\svc
+#2    14:02:03 ACP session ready
+#3    14:02:04 you › Audit the build log at build.log and report the first failure.
+#4    14:02:04 — turn 1 —
+#5    14:02:06 tool › Read build.log [read]
+#6    14:02:06 tool › Read build.log → completed
+#7    14:02:11 agent › The first failure is at line 41: `tsc: Cannot find module 'retry'`.
+#8    14:02:11 — turn 1 ended: end_turn —
 ```
-
-From inside a spawned session, the agent has the same CLI and a scoped view:
 
 ```console
 $ hlao whoami
 session k7m2qp · parent — · root k7m2qp · depth 0 · backend claude
 
-$ hlao spawn claude "Check whether the retry package is declared in package.json."
-spawned 3f9xw2 (claude) in D:\work\svc  parent k7m2qp
-```
+$ hlao rename k7m2qp builder
+renamed builder (k7m2qp)
+
+$ hlao spawn claude "Check whether the retry package is declared in package.json." --name check
+spawned check (3f9xw2) (claude) in D:\work\svc  parent k7m2qp  policy allow
 
 An agent sees itself and its descendants. An operator shell has no `HLAO_SESSION_ID` and sees
 everything. That scope is also the halt authority: a session can `cancel` or `close` itself
@@ -83,22 +83,36 @@ protocol version, and backend readiness.
 
 | Command | What it does |
 |---|---|
-| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. |
-| `hlao send <id> [message]` | Queue a prompt. `--wait` waits for that message's turn. `--stdin` reads it from a pipe. |
-| `hlao read <id> [--since N]` | Orchestration state plus a bounded page of typed events. `--raw` includes ACP payloads. |
-| `hlao wait <id> [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`. A timeout returns 2. |
-| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, optionally filtered by working directory. |
-| `hlao cancel <id>` | Stop the active turn and discard queued messages. |
-| `hlao close <id> [--tree]` | End a session; `--tree` closes descendants first. |
-| `hlao permit <id> --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
-| `hlao mode <id> [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
+| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. `--name` gives it a label. |
+| `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
+| `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
+| `hlao wait [<id>] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`. A timeout returns 2; a session that ended first returns 3. |
+| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. |
+| `hlao cancel [<id>]` | Stop the active turn and discard queued messages. |
+| `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. |
+| `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
+| `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
+| `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the caller's scope. |
 | `hlao agents` | Configured backends, their source, and readiness. |
-| `hlao whoami` | This shell's role and lineage. |
+| `hlao whoami` | This shell's role, name, and lineage. |
 | `hlao down [--force]` | Close every session and stop the supervisor. `--force` kills only a process that answers as the supervisor; an unverified stale lock is removed without touching its pid. |
 
-Global flags: `--json`, `--home DIR`, `-h`; they may appear before or after the command.
-Durations are `500ms`, `30s`, `5m`, `2h`, `1d`, or a bare millisecond count. Exit codes:
-`0` ok, `1` error, `2` a bounded wait expired (the work continues).
+Global flags: `--json`, `--home DIR`, `--no-color`, `-h`; they may appear before or after the
+command. `--` ends option parsing, so a message may start with a dash. Durations are `500ms`,
+`30s`, `5m`, `2h`, `1d`, or a bare millisecond count. Exit codes: `0` ok, `1` error, `2` a
+bounded wait expired (the work continues), `3` a `wait` that could not be satisfied because
+the session ended.
+
+A session is addressable by exact id, then unique name, then unique id prefix. `send`, `mode`,
+and `rename` need `--self` to target the caller, because their first positional means
+something else. `read`, `wait`, `cancel`, `close`, and `permit` default to the caller's session
+inside a session, so `hlao read` is enough.
+
+Human reads show `HH:MM:SS` cursors (`--timestamps` switches to ISO), coalesce a streamed
+message into one block and start a new block when the adapter's message id changes, and strip
+ANSI/control sequences from agent-provided text. A tail read that lost history says how many
+events were evicted. `hlao list` marks the caller with `*` and states whether the scope is the
+operator view or self-plus-descendants.
 
 ## The two rules under the surface
 
@@ -143,6 +157,7 @@ A spawned session inherits:
 | Variable | Meaning |
 |---|---|
 | `HLAO_SESSION_ID` | its own handle |
+| `HLAO_NAME` | the session's name, when one was given |
 | `HLAO_PARENT_ID` | who spawned it |
 | `HLAO_ROOT_ID` | the job root |
 | `HLAO_DEPTH` | 0 at the root |
@@ -154,9 +169,9 @@ The agent can run `hlao` from `PATH`, or `node "$HLAO_CLI"` when HLAO is not ins
 globally. A typical worker loop:
 
 ```bash
-hlao send "$HLAO_SESSION_ID" "Check the log again." --wait --timeout 20m
-hlao read "$HLAO_SESSION_ID" --since 42
-hlao wait "$HLAO_SESSION_ID" --until permission --timeout 10m
+hlao send --self "Check the log again." --wait --timeout 20m
+hlao read --since 42
+hlao wait --until permission --timeout 10m
 ```
 
 `--json` makes every command machine-readable. Success prints the result object; failure

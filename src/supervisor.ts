@@ -41,6 +41,8 @@ import {
   type ResponseEnvelope,
   type SendParams,
   type SendResult,
+  type RenameParams,
+  type RenameResult,
   type SetModeParams,
   type SetModeResult,
   type ShutdownParams,
@@ -410,6 +412,8 @@ export class SupervisorServer {
         return this.#permit(params as PermitParams, caller);
       case "sessions.set_mode":
         return this.#setMode(params as SetModeParams, caller);
+      case "sessions.rename":
+        return this.#rename(params as RenameParams, caller);
       case "supervisor.shutdown":
         return this.#shutdown(params as ShutdownParams, caller);
       default: {
@@ -672,6 +676,12 @@ export class SupervisorServer {
     return { session: session.view() };
   }
 
+  #rename(params: RenameParams, caller: string | null): RenameResult {
+    const session = this.#resolve(caller, params.sessionId);
+    session.setName(params.name);
+    return { session: session.view() };
+  }
+
   #shutdown(params: ShutdownParams, caller: string | null): ShutdownResult {
     if (caller !== null) {
       throw new HlaoError(
@@ -726,6 +736,21 @@ export class SupervisorServer {
         );
       }
       return exact;
+    }
+
+    const nameMatches = scope.filter((session) => session.name === token);
+    if (nameMatches.length === 1) return nameMatches[0]!;
+    if (nameMatches.length > 1) {
+      throw new HlaoError(
+        "ambiguous_id",
+        `session name "${token}" matches ${nameMatches.length} sessions`,
+        {
+          candidates: nameMatches.map((session) => {
+            const view = session.view();
+            return { id: view.id, name: view.name, status: view.status };
+          }),
+        },
+      );
     }
 
     const matches = scope.filter((session) => session.id.startsWith(token));

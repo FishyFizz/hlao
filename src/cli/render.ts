@@ -40,41 +40,63 @@ export function colorsEnabled(json: boolean): boolean {
   return !json && process.stdout.isTTY === true && process.env.NO_COLOR === undefined;
 }
 
-export function renderSessionTable(sessions: SessionView[], style: Style): string {
+export interface RenderOptions {
+  verbose?: boolean;
+  fullTimestamps?: boolean;
+}
+
+export function renderSessionTable(
+  sessions: SessionView[],
+  style: Style,
+  selfId: string | null = null,
+): string {
   if (sessions.length === 0) return style.dim("no sessions");
+  const showSelf = selfId !== null;
   const rows = sessions.map((session) => [
+    ...(showSelf ? [session.id === selfId ? "*" : ""] : []),
     session.id,
-    session.name ?? "—",
+    oneLine(session.name ?? "—"),
     session.backend,
     styleStatus(session.status, style),
     String(session.turn),
     session.queued > 0 ? String(session.queued) : "—",
     formatAge(session.lastActivityAt),
-    truncateLeft(session.cwd, 60),
+    truncateLeft(oneLine(session.cwd), 60),
   ]);
   return renderTable(
-    ["ID", "NAME", "BACKEND", "STATUS", "TURN", "QUEUED", "AGE", "CWD"],
+    [...(showSelf ? ["SELF"] : []), "ID", "NAME", "BACKEND", "STATUS", "TURN", "QUEUED", "AGE", "CWD"],
     rows,
     style,
   );
 }
 
 export function renderSessionHeader(session: SessionView, style: Style): string {
+  const terminal = session.status === "closed" || session.status === "failed";
   const parts = [
     style.bold(session.id),
-    session.name ? style.cyan(session.name) : null,
+    session.name ? style.cyan(oneLine(session.name)) : null,
     session.backend,
     styleStatus(session.status, style),
   ].filter((part): part is string => part !== null);
   const details = [
-    `cwd ${session.cwd}`,
+    `cwd ${oneLine(session.cwd)}`,
     `turn ${session.turn}`,
     `seq ${session.lastSeq}`,
     session.queued > 0 ? `queued ${session.queued}` : null,
     session.modes ? `mode ${session.modes.currentModeId}` : null,
     `policy ${session.permissionPolicy}`,
     session.parentId ? `parent ${session.parentId}` : "root",
-    session.processId ? `pid ${session.processId}` : null,
+    session.depth > 0 ? `root ${session.rootId}` : null,
+    terminal ? `ended ${session.endedAt ? formatAge(session.endedAt) : "?"}` : null,
+    terminal
+      ? session.exit
+        ? session.exit.signal
+          ? `signal ${session.exit.signal}`
+          : `exit ${session.exit.code ?? "?"}`
+        : "exit unknown"
+      : session.processId
+        ? `pid ${session.processId}`
+        : null,
   ].filter((part): part is string => part !== null);
   return `${parts.join("  ")}\n${style.dim(details.join(" · "))}`;
 }
@@ -83,22 +105,36 @@ export function renderReadResult(
   result: ReadResult,
   style: Style,
   commandPrefix = "hlao",
-  verbose = false,
+  options: RenderOptions = {},
 ): string {
   const lines: string[] = [renderSessionHeader(result.session, style)];
+  const pending = result.session.pendingPermission;
 
-  if (result.session.pendingPermission) {
+  if (pending) {
+    const hasRequest = result.events.some(
+      (event) =>
+        event.type === "permission.requested" &&
+        event.data.requestId === pending.requestId,
+    );
     lines.push("");
-    lines.push(renderPermission(result.session.id, result.session.pendingPermission, style, commandPrefix));
+    if (hasRequest) {
+      lines.push(
+        style.dim(
+          `pending permission: ${oneLine(pending.title)} — ${commandPrefix} permit ${result.session.id} --allow`,
+        ),
+      );
+    } else {
+      lines.push(renderPermission(result.session.id, pending, style, commandPrefix));
+    }
   }
 
   if (result.events.length === 0) {
     lines.push("");
-    lines.push(style.dim("no events"));
+    lines.push(style.dim(`no events (last seq ${result.lastSeq})`));
   } else {
     lines.push("");
     lines.push(
-      ...renderEvents(result.events, style, result.session.id, commandPrefix, verbose),
+      ...renderEvents(result.events, style, result.session.id, commandPrefix, options),
     );
   }
 
@@ -106,7 +142,7 @@ export function renderReadResult(
     lines.push("");
     lines.push(
       style.yellow(
-        `earlier events were evicted; retained history starts at #${result.earliestRetainedSeq}`,
+        `history starts at #${result.earliestRetainedSeq} — ${result.earliestRetainedSeq - 1} earlier events were evicted`,
       ),
     );
   }
@@ -126,27 +162,32 @@ export function renderEvents(
   style: Style,
   sessionId: string,
   commandPrefix = "hlao",
-  verbose = false,
+  options: RenderOptions = {},
 ): string[] {
+  const verbose = options.verbose ?? false;
+  const full = options.fullTimestamps ?? false;
   const lines: string[] = [];
   let agentText = "";
   let agentSeq = 0;
+  let agentAt = "";
   let agentMessageId: string | null = null;
   let thoughtText = "";
   let thoughtSeq = 0;
+  let thoughtAt = "";
   let hiddenStderr = 0;
   let firstHiddenStderr: number | null = null;
+  let firstHiddenAt = "";
 
   const flushAgent = (): void => {
     if (agentText.length > 0) {
-      lines.push(`${cursor(agentSeq, style)}${style.cyan("agent")} › ${indent(agentText)}`);
+      lines.push(`${cursor(agentSeq, agentAt, style, full)}${style.cyan("agent")} › ${indent(agentText)}`);
       agentText = "";
       agentMessageId = null;
     }
   };
   const flushThought = (): void => {
     if (thoughtText.length > 0) {
-      lines.push(`${cursor(thoughtSeq, style)}${style.dim("thinking")} › ${style.dim(indent(thoughtText))}`);
+      lines.push(`${cursor(thoughtSeq, thoughtAt, style, full)}${style.dim("thinking")} › ${style.dim(indent(thoughtText))}`);
       thoughtText = "";
     }
   };
@@ -164,14 +205,20 @@ export function renderEvents(
         if (agentMessageId !== null && messageId !== null && messageId !== agentMessageId) {
           flushAgent();
         }
-        if (agentText.length === 0) agentSeq = event.seq;
+        if (agentText.length === 0) {
+          agentSeq = event.seq;
+          agentAt = event.at;
+        }
         if (messageId !== null) agentMessageId = messageId;
         agentText += typeof data.text === "string" ? data.text : "";
         break;
       }
       case "agent.thought": {
         flushAgent();
-        if (thoughtText.length === 0) thoughtSeq = event.seq;
+        if (thoughtText.length === 0) {
+          thoughtSeq = event.seq;
+          thoughtAt = event.at;
+        }
         thoughtText += typeof data.text === "string" ? data.text : "";
         break;
       }
@@ -180,50 +227,52 @@ export function renderEvents(
       case "prompt.sent": {
         flush();
         const text = typeof data.text === "string" ? data.text : "";
-        lines.push(`${cursor(event.seq, style)}${style.bold("you")} › ${indent(text)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.bold("you")} › ${indent(text)}`);
         break;
       }
       case "prompt.queued": {
         flush();
         lines.push(
-          `${cursor(event.seq, style)}${style.dim(`queued message (position ${String(data.position ?? "?")})`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.dim(`queued message (position ${String(data.position ?? "?")})`)}`,
         );
         break;
       }
       case "prompt.discarded": {
         flush();
         lines.push(
-          `${cursor(event.seq, style)}${style.dim(`discarded a queued message (${String(data.reason ?? "cancelled")})`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.dim(`discarded a queued message (${String(data.reason ?? "cancelled")})`)}`,
         );
         break;
       }
       case "turn.started": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} —`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} —`)}`);
         break;
       }
       case "turn.ended": {
         flush();
         const stop = String(data.stopReason ?? "unknown");
         lines.push(
-          `${cursor(event.seq, style)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} ended: ${stop} —`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} ended: ${stop} —`)}`,
         );
         break;
       }
       case "tool.call": {
         flush();
-        const title = String(data.title ?? data.toolCallId ?? "tool");
+        const title = oneLine(data.title ?? data.toolCallId ?? "tool");
         const kind = data.kind ? style.dim(` [${String(data.kind)}]`) : "";
-        lines.push(`${cursor(event.seq, style)}${style.yellow("tool")} › ${title}${kind}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.yellow("tool")} › ${title}${kind}`);
+        if (verbose) lines.push(...renderPayload(data.rawInput, style));
         break;
       }
       case "tool.update": {
         flush();
         const status = typeof data.status === "string" ? data.status : "updated";
-        const title = String(data.title ?? data.toolCallId ?? "tool");
+        const title = oneLine(data.title ?? data.toolCallId ?? "tool");
         if (status !== "completed" && status !== "failed") break;
         const colour = status === "failed" ? style.red : style.dim;
-        lines.push(`${cursor(event.seq, style)}${style.yellow("tool")} › ${title} ${colour(`→ ${status}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.yellow("tool")} › ${title} ${colour(`→ ${status}`)}`);
+        if (verbose) lines.push(...renderPayload(data.rawOutput, style));
         break;
       }
       case "permission.requested": {
@@ -231,18 +280,20 @@ export function renderEvents(
         const options = Array.isArray(data.options)
           ? (data.options as { optionId: string; name: string; kind: string }[])
           : [];
-        const title = String(data.title ?? "permission required");
+        const title = oneLine(data.title ?? "permission required");
         if (data.auto === true) {
           lines.push(
-            `${cursor(event.seq, style)}${style.magenta("permission")} › ${title} ${style.dim(`— auto-answered by policy:${String(data.policy ?? "allow")}`)}`,
+            `${cursor(event.seq, event.at, style, full)}${style.magenta("permission")} › ${title} ${style.dim(`— auto-answered by policy:${String(data.policy ?? "allow")}`)}`,
           );
           break;
         }
         lines.push(
-          `${cursor(event.seq, style)}${style.magenta("permission needed")} › ${title}`,
+          `${cursor(event.seq, event.at, style, full)}${style.magenta("permission needed")} › ${title}`,
         );
         for (const option of options) {
-          lines.push(`  ${style.dim(option.kind.padEnd(12))} ${option.name} ${style.dim(`(${option.optionId})`)}`);
+          lines.push(
+            `  ${style.dim(String(option.kind).padEnd(12))} ${oneLine(option.name)} ${style.dim(`(${oneLine(option.optionId)})`)}`,
+          );
         }
         lines.push(
           `  ${style.dim(`answer: ${commandPrefix} permit ${sessionId} --allow`)}`,
@@ -256,68 +307,79 @@ export function renderEvents(
       }
       case "permission.resolved": {
         flush();
-        const answer = data.optionId === null ? "cancelled" : String(data.optionId);
+        const answer = data.optionId === null ? "cancelled" : oneLine(data.optionId);
         lines.push(
-          `${cursor(event.seq, style)}${style.magenta("permission")} › ${answer} ${style.dim(`(${String(data.by ?? "unknown")})`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.magenta("permission")} › ${answer} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
         );
         break;
       }
       case "policy.changed": {
         flush();
         lines.push(
-          `${cursor(event.seq, style)}${style.magenta("policy")} › ${String(data.permissionPolicy ?? "")} ${style.dim(`(${String(data.by ?? "unknown")})`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.magenta("policy")} › ${oneLine(data.permissionPolicy ?? "")} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
         );
         break;
       }
       case "session.created": {
         flush();
         lines.push(
-          `${cursor(event.seq, style)}${style.dim(`session created · ${String(data.backend ?? "")} · ${String(data.cwd ?? "")}`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.dim(`session created · ${oneLine(data.backend ?? "")} · ${oneLine(data.cwd ?? "")}`)}`,
+        );
+        break;
+      }
+      case "session.renamed": {
+        flush();
+        const name = data.name === null || data.name === undefined ? "(cleared)" : oneLine(data.name);
+        lines.push(
+          `${cursor(event.seq, event.at, style, full)}${style.dim(`session renamed · ${name}`)}`,
         );
         break;
       }
       case "session.initialized": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim("ACP session ready")}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("ACP session ready")}`);
         break;
       }
       case "session.closed": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim("session closed")}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("session closed")}`);
         break;
       }
       case "session.failed": {
         flush();
         lines.push(
-          `${cursor(event.seq, style)}${style.red(`session failed: ${String(data.message ?? "unknown")}`)}`,
+          `${cursor(event.seq, event.at, style, full)}${style.red(`session failed: ${oneLine(data.message ?? "unknown")}`)}`,
         );
         break;
       }
       case "cancel.requested": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim("cancel requested")}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("cancel requested")}`);
         break;
       }
       case "error": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.red(`error: ${String(data.message ?? "unknown")}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.red(`error: ${oneLine(data.message ?? "unknown")}`)}`);
         break;
       }
       case "stderr": {
         flush();
         if (verbose) {
-          lines.push(`${cursor(event.seq, style)}${style.dim(`stderr › ${String(data.text ?? "")}`)}`);
+          lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`stderr › ${String(data.text ?? "")}`)}`);
         } else {
           hiddenStderr += 1;
-          if (firstHiddenStderr === null) firstHiddenStderr = event.seq;
+          if (firstHiddenStderr === null) {
+            firstHiddenStderr = event.seq;
+            firstHiddenAt = event.at;
+          }
         }
         break;
       }
       case "notice": {
         flush();
         lines.push(
-          `${cursor(event.seq, style)}${style.cyan("notice")} › ${String(data.title ?? "")}${
-            data.description ? style.dim(` — ${String(data.description)}`) : ""
+          `${cursor(event.seq, event.at, style, full)}${style.cyan("notice")} › ${oneLine(data.title ?? "")}${
+            data.description ? style.dim(` — ${oneLine(data.description)}`) : ""
           }`,
         );
         break;
@@ -326,39 +388,49 @@ export function renderEvents(
         flush();
         const used = Number(data.used ?? 0);
         const size = Number(data.size ?? 0);
-        lines.push(`${cursor(event.seq, style)}${style.dim(`usage › ${used}/${size} tokens`)}`);
+        const cost = data.cost as { amount?: number; currency?: string } | undefined;
+        const costText =
+          cost && typeof cost.amount === "number"
+            ? ` · ${(cost.amount / 100).toFixed(2)} ${cost.currency ?? "USD"}`
+            : "";
+        lines.push(
+          `${cursor(event.seq, event.at, style, full)}${style.dim(`usage › ${used}/${size} tokens${costText}`)}`,
+        );
         break;
       }
       case "plan": {
         flush();
         const entries = Array.isArray(data.entries) ? data.entries : [];
-        lines.push(`${cursor(event.seq, style)}${style.cyan("plan")} › ${entries.length} entries`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.cyan("plan")} › ${entries.length} entries`);
         for (const entry of entries.slice(0, 10)) {
           const item = entry as { status?: string; content?: string };
-          lines.push(`  ${style.dim(`[${item.status ?? "?"}]`)} ${item.content ?? ""}`);
+          lines.push(`  ${style.dim(`[${oneLine(item.status ?? "?")}]`)} ${oneLine(item.content ?? "")}`);
+        }
+        if (entries.length > 10) {
+          lines.push(`  ${style.dim(`… ${entries.length - 10} more entries`)}`);
         }
         break;
       }
       case "mode": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim(`mode › ${String(data.currentModeId ?? "")}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`mode › ${oneLine(data.currentModeId ?? "")}`)}`);
         break;
       }
       case "config": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim("config updated")}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("config updated")}`);
         break;
       }
       case "commands": {
         flush();
         if (!verbose) break;
         const commands = Array.isArray(data.commands) ? data.commands.length : 0;
-        lines.push(`${cursor(event.seq, style)}${style.dim(`commands › ${commands} available`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`commands › ${commands} available`)}`);
         break;
       }
       case "session.info": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim(`session › ${String(data.title ?? "")}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`session › ${oneLine(data.title ?? "")}`)}`);
         break;
       }
       case "plan.update":
@@ -366,12 +438,12 @@ export function renderEvents(
       case "subagent":
       case "raw": {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim(event.type)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(event.type)}`);
         break;
       }
       default: {
         flush();
-        lines.push(`${cursor(event.seq, style)}${style.dim(event.type)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(event.type)}`);
         break;
       }
     }
@@ -380,7 +452,7 @@ export function renderEvents(
   flush();
   if (hiddenStderr > 0 && firstHiddenStderr !== null) {
     lines.push(
-      `${cursor(firstHiddenStderr, style)}${style.dim(
+      `${cursor(firstHiddenStderr, firstHiddenAt, style, full)}${style.dim(
         `${hiddenStderr} adapter diagnostic line${hiddenStderr === 1 ? "" : "s"} hidden (use --raw)`,
       )}`,
     );
@@ -395,10 +467,10 @@ export function renderPermission(
   commandPrefix = "hlao",
 ): string {
   const lines = [
-    `${style.magenta("permission needed")} › ${permission.title || "(untitled tool call)"}`,
+    `${style.magenta("permission needed")} › ${oneLine(permission.title || "(untitled tool call)")}`,
   ];
   for (const option of permission.options) {
-    lines.push(`  ${style.dim(option.kind.padEnd(12))} ${option.name} ${style.dim(`(${option.optionId})`)}`);
+    lines.push(`  ${style.dim(option.kind.padEnd(12))} ${oneLine(option.name)} ${style.dim(`(${oneLine(option.optionId)})`)}`);
   }
   const allowed = permission.options.find(
     (option) => option.kind === "allow_once" || option.kind === "allow_always",
@@ -418,15 +490,12 @@ export function renderAgentTable(agents: AgentView[], style: Style): string {
   if (agents.length === 0) return style.dim("no backends configured");
   const rows = agents.map((agent) => {
     const commandLine = [agent.command, ...agent.args].join(" ");
-    const notes = agent.available
-      ? (agent.description ?? "—")
-      : style.red(agent.unavailableReason ?? "unavailable");
     return [
-      agent.name,
-      agent.source,
+      oneLine(agent.name),
+      oneLine(agent.source),
       agent.available ? style.green("yes") : style.red("no"),
-      truncateLeft(commandLine, 60),
-      notes,
+      truncateLeft(oneLine(commandLine), 60),
+      agent.available ? oneLine(agent.description ?? "—") : style.red(oneLine(agent.unavailableReason ?? "unavailable")),
     ];
   });
   return renderTable(["NAME", "SOURCE", "READY", "COMMAND", "NOTES"], rows, style);
@@ -506,12 +575,62 @@ export function formatAge(iso: string): string {
   return `${formatDuration(delta)} ago`;
 }
 
-function cursor(seq: number, style: Style): string {
-  return style.gray(`#${String(seq).padEnd(4)} `);
+function cursor(seq: number, at: string, style: Style, full: boolean): string {
+  const stamp = formatTimestamp(at, full);
+  return style.gray(`#${String(seq).padEnd(4)} ${stamp ? `${stamp} ` : ""}`);
+}
+
+function formatTimestamp(at: string, full: boolean): string {
+  const date = new Date(at);
+  if (!Number.isFinite(date.getTime())) return "";
+  if (full) return at;
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+const ANSI_ESCAPE =
+  /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/g;
+const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/** Agent-derived text is untrusted: never let it inject terminal control sequences. */
+export function sanitize(value: string): string {
+  return value
+    .replace(ANSI_ESCAPE, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(CONTROL_CHARS, "");
+}
+
+function oneLine(value: unknown): string {
+  return sanitize(String(value ?? ""))
+    .replace(/[\n\t]+/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
 }
 
 function indent(text: string): string {
-  return text.replace(/\n/g, "\n  ");
+  return sanitize(text).replace(/\n/g, "\n  ");
+}
+
+const PAYLOAD_PREVIEW_CHARS = 2_000;
+
+function renderPayload(value: unknown, style: Style): string[] {
+  if (value === undefined || value === null) return [];
+  let text: string;
+  try {
+    text =
+      typeof value === "string"
+        ? value
+        : (JSON.stringify(value, null, 2) ?? String(value));
+  } catch {
+    text = "[unserializable payload]";
+  }
+  text = sanitize(text);
+  if (text.length > PAYLOAD_PREVIEW_CHARS) {
+    text = `${text.slice(0, PAYLOAD_PREVIEW_CHARS)}… [truncated]`;
+  }
+  return text.split("\n").map((line) => `  ${style.dim(line)}`);
 }
 
 function truncateLeft(value: string, max: number): string {

@@ -16,6 +16,7 @@ import type {
   PermissionPolicy,
   PermitResult,
   ReadResult,
+  RenameResult,
   SendResult,
   SessionView,
   SetModeResult,
@@ -27,6 +28,7 @@ import { formatDuration } from "../time.js";
 import { VERSION } from "../version.js";
 import {
   booleanOption,
+  expectPositionals,
   multipleOption,
   numberOption,
   parseArgs,
@@ -43,6 +45,7 @@ import {
   renderPermission,
   renderReadResult,
   renderSessionTable,
+  sanitize,
   styleStatus,
   type DoctorCheck,
   type Style,
@@ -52,8 +55,9 @@ export const CLI_ENTRY = fileURLToPath(new URL("../cli.js", import.meta.url));
 
 const COMMON: OptionSpec[] = [
   { name: "json", type: "boolean" },
-  { name: "home", type: "string", valueName: "DIR" },
+  { name: "home", type: "path", valueName: "DIR" },
   { name: "help", short: "h", type: "boolean" },
+  { name: "no-color", type: "boolean" },
 ];
 
 interface CommandContext {
@@ -65,7 +69,10 @@ interface CommandContext {
 }
 
 export async function main(argv: string[]): Promise<number> {
-  const jsonRequested = argv.includes("--json");
+  const endOfOptions = argv.indexOf("--");
+  const jsonRequested = (
+    endOfOptions === -1 ? argv : argv.slice(0, endOfOptions)
+  ).includes("--json");
   try {
     const { rest, injected } = splitLeadingGlobals(argv);
     const first = rest[0];
@@ -81,11 +88,15 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (first === "help") {
       const topic = rest[1];
+      if (topic !== undefined && !hasCommandHelp(topic)) {
+        throw usageError(`unknown help topic "${topic}" — run "hlao help"`);
+      }
       process.stdout.write(`${topic ? commandHelp(topic) : fullHelp()}\n`);
       return 0;
     }
     if (first === "version" || first === "--version" || first === "-v") {
-      process.stdout.write(`hlao ${VERSION}\n`);
+      if (jsonRequested) writeJson({ version: VERSION });
+      else process.stdout.write(`hlao ${VERSION}\n`);
       return 0;
     }
 
@@ -109,6 +120,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdPermit(args);
       case "mode":
         return await cmdMode(args);
+      case "rename":
+        return await cmdRename(args);
       case "agents":
         return await cmdAgents(args);
       case "doctor":
@@ -146,20 +159,21 @@ async function cmdSpawn(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "name", type: "string", valueName: "LABEL" },
-    { name: "cwd", type: "string", valueName: "DIR" },
+    { name: "cwd", type: "path", valueName: "DIR" },
     { name: "prompt", type: "string", valueName: "TEXT" },
-    { name: "prompt-file", type: "string", valueName: "FILE" },
+    { name: "prompt-file", type: "path", valueName: "FILE" },
     { name: "stdin", type: "boolean" },
     { name: "wait", type: "boolean" },
     { name: "timeout", type: "duration", valueName: "DUR" },
     { name: "mode", type: "string", valueName: "ID" },
+    { name: "parent", type: "string", valueName: "SESSION" },
     { name: "permission", type: "string", valueName: "POLICY" },
     { name: "env", type: "string", valueName: "K=V", multiple: true },
   ]);
   if (helpRequested(parsed, "spawn")) return 0;
+  expectPositionals(parsed, "spawn", 1, Number.POSITIVE_INFINITY);
 
-  const backend = parsed.positionals[0];
-  if (!backend) throw usageError("spawn needs a backend — run \"hlao agents\"");
+  const backend = parsed.positionals[0]!;
   const ctx = contextFrom(parsed);
   const prompt = await resolveMessage(parsed.positionals.slice(1), parsed);
   const permission = stringOption(parsed, "permission");
@@ -167,6 +181,10 @@ async function cmdSpawn(args: string[]): Promise<number> {
     throw usageError("--permission must be ask, allow, or deny");
   }
   const wait = booleanOption(parsed, "wait") ?? false;
+  warnInert(
+    !wait && numberOption(parsed, "timeout") !== undefined,
+    "--timeout has no effect without --wait",
+  );
 
   const conn = await connect(ctx);
   const result = await conn.request<SpawnResult>(
@@ -179,6 +197,7 @@ async function cmdSpawn(args: string[]): Promise<number> {
       wait,
       timeoutMs: numberOption(parsed, "timeout"),
       mode: stringOption(parsed, "mode"),
+      parentSessionId: stringOption(parsed, "parent"),
       permissionPolicy: permission as PermissionPolicy | undefined,
       env: parseEnv(multipleOption(parsed, "env")),
     },
@@ -192,12 +211,13 @@ async function cmdSpawn(args: string[]): Promise<number> {
 
   const session = result.session;
   out(
-    `spawned ${ctx.style.bold(session.id)} (${session.backend}) in ${session.cwd}` +
-      (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : ""),
+    `spawned ${sessionLabel(ctx, session)} (${session.backend}) in ${session.cwd}` +
+      (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
+      ctx.style.dim(`  policy ${session.permissionPolicy}`),
   );
   if (result.firstTurn) {
     if (result.firstTurn.text.trim().length > 0) {
-      out(result.firstTurn.text.trimEnd());
+      out(sanitize(result.firstTurn.text).trimEnd());
     }
     if (result.firstTurn.timedOut) {
       out(ctx.style.yellow("the first turn is still running"));
@@ -219,18 +239,34 @@ async function cmdSpawn(args: string[]): Promise<number> {
 async function cmdSend(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
+    { name: "self", type: "boolean" },
     { name: "stdin", type: "boolean" },
+    { name: "prompt", type: "string", valueName: "TEXT" },
+    { name: "prompt-file", type: "path", valueName: "FILE" },
     { name: "wait", type: "boolean" },
     { name: "timeout", type: "duration", valueName: "DUR" },
   ]);
   if (helpRequested(parsed, "send")) return 0;
 
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("send needs a session id");
-  const text = await resolveMessage(parsed.positionals.slice(1), parsed);
-  if (text === undefined) throw usageError("send needs a message (positional, --stdin)");
+  const sessionId = resolveTarget(parsed, "send", "selfFlag");
+  const selfFlag = booleanOption(parsed, "self") === true;
+  const messagePositionals = selfFlag
+    ? parsed.positionals
+    : parsed.positionals.slice(1);
+  const text = await resolveMessage(messagePositionals, parsed);
+  if (text === undefined) {
+    const hint =
+      process.env.HLAO_SESSION_ID?.trim() && parsed.positionals.length === 1 && !selfFlag
+        ? `; to send "${parsed.positionals[0]}" to your own session, use: hlao send --self ${JSON.stringify(parsed.positionals[0])}`
+        : "";
+    throw usageError(`send needs a message (positional, --prompt, --prompt-file, or --stdin)${hint}`);
+  }
   const wait = booleanOption(parsed, "wait") ?? false;
   const timeoutMs = numberOption(parsed, "timeout");
+  warnInert(
+    !wait && timeoutMs !== undefined,
+    "--timeout has no effect without --wait",
+  );
   const ctx = contextFrom(parsed);
 
   const conn = await connect(ctx);
@@ -256,7 +292,7 @@ async function cmdSend(args: string[]): Promise<number> {
         ? `the message is still queued behind turn ${result.session.turn}`
         : `turn ${result.turn} is still running`;
     out(
-      `${ctx.style.bold(result.session.id)} ${styleStatus(result.session.status, ctx.style)} — ${where}`,
+      `${sessionLabel(ctx, result.session)} ${styleStatus(result.session.status, ctx.style)} — ${where}`,
     );
     out(styleHint(ctx, `hlao read ${result.session.id} --since ${result.session.lastSeq + 1}`));
     return 2;
@@ -264,7 +300,7 @@ async function cmdSend(args: string[]): Promise<number> {
 
   if (!result.completed) {
     out(
-      `sent to ${ctx.style.bold(result.session.id)}` +
+      `sent to ${sessionLabel(ctx, result.session)}` +
         (result.queued
           ? ctx.style.dim(` (queued behind turn ${result.session.turn})`)
           : result.turn !== null
@@ -275,11 +311,11 @@ async function cmdSend(args: string[]): Promise<number> {
   }
 
   if (result.turn === null && result.stopReason === "cancelled") {
-    out(`${ctx.style.bold(result.session.id)}: the queued message was cancelled before it ran`);
+    out(`${sessionLabel(ctx, result.session)}: the queued message was cancelled before it ran`);
     return 0;
   }
   if (result.text && result.text.trim().length > 0) {
-    out(result.text.trimEnd());
+    out(sanitize(result.text).trimEnd());
   }
   const stop = result.stopReason ?? "unknown";
   out(
@@ -293,45 +329,60 @@ async function cmdSend(args: string[]): Promise<number> {
 async function cmdRead(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
+    { name: "self", type: "boolean" },
     { name: "since", type: "number", valueName: "SEQ" },
     { name: "limit", type: "number", valueName: "N" },
     { name: "raw", type: "boolean" },
+    { name: "verbose", type: "boolean" },
+    { name: "timestamps", type: "boolean" },
   ]);
   if (helpRequested(parsed, "read")) return 0;
+  expectPositionals(parsed, "read", 0, 1);
 
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("read needs a session id");
+  const sessionId = resolveTarget(parsed, "read", "selfDefault");
   const ctx = contextFrom(parsed);
+  const verbose = booleanOption(parsed, "verbose") === true;
+  const raw = booleanOption(parsed, "raw") === true || verbose;
+  const timestamps = booleanOption(parsed, "timestamps") === true;
   const conn = await connect(ctx);
   const result = await conn.request<ReadResult>("sessions.read", {
     sessionId,
     since: numberOption(parsed, "since"),
     limit: numberOption(parsed, "limit"),
-    raw: booleanOption(parsed, "raw") ?? false,
+    raw,
   });
 
   if (ctx.json) {
     writeJson(result);
     return 0;
   }
-  out(renderReadResult(result, ctx.style, "hlao", booleanOption(parsed, "raw") === true));
+  out(
+    renderReadResult(result, ctx.style, "hlao", {
+      verbose: verbose || raw,
+      fullTimestamps: timestamps,
+    }),
+  );
   return 0;
 }
 
 async function cmdWait(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
+    { name: "self", type: "boolean" },
     { name: "until", type: "string", valueName: "STATE" },
     { name: "since", type: "number", valueName: "SEQ" },
     { name: "timeout", type: "duration", valueName: "DUR" },
   ]);
   if (helpRequested(parsed, "wait")) return 0;
+  expectPositionals(parsed, "wait", 0, 1);
 
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("wait needs a session id");
+  const sessionId = resolveTarget(parsed, "wait", "selfDefault");
   const until = stringOption(parsed, "until") ?? "idle";
   if (!["idle", "permission", "exit", "change"].includes(until)) {
     throw usageError("--until must be idle, permission, exit, or change");
+  }
+  if (until !== "change" && numberOption(parsed, "since") !== undefined) {
+    process.stderr.write("hlao: --since only affects --until change\n");
   }
   const ctx = contextFrom(parsed);
   const timeoutMs = numberOption(parsed, "timeout");
@@ -349,35 +400,45 @@ async function cmdWait(args: string[]): Promise<number> {
 
   if (ctx.json) {
     writeJson(result);
-    return result.reason === "timeout" ? 2 : 0;
+    if (result.reason === "timeout") return 2;
+    if (result.reason === "exit" && until !== "exit") return 3;
+    return 0;
   }
 
   const waited = formatDuration(result.waitedMs);
+  const label = sessionLabel(ctx, result.session);
   switch (result.reason) {
     case "idle":
-      out(`${ctx.style.bold(result.session.id)} is idle (waited ${waited})`);
+      out(`${label} is idle (waited ${waited})`);
       return 0;
     case "permission":
-      out(
-        `${ctx.style.bold(result.session.id)} needs permission (waited ${waited})`,
-      );
+      out(`${label} needs permission (waited ${waited})`);
       if (result.session.pendingPermission) {
         out(renderPermission(result.session.id, result.session.pendingPermission, ctx.style));
       }
       return 0;
-    case "exit":
+    case "exit": {
+      const detail = exitDetail(result.session);
+      if (until === "exit") {
+        out(
+          `${label} is ${styleStatus(result.session.status, ctx.style)} (waited ${waited})` +
+            (detail ? ctx.style.dim(` · ${detail}`) : ""),
+        );
+        return 0;
+      }
       out(
-        `${ctx.style.bold(result.session.id)} is ${styleStatus(result.session.status, ctx.style)} (waited ${waited})`,
+        `${label} ended before reaching "${until}" (waited ${waited}): ` +
+          `${styleStatus(result.session.status, ctx.style)}` +
+          (detail ? ctx.style.dim(` · ${detail}`) : ""),
       );
-      return 0;
+      return 3;
+    }
     case "change":
-      out(
-        `${ctx.style.bold(result.session.id)} changed at seq ${result.session.lastSeq} (waited ${waited})`,
-      );
+      out(`${label} changed at seq ${result.session.lastSeq} (waited ${waited})`);
       return 0;
     case "timeout":
       out(
-        `${ctx.style.bold(result.session.id)} did not reach "${until}" within ${waited}; it is ${styleStatus(result.session.status, ctx.style)}`,
+        `${label} did not reach "${until}" within ${waited}; it is ${styleStatus(result.session.status, ctx.style)}`,
       );
       return 2;
     default:
@@ -390,9 +451,10 @@ async function cmdList(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "all", short: "a", type: "boolean" },
-    { name: "cwd", type: "string", valueName: "DIR" },
+    { name: "cwd", type: "path", valueName: "DIR" },
   ]);
   if (helpRequested(parsed, "list")) return 0;
+  expectPositionals(parsed, "list", 0, 0);
 
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
@@ -414,17 +476,33 @@ async function cmdList(args: string[]): Promise<number> {
           : "no sessions — hlao spawn <backend> \"message\"",
       ),
     );
+    if (
+      ctx.callerSessionId &&
+      result.scope === "session" &&
+      !result.sessions.some((session) => session.id === ctx.callerSessionId)
+    ) {
+      process.stderr.write(
+        `hlao: HLAO_SESSION_ID=${ctx.callerSessionId} is not a live session; the scope is empty\n`,
+      );
+    }
     return 0;
   }
-  out(renderSessionTable(result.sessions, ctx.style));
+  out(renderSessionTable(result.sessions, ctx.style, ctx.callerSessionId));
+  out(
+    ctx.style.dim(
+      result.scope === "operator"
+        ? `scope: operator · ${result.sessions.length} visible`
+        : `scope: self+descendants · ${result.sessions.length} visible · siblings not shown`,
+    ),
+  );
   return 0;
 }
 
 async function cmdCancel(args: string[]): Promise<number> {
-  const parsed = parseArgs(args, COMMON);
+  const parsed = parseArgs(args, [...COMMON, { name: "self", type: "boolean" }]);
   if (helpRequested(parsed, "cancel")) return 0;
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("cancel needs a session id");
+  expectPositionals(parsed, "cancel", 0, 1);
+  const sessionId = resolveTarget(parsed, "cancel", "selfDefault");
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
   const result = await conn.request<CancelResult>("sessions.cancel", { sessionId });
@@ -433,18 +511,17 @@ async function cmdCancel(args: string[]): Promise<number> {
     writeJson(result);
     return 0;
   }
+  const label = sessionLabel(ctx, result.session);
   if (result.session.status === "closed" || result.session.status === "failed") {
-    out(
-      `${ctx.style.bold(result.session.id)} is already ${styleStatus(result.session.status, ctx.style)}`,
-    );
+    out(`${label} is already ${styleStatus(result.session.status, ctx.style)}`);
     return 0;
   }
   if (result.session.status === "idle" && result.discarded === 0) {
-    out(`${ctx.style.bold(result.session.id)} is idle; nothing to cancel`);
+    out(`${label} is idle; nothing to cancel`);
     return 0;
   }
   out(
-    `cancel requested for ${ctx.style.bold(result.session.id)}` +
+    `cancel requested for ${label}` +
       (result.discarded > 0
         ? ctx.style.dim(` (${result.discarded} queued message${result.discarded === 1 ? "" : "s"} discarded)`)
         : ""),
@@ -455,12 +532,13 @@ async function cmdCancel(args: string[]): Promise<number> {
 async function cmdClose(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
+    { name: "self", type: "boolean" },
     { name: "force", type: "boolean" },
     { name: "tree", type: "boolean" },
   ]);
   if (helpRequested(parsed, "close")) return 0;
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("close needs a session id");
+  expectPositionals(parsed, "close", 0, 1);
+  const sessionId = resolveTarget(parsed, "close", "selfDefault");
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
   const force = booleanOption(parsed, "force") ?? false;
@@ -505,14 +583,13 @@ async function cmdClose(args: string[]): Promise<number> {
     writeJson(result);
     return 0;
   }
+  const label = sessionLabel(ctx, result.session);
   if (result.wasTerminal) {
-    out(
-      `${ctx.style.bold(result.session.id)} was already ${styleStatus(result.session.status, ctx.style)}`,
-    );
+    out(`${label} was already ${styleStatus(result.session.status, ctx.style)}`);
     return 0;
   }
   out(
-    `closed ${ctx.style.bold(result.session.id)}` +
+    `closed ${label}` +
       (result.killed ? ctx.style.dim(" (forced)") : ""),
   );
   return 0;
@@ -521,14 +598,15 @@ async function cmdClose(args: string[]): Promise<number> {
 async function cmdPermit(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
+    { name: "self", type: "boolean" },
     { name: "option", type: "string", valueName: "ID" },
     { name: "allow", type: "boolean" },
     { name: "deny", type: "boolean" },
     { name: "always", type: "boolean" },
   ]);
   if (helpRequested(parsed, "permit")) return 0;
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("permit needs a session id");
+  expectPositionals(parsed, "permit", 0, 1);
+  const sessionId = resolveTarget(parsed, "permit", "selfDefault");
 
   const chosenFlags = [
     stringOption(parsed, "option") !== undefined,
@@ -595,7 +673,7 @@ async function cmdPermit(args: string[]): Promise<number> {
   }
   const option = permission.options.find((candidate) => candidate.optionId === optionId);
   out(
-    `${styleStatus(result.session.status, ctx.style)} ${ctx.style.bold(result.session.id)} — ` +
+    `${styleStatus(result.session.status, ctx.style)} ${sessionLabel(ctx, result.session)} — ` +
       `${option?.kind ?? "selected"} ${optionId}` +
       (permission.title ? ctx.style.dim(` · ${permission.title}`) : "") +
       (always ? ctx.style.dim(" · future requests will be allowed automatically") : ""),
@@ -604,14 +682,32 @@ async function cmdPermit(args: string[]): Promise<number> {
 }
 
 async function cmdMode(args: string[]): Promise<number> {
-  const parsed = parseArgs(args, COMMON);
+  const parsed = parseArgs(args, [...COMMON, { name: "self", type: "boolean" }]);
   if (helpRequested(parsed, "mode")) return 0;
-  const sessionId = parsed.positionals[0];
-  if (!sessionId) throw usageError("mode needs a session id");
-  if (parsed.positionals.length > 2) {
+  const selfUsed = booleanOption(parsed, "self") === true;
+  const caller = process.env.HLAO_SESSION_ID?.trim();
+  let sessionId: string;
+  let modeId: string | undefined;
+
+  if (selfUsed) {
+    if (!caller) throw usageError("mode: --self requires HLAO_SESSION_ID");
+    expectPositionals(parsed, "mode", 0, 1);
+    sessionId = caller;
+    modeId = parsed.positionals[0];
+  } else if (parsed.positionals.length === 0) {
+    if (!caller) throw usageError("mode needs a session id");
+    sessionId = caller;
+    modeId = undefined;
+  } else if (parsed.positionals.length === 1) {
+    sessionId = parsed.positionals[0]!;
+    modeId = undefined;
+  } else if (parsed.positionals.length === 2) {
+    sessionId = parsed.positionals[0]!;
+    modeId = parsed.positionals[1];
+  } else {
     throw usageError("mode takes a session id and one optional mode id");
   }
-  const modeId = parsed.positionals[1];
+
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
 
@@ -646,19 +742,78 @@ async function cmdMode(args: string[]): Promise<number> {
     return 0;
   }
   out(
-    `mode of ${ctx.style.bold(result.session.id)}: ${ctx.style.cyan(
+    `mode of ${sessionLabel(ctx, result.session)}: ${ctx.style.cyan(
       result.session.modes?.currentModeId ?? modeId,
     )}`,
   );
   return 0;
 }
 
+async function cmdRename(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+    { name: "clear", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "rename")) return 0;
+
+  const selfUsed = booleanOption(parsed, "self") === true;
+  const clear = booleanOption(parsed, "clear") === true;
+  const caller = process.env.HLAO_SESSION_ID?.trim();
+  let sessionId: string;
+  let name: string | null;
+
+  if (selfUsed) {
+    if (!caller) throw usageError("rename: --self requires HLAO_SESSION_ID");
+    expectPositionals(parsed, "rename", 0, 1);
+    sessionId = caller;
+    if (clear) {
+      name = null;
+    } else {
+      name = parsed.positionals[0] ?? null;
+      if (name === null) throw usageError("rename needs a new name (or --clear)");
+    }
+  } else if (parsed.positionals.length === 2) {
+    if (clear) throw usageError("choose a new name or --clear, not both");
+    sessionId = parsed.positionals[0]!;
+    name = parsed.positionals[1]!;
+  } else if (parsed.positionals.length === 1) {
+    if (!clear) throw usageError("rename needs a new name, or --clear");
+    sessionId = parsed.positionals[0]!;
+    name = null;
+  } else {
+    if (!caller) throw usageError("rename needs a session id and a new name");
+    if (!clear) throw usageError("rename needs a new name, or --clear");
+    sessionId = caller;
+    name = null;
+  }
+
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+  const result = await conn.request<RenameResult>("sessions.rename", {
+    sessionId,
+    name,
+  });
+
+  if (ctx.json) {
+    writeJson(result);
+    return 0;
+  }
+  if (result.session.name === null) {
+    out(`cleared the name of ${ctx.style.bold(result.session.id)}`);
+  } else {
+    out(`renamed ${ctx.style.bold(result.session.name)} ${ctx.style.dim(`(${result.session.id})`)}`);
+  }
+  return 0;
+}
+
 async function cmdAgents(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
-    { name: "cwd", type: "string", valueName: "DIR" },
+    { name: "cwd", type: "path", valueName: "DIR" },
   ]);
   if (helpRequested(parsed, "agents")) return 0;
+  expectPositionals(parsed, "agents", 0, 0);
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
   const result = await conn.request<AgentsListResult>("agents.list", {
@@ -675,6 +830,7 @@ async function cmdAgents(args: string[]): Promise<number> {
 async function cmdDoctor(args: string[]): Promise<number> {
   const parsed = parseArgs(args, COMMON);
   if (helpRequested(parsed, "doctor")) return 0;
+  expectPositionals(parsed, "doctor", 0, 0);
   const ctx = contextFrom(parsed);
   const checks: DoctorCheck[] = [];
 
@@ -791,6 +947,7 @@ async function cmdDoctor(args: string[]): Promise<number> {
 async function cmdWhoami(args: string[]): Promise<number> {
   const parsed = parseArgs(args, COMMON);
   if (helpRequested(parsed, "whoami")) return 0;
+  expectPositionals(parsed, "whoami", 0, 0);
   const ctx = contextFrom(parsed);
   const sessionId = ctx.callerSessionId;
   const depthRaw = process.env.HLAO_DEPTH;
@@ -798,6 +955,7 @@ async function cmdWhoami(args: string[]): Promise<number> {
   const result = {
     role: sessionId === null ? ("operator" as const) : ("session" as const),
     sessionId,
+    name: process.env.HLAO_NAME ?? null,
     parentId: process.env.HLAO_PARENT_ID ?? null,
     rootId: process.env.HLAO_ROOT_ID ?? null,
     depth,
@@ -814,6 +972,7 @@ async function cmdWhoami(args: string[]): Promise<number> {
   } else {
     out(
       `session ${ctx.style.bold(sessionId)}` +
+        (result.name ? ` (${sanitize(result.name)})` : "") +
         ` · parent ${result.parentId ?? "—"}` +
         ` · root ${result.rootId ?? "—"}` +
         (depth !== null ? ` · depth ${depth}` : "") +
@@ -826,6 +985,7 @@ async function cmdWhoami(args: string[]): Promise<number> {
 async function cmdDown(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [...COMMON, { name: "force", type: "boolean" }]);
   if (helpRequested(parsed, "down")) return 0;
+  expectPositionals(parsed, "down", 0, 0);
   const ctx = contextFrom(parsed);
   const force = booleanOption(parsed, "force") ?? false;
   const lock = readLock(ctx.home);
@@ -950,13 +1110,64 @@ function splitLeadingGlobals(argv: string[]): { rest: string[]; injected: string
 
 function contextFrom(parsed: ParsedArgs): CommandContext {
   const json = booleanOption(parsed, "json") ?? false;
+  const noColor = booleanOption(parsed, "no-color") ?? false;
   return {
     home: resolveHome(stringOption(parsed, "home"), process.env),
     callerSessionId: process.env.HLAO_SESSION_ID?.trim() || null,
     cliPath: CLI_ENTRY,
     json,
-    style: createStyle(colorsEnabled(json)),
+    style: createStyle(colorsEnabled(json) && !noColor),
   };
+}
+
+/**
+ * Resolves the session-targeting positional.
+ *
+ * `selfDefault` commands (read/wait/cancel/close/permit) may omit the id inside a session.
+ * `selfFlag` commands (send/mode/rename) require `--self`, because their first positional is
+ * already a message, mode, or new name.
+ */
+function resolveTarget(
+  parsed: ParsedArgs,
+  command: string,
+  mode: "selfDefault" | "selfFlag",
+): string {
+  const selfFlag = booleanOption(parsed, "self") ?? false;
+  const first = parsed.positionals[0];
+  const caller = process.env.HLAO_SESSION_ID?.trim();
+
+  if (selfFlag) {
+    if (mode === "selfDefault" && first !== undefined) {
+      throw usageError(`${command}: pass either a session id or --self`);
+    }
+    if (!caller) {
+      throw usageError(`${command}: --self requires HLAO_SESSION_ID`);
+    }
+    return caller;
+  }
+  if (first !== undefined) return first;
+  if (mode === "selfDefault" && caller) return caller;
+  if (caller) {
+    throw usageError(`${command} needs a session id; pass --self to target your own session`);
+  }
+  throw usageError(`${command} needs a session id`);
+}
+
+function sessionLabel(ctx: CommandContext, session: SessionView): string {
+  return session.name
+    ? `${ctx.style.bold(sanitize(session.name))} ${ctx.style.dim(`(${session.id})`)}`
+    : ctx.style.bold(session.id);
+}
+
+function exitDetail(session: SessionView): string {
+  if (!session.exit) return "";
+  return session.exit.signal
+    ? `signal ${session.exit.signal}`
+    : `exit ${session.exit.code ?? "?"}`;
+}
+
+function warnInert(condition: boolean, message: string): void {
+  if (condition) process.stderr.write(`hlao: ${message}\n`);
 }
 
 function connect(ctx: CommandContext): Promise<SupervisorConnection> {
@@ -1119,16 +1330,23 @@ function renderError(error: HlaoError): string {
   if (Array.isArray(details?.options)) {
     const options = details.options as {
       optionId?: unknown;
+      id?: unknown;
       kind?: unknown;
       name?: unknown;
+      description?: unknown;
     }[];
     const rendered = options
-      .map(
-        (option) =>
-          `${String(option.optionId ?? option.name ?? "?")} (${String(option.kind ?? "?")})`,
-      )
+      .map((option) => {
+        const id = String(option.optionId ?? option.id ?? option.name ?? "?");
+        const note = option.kind ?? option.description;
+        return note ? `${id} (${String(note)})` : id;
+      })
       .join(", ");
     if (rendered.length > 0) text += `  options: ${rendered}\n`;
+  }
+
+  if (error.code === "not_found") {
+    text += `run "hlao list" to see sessions in scope\n`;
   }
 
   if (error.code === "bad_request") {
@@ -1172,14 +1390,15 @@ There is no scheduler and no session store.
 
 Usage:
   hlao spawn <backend> [message] [options]     open a session
-  hlao send <id> [message] [--wait]            queue a prompt
-  hlao read <id> [--since N] [--raw]           read orchestration state + events
-  hlao wait <id> [--until idle|permission|exit|change] [--timeout DUR]
+  hlao send [<id>] [message] [--wait]          queue a prompt
+  hlao read [<id>] [--since N] [--raw]         read orchestration state + events
+  hlao wait [<id>] [--until idle|permission|exit|change] [--timeout DUR]
   hlao list [--all] [--cwd DIR]                sessions in your scope
-  hlao cancel <id>                             stop the active turn; discard queue
-  hlao close <id> [--force] [--tree]           end a session
-  hlao permit <id> --allow|--deny|--option ID  answer a permission request
-  hlao mode <id> [modeId]                      read or switch a provider mode
+  hlao cancel [<id>]                           stop the active turn; discard queue
+  hlao close [<id>] [--force] [--tree]         end a session
+  hlao permit [<id>] --allow|--deny|--option ID  answer a permission request
+  hlao mode [<id>] [modeId]                    read or switch a provider mode
+  hlao rename <id> <name> | --clear            label a session
   hlao agents [--cwd DIR]                      configured backends
   hlao doctor                                  environment and connectivity checks
   hlao whoami                                  this shell's scope and lineage
@@ -1190,26 +1409,57 @@ Usage:
 Global options:
   --json                 machine output; errors are {"ok":false,"error":...}
   --home DIR             runtime home (default $HLAO_HOME or ~/.hlao)
+  --no-color             disable ANSI colours (NO_COLOR also works)
   -h, --help             help
+  --                     treat the rest of the line as positionals
+
+Addressing:
+  A session is addressed by its id, an unambiguous id prefix, or its name.
+  Inside a spawned session, read/wait/cancel/close/permit default to the
+  caller when <id> is omitted. send/mode/rename need --self for that, because
+  their first positional is a message, mode, or new name.
 
 Identity:
   An operator shell has no HLAO_SESSION_ID and sees every session. A spawned
-  agent inherits HLAO_SESSION_ID and sees itself and its descendants only.
-  hlao whoami reports what this shell is.
+  agent inherits HLAO_SESSION_ID, HLAO_NAME, and its lineage, and sees itself
+  and its descendants only. hlao whoami reports what this shell is.
 
 Durations: 500ms, 30s, 5m, 2h, 1d, or a bare millisecond count. 0 disables.
 
-Exit codes: 0 ok · 1 error · 2 a bounded wait expired (the work continues).
+Exit codes: 0 ok · 1 error · 2 a bounded wait expired (work continues) ·
+  3 the awaited condition was lost because the session ended.
 
 Examples:
   hlao spawn claude "Audit the build log and report the first failure."
-  hlao send a1b2c3 "Check the log again." --wait --timeout 20m
+  hlao send --self "Check the log again." --wait --timeout 20m
+  hlao rename a1b2c3 builder
   hlao permit a1b2c3 --allow --always
   hlao mode a1b2c3 auto
   hlao wait a1b2c3 --until permission --timeout 10m
   hlao read a1b2c3 --since 42
   hlao list --json`;
 }
+
+function hasCommandHelp(command: string): boolean {
+  return COMMAND_HELP_NAMES.has(command) || command === "help";
+}
+
+const COMMAND_HELP_NAMES = new Set([
+  "spawn",
+  "send",
+  "read",
+  "wait",
+  "list",
+  "cancel",
+  "close",
+  "permit",
+  "mode",
+  "rename",
+  "agents",
+  "doctor",
+  "whoami",
+  "down",
+]);
 
 function commandHelp(command: string): string {
   const help: Record<string, string> = {
@@ -1227,58 +1477,73 @@ Options:
   --wait                 wait for the first turn to end
   --timeout DUR          bound the first-turn wait (0 = no bound)
   --mode ID              provider permission mode (see "hlao mode <id>")
+  --parent SESSION       spawn under another visible session
   --permission POLICY    allow (default), ask, or deny
   --env K=V              extra environment for the adapter (repeatable)
 
-The spawn result includes the session handle and the cursor to read from 0.`,
-    send: `hlao send <id> [message] [options]
+A session can be addressed by id, id prefix, or name. The spawn result includes
+the handle, label, policy, and the cursor to read from 0.`,
+    send: `hlao send [<id>] [message] [options]
 
 Queue a prompt. One turn runs at a time; a message sent while busy waits in a
 visible queue.
 
 Options:
+  --self                 target this shell's own session (required when <id> is
+                         omitted, because the first positional is the message)
   --stdin                read the message from stdin
+  --prompt TEXT          message text (alternative to the positional)
+  --prompt-file FILE     read the message from a file
   --wait                 wait for this message's turn to end
   --timeout DUR          bound the wait (0 = no bound)
 
 A timeout exits 2 and leaves the turn running.`,
-    read: `hlao read <id> [options]
+    read: `hlao read [<id>] [options]
 
 Read orchestration state plus a bounded page of typed events.
 
 Options:
+  --self                 target this shell's own session
   --since N              events with seq > N (omit for the most recent page)
   --limit N              page size, 1..1000 (default 100)
-  --raw                  with --json, include original ACP payloads; in human mode,
-                         reveal adapter stderr and command updates
+  --verbose              human mode: include bounded tool input/output
+  --raw                  with --json, include original ACP payloads; in human
+                         mode, reveal adapter stderr and command updates
+  --timestamps           show full ISO timestamps instead of HH:MM:SS
 
 The response reports earliestRetainedSeq, lastSeq, nextSeq, hasMore, and
-truncated, so evicted events are never silent.`,
-    wait: `hlao wait <id> [options]
+truncated. Tool payloads are omitted unless --raw/--verbose.`,
+    wait: `hlao wait [<id>] [options]
 
 One-shot await on orchestration state. It never re-arms.
 
 Options:
+  --self                 target this shell's own session
   --until idle|permission|exit|change   default idle
   --since N              baseline for "change" (default: now)
   --timeout DUR          bound; default from config (30m), 0 = no bound
 
-A timeout exits 2 and does not disturb the session.`,
+A timeout exits 2. If the session ends before the condition is met, the wait
+exits 3 (except --until exit, which exits 0).`,
     list: `hlao list [--all] [--cwd DIR]
 
-List sessions visible to this shell. An agent sees itself and its descendants;
-an operator sees all. --all includes sessions that have closed but are still
-retained for reading. --cwd filters to one working directory.`,
-    cancel: `hlao cancel <id>
+List sessions visible to this shell. A session is shown by id and name; an
+agent sees itself and its descendants, and an operator sees all. The footer
+reports the scope, and a scoped view marks the caller's own session with *.
+--all includes sessions that have closed but are still retained for reading.
+--cwd filters to one working directory.`,
+    cancel: `hlao cancel [<id>]
 
 Request ACP session/cancel for the active turn and discard queued messages.
-The session survives. Queued messages settle as cancelled.`,
-    close: `hlao close <id> [--force] [--tree]
+The session survives. Queued messages settle as cancelled. Inside a session,
+omit <id> or pass --self.`,
+    close: `hlao close [<id>] [--force] [--tree]
 
 Close a session. ACP session/close is attempted when advertised, then the
 adapter process is terminated. --force skips the protocol close. --tree closes
-this session's descendants first (a CLI assembly over list + close).`,
-    permit: `hlao permit <id> --allow|--deny|--option ID [--always]
+this session's descendants first (a CLI assembly over list + close). Inside a
+session, omit <id> or pass --self.`,
+    permit: `hlao permit [<id>] --allow|--deny|--option ID [--always]
 
 Answer the session's pending permission request. --allow picks the first allow
 option, --deny the first reject option, and --option names one exactly.
@@ -1286,15 +1551,22 @@ option, --deny the first reject option, and --option names one exactly.
 --always (with --allow) also switches this session's HLAO policy to allow, so
 later provider requests are answered automatically. When the provider offers an
 allow-always option it is preferred, which can stop the provider from asking at
-all for matching commands.`,
-    mode: `hlao mode <id> [modeId]
+all for matching commands. Inside a session, omit <id> or pass --self.`,
+    mode: `hlao mode [<id>] [modeId]
 
 Read or switch the provider's native permission mode. This is the same switch a
 person uses in Claude Code; it is how you stop the provider from asking on every
 tool call.
 
 Without modeId: print the current mode and the available modes.
-With modeId: request session/set_mode and report the result.`,
+With modeId: request session/set_mode and report the result.
+Inside a session, omit <id> to read your own; use --self <modeId> to set it.
+`,
+    rename: `hlao rename <id> <name> [--clear]
+
+Give a session an operator-facing name. A unique name can then be used anywhere
+a session id is accepted. Duplicate names resolve as ambiguous. --clear removes
+the name. Inside a session, use --self <name> (or --self --clear).`,
     agents: `hlao agents [--cwd DIR]
 
 Show built-in, user, and project backends with their source and readiness.
@@ -1309,8 +1581,10 @@ Report this shell's role, session id, parent, root, depth, and backend from the
 HLAO_* environment. An operator shell has no session id.`,
     down: `hlao down [--force]
 
-Ask the supervisor to close all sessions and exit. --force kills the process
-and removes the lock when the normal path is not available.`,
+Ask the supervisor to close all sessions and exit. This ends every live session
+and loses its in-memory history; export anything you need first with
+"hlao read <id> --since 0 --json". --force kills the process and removes the
+lock when the normal path is not available.`,
   };
   return help[command] ?? fullHelp();
 }

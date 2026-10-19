@@ -62,7 +62,7 @@ export interface SpawnOptions {
   rootId: string;
   depth: number;
   name: string | null;
-  env: Record<string, string>;   // includes the HLAO_* identity variables
+  env: Record<string, string>;   // includes the HLAO_* identity variables, including HLAO_NAME
   permissionPolicy: "ask" | "allow" | "deny";
   home: string;                  // injected as HLAO_HOME
   config: SessionConfig;         // timeouts, retention
@@ -89,8 +89,12 @@ export class Session {
    */
   send(text: string, wait: boolean, timeoutMs: number): Promise<SendResult>;
 
-  /** Cursor-addressed or tail read. Pure: does not consume the log. */
+  /** Cursor-addressed or tail read. Pure: does not consume the log. A tail read reports
+   *  `truncated` when any earlier event was evicted; `raw: false` strips private payloads. */
   read(options: ReadOptions): ReadResult;
+
+  /** Set or clear the operator label. Appends session.renamed; identity is unchanged. */
+  setName(name: string | null): void;
 
   /** One-shot await. Resolves at the first condition, timeout, or session end. */
   waitFor(until: WaitUntil, since: number | undefined, timeoutMs: number,
@@ -133,9 +137,11 @@ export class Session {
    default, `ask` opt-in, and `permit(..., always)` can switch a live session to `allow`.
 6. **Provider modes are data.** `view().modes` reports the adapter's current and available
    modes; `setMode` changes one when the adapter advertises them.
-6. **Events are monotonic.** `append` assigns the next sequence before waiters run.
-7. **Reads never mutate.** A read does not acknowledge or consume anything.
-8. **Timeouts are bounds, not schedules.** Nothing in this module starts a recurring timer.
+7. **Names are labels.** `setName` changes `name` and emits an event; the handle, scope, and
+   the environment already injected into the running adapter (`HLAO_NAME`) are unchanged.
+8. **Events are monotonic.** `append` assigns the next sequence before waiters run.
+9. **Reads never mutate.** A read does not acknowledge or consume anything.
+10. **Timeouts are bounds, not schedules.** Nothing in this module starts a recurring timer.
 
 ## Dependencies the session expects
 

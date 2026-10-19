@@ -28,6 +28,7 @@ export type EventType =
   | "session.initialized"
   | "session.closed"
   | "session.failed"
+  | "session.renamed"
   | "prompt.sent"
   | "prompt.queued"
   | "prompt.discarded"
@@ -150,6 +151,7 @@ export const METHODS = [
   "sessions.close",
   "sessions.permit",
   "sessions.set_mode",
+  "sessions.rename",
   "supervisor.shutdown",
 ] as const;
 
@@ -283,6 +285,13 @@ export interface SetModeParams {
 export interface SetModeResult {
   session: SessionView;
 }
+export interface RenameParams {
+  sessionId: string;
+  name: string | null;
+}
+export interface RenameResult {
+  session: SessionView;
+}
 export interface ShutdownParams {
   force?: boolean;
 }
@@ -303,6 +312,7 @@ type ParamsByMethod = {
   "sessions.close": CloseParams;
   "sessions.permit": PermitParams;
   "sessions.set_mode": SetModeParams;
+  "sessions.rename": RenameParams;
   "supervisor.shutdown": ShutdownParams;
 };
 
@@ -601,6 +611,27 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
         modeId: reqString(object, "modeId", what, 1, 100),
+      } as ParamsByMethod[M];
+    }
+    case "sessions.rename": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId", "name"], what);
+      if (!("name" in object)) {
+        throw new HlaoError("bad_request", `${what}.name is required (use null to clear)`);
+      }
+      const name = object.name;
+      if (
+        name !== null &&
+        (typeof name !== "string" || name.trim().length === 0 || name.length > 200)
+      ) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.name must be a non-empty string of at most 200 characters, or null`,
+        );
+      }
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+        name: name as string | null,
       } as ParamsByMethod[M];
     }
     case "supervisor.shutdown": {

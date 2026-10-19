@@ -198,6 +198,7 @@ const app = agent({ name: "fake-acp" })
       await message(
         `ENV ${JSON.stringify({
           sessionId: process.env.HLAO_SESSION_ID ?? null,
+          name: process.env.HLAO_NAME ?? null,
           parentId: process.env.HLAO_PARENT_ID ?? null,
           rootId: process.env.HLAO_ROOT_ID ?? null,
           depth: process.env.HLAO_DEPTH ?? null,
@@ -206,6 +207,17 @@ const app = agent({ name: "fake-acp" })
           cli: process.env.HLAO_CLI ?? null,
         })}`,
       );
+      return { stopReason: "end_turn" };
+    }
+
+    if (mode === "messages") {
+      await message("first message", "m1");
+      await message("second message", "m2");
+      return { stopReason: "end_turn" };
+    }
+
+    if (mode === "ansi") {
+      await message("\u001b[31mred text\u001b[0m and \u001b[2Jclear", "m1");
       return { stopReason: "end_turn" };
     }
 

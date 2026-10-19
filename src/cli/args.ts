@@ -1,7 +1,7 @@
 import { HlaoError } from "../errors.js";
 import { parseDuration } from "../time.js";
 
-export type OptionType = "boolean" | "string" | "number" | "duration";
+export type OptionType = "boolean" | "string" | "number" | "duration" | "path";
 
 export interface OptionSpec {
   name: string;
@@ -116,6 +116,12 @@ function assign(
     case "string":
       value = raw;
       break;
+    case "path":
+      if (raw.startsWith("-") && raw !== "-") {
+        throw usageError(`--${option.name} expects a path, not "${raw}"`);
+      }
+      value = raw;
+      break;
     case "number": {
       const number = Number(raw);
       if (!Number.isInteger(number)) {
@@ -142,6 +148,27 @@ function assign(
 
 export function usageError(message: string): HlaoError {
   return new HlaoError("bad_request", message);
+}
+
+/** Rejects unexpected positionals rather than silently ignoring them. */
+export function expectPositionals(
+  parsed: ParsedArgs,
+  command: string,
+  min: number,
+  max: number,
+): void {
+  const count = parsed.positionals.length;
+  if (count < min || count > max) {
+    const expected =
+      min === max
+        ? `${min}`
+        : max === Number.POSITIVE_INFINITY
+          ? `at least ${min}`
+          : `${min} to ${max}`;
+    throw usageError(
+      `${command} expects ${expected} positional argument${max === 1 ? "" : "s"}, got ${count}`,
+    );
+  }
 }
 
 export function stringOption(

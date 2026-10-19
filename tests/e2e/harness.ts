@@ -205,6 +205,8 @@ export interface ListValue {
 export interface ReadValue {
   session: SessionValue;
   events: { seq: number; type: string; data: Record<string, unknown> }[];
+  earliestRetainedSeq: number;
+  lastSeq: number;
   nextSeq: number;
   hasMore: boolean;
   truncated: boolean;

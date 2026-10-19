@@ -115,7 +115,10 @@ interface PendingPermission {
  */
 export class Session {
   readonly id: string;
-  readonly name: string | null;
+  #name: string | null;
+  get name(): string | null {
+    return this.#name;
+  }
   readonly backend: string;
   readonly cwd: string;
   readonly parentId: string | null;
@@ -135,6 +138,7 @@ export class Session {
   #active: QueueItem | null = null;
   #pumping = false;
   #turnText = "";
+  #lastMessageId: string | null = null;
   #pending: PendingPermission | null = null;
   #lastStopReason: StopReason | null = null;
   #lastActivityAt: string;
@@ -156,7 +160,7 @@ export class Session {
 
   private constructor(options: SpawnOptions) {
     this.id = options.id;
-    this.name = options.name;
+    this.#name = options.name;
     this.backend = options.backend.name;
     this.cwd = options.cwd;
     this.parentId = options.parentId;
@@ -310,6 +314,7 @@ export class Session {
         item.turn = this.#turn;
         this.#active = item;
         this.#turnText = "";
+        this.#lastMessageId = null;
         this.#status = "busy";
         this.#lastStopReason = null;
         const waitedMs = Date.now() - item.enqueuedAt;
@@ -689,6 +694,19 @@ export class Session {
     return { requestId: pending.requestId, optionId: chosen.optionId };
   }
 
+  /** Changes the operator-facing label. The id and env identity do not change. */
+  setName(name: string | null): void {
+    if (this.isTerminal || this.#closing) {
+      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+    }
+    if (name !== null && name.trim().length === 0) {
+      throw new HlaoError("bad_request", "a session name must not be empty; pass null to clear");
+    }
+    this.#name = name;
+    this.#emit("session.renamed", { name });
+    this.#changed();
+  }
+
   /** Switches a provider-native mode when the backend advertises modes. */
   async setMode(modeId: string): Promise<SessionModes> {
     if (this.isTerminal || this.#closing) {
@@ -971,6 +989,18 @@ export class Session {
     if (update.sessionUpdate === "current_mode_update" && this.#modes) {
       this.#modes = { ...this.#modes, currentModeId: update.currentModeId };
     }
+    if (update.sessionUpdate === "agent_message_chunk") {
+      const messageId = update.messageId ?? null;
+      if (
+        this.#turnText.length > 0 &&
+        messageId !== null &&
+        this.#lastMessageId !== null &&
+        messageId !== this.#lastMessageId
+      ) {
+        this.#turnText += "\n";
+      }
+      if (messageId !== null) this.#lastMessageId = messageId;
+    }
     const mapped = projectUpdate(update);
     if (mapped.textDelta) this.#turnText += mapped.textDelta;
     const event = this.#emit(
@@ -1069,6 +1099,7 @@ export class Session {
       HLAO_BACKEND: this.backend,
       HLAO_HOME: this.#home,
       HLAO_CLI: this.#cliPath,
+      ...(this.name ? { HLAO_NAME: this.name } : {}),
       ...(this.parentId ? { HLAO_PARENT_ID: this.parentId } : {}),
     };
   }

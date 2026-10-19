@@ -91,7 +91,8 @@ test("per-command help is reachable and names the command", async (t) => {
 
   const help = await harness.run(["help", "send"], { json: false });
   assert.equal(help.code, 0);
-  assert.match(help.stdout, /hlao send <id>/);
+  assert.match(help.stdout, /hlao send \[<id>\] \[message\]/);
   assert.match(help.stdout, /--wait/);
+  assert.match(help.stdout, /--self/);
   assert.match(help.stdout, /A timeout exits 2/);
 });
