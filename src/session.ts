@@ -1136,7 +1136,13 @@ export class Session {
     const init = await withTimeout(
       this.#conn.agent.request("initialize", {
         protocolVersion: WIRE_PROTOCOL_VERSION,
-        clientCapabilities: {},
+        clientCapabilities: {
+          session: {
+            // Boolean config options are optional in ACP; advertising support
+            // lets an adapter include them and accept boolean set requests.
+            configOptions: { boolean: {} },
+          },
+        },
         clientInfo: { name: "hlao", version: VERSION },
       }),
       this.#config.startupTimeoutMs,
