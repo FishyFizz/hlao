@@ -343,10 +343,11 @@ timeout never changes a session.
 
 With several ids, `any` resolves on the first target that satisfies and `all` when every target
 does. A target that ends before satisfying `idle`, `permission`, or `change` is unsatisfied
-with reason `exit`; for `all`, that resolves the whole wait immediately. Unresolved targets are
-reported with reason `pending` when the aggregate resolves early. `change` uses each target's
-`lastSeq` at call time as its baseline; `since` is rejected with more than one id. All ids are
-resolved in the caller's scope before waiting; one forbidden or unknown id fails the request.
+with reason `exit`; for `all`, that resolves the whole wait immediately. A target that is not
+settled when the aggregate resolves is evaluated at that moment: it is reported as satisfied
+if it already meets the condition, otherwise as `pending`. `change` uses each target's `lastSeq`
+at call time as its baseline; `since` is rejected with more than one id. All ids are resolved
+in the caller's scope before waiting; one forbidden or unknown id fails the request.
 
 ### `sessions.cancel`
 

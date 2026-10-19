@@ -116,7 +116,8 @@ one-shot `wait --until change`.
 `wait` accepts one id or a list. For several ids, `--any` (the default) resolves on the first
 target that satisfies and `--all` when every target does. The JSON result always includes
 `results` in request order, each with the target's view, `satisfied`, and `reason`; a target
-still waiting when the aggregate resolves is `pending`. `--since` is only valid with one id.
+that does not currently satisfy when the aggregate resolves is `pending`. `--since` is only
+valid with one id.
 The aggregate exit code follows the same rule as a single wait: `2` for timeout, `3` when a
 target ended before the condition, `0` otherwise.
 
