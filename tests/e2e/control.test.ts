@@ -215,7 +215,7 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
   );
 });
 
-test("a child may send to its direct parent but not read or wait on it", async (t) => {
+test("a child can address its parent, grandparent, and siblings", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -246,39 +246,37 @@ test("a child may send to its direct parent but not read or wait on it", async (
   assert.equal(prompt?.data.text, "report from child");
   assert.equal(prompt?.data.from, childId);
 
-  const forbiddenRead = await harness.json<JsonError>(["read", middleId], {
+  // Universal addressing: the parent is readable and waitable.
+  const parentRead = await harness.json<ReadValue>(["read", middleId], {
     env: { HLAO_SESSION_ID: childId },
   });
-  assert.equal(forbiddenRead.code, 1);
-  assert.equal(forbiddenRead.value.error.code, "forbidden");
+  assert.equal(parentRead.code, 0);
+  assert.ok(parentRead.value.events.length > 0);
 
-  const forbiddenWait = await harness.json<JsonError>(
+  const parentWait = await harness.json<{ satisfied: boolean }>(
     ["wait", middleId, "--timeout", "1s"],
     { env: { HLAO_SESSION_ID: childId } },
   );
-  assert.equal(forbiddenWait.code, 1);
-  assert.equal(forbiddenWait.value.error.code, "forbidden");
+  assert.equal(parentWait.code, 0);
+  assert.equal(parentWait.value.satisfied, true);
 
-  const grandparent = await harness.json<JsonError>(
-    ["send", root.id, "skip a generation"],
+  // A generation skip is addressable too.
+  const grandparent = await harness.json<{ completed: boolean }>(
+    ["send", root.id, "skip a generation", "--wait", "--timeout", "10s"],
     { env: { HLAO_SESSION_ID: childId } },
   );
-  assert.equal(grandparent.code, 1);
-  assert.ok(
-    ["forbidden", "not_found"].includes(grandparent.value.error.code),
-  );
+  assert.equal(grandparent.code, 0);
+  assert.equal(grandparent.value.completed, true);
 
   const sibling = await harness.json<SpawnValue>(["spawn", "fake", "sibling", "--wait"], {
     env: { HLAO_SESSION_ID: middleId },
   });
-  const siblingSend = await harness.json<JsonError>(
-    ["send", sibling.value.session.id, "sibling message"],
+  const siblingSend = await harness.json<{ completed: boolean }>(
+    ["send", sibling.value.session.id, "sibling message", "--wait", "--timeout", "10s"],
     { env: { HLAO_SESSION_ID: childId } },
   );
-  assert.equal(siblingSend.code, 1);
-  assert.ok(
-    ["forbidden", "not_found"].includes(siblingSend.value.error.code),
-  );
+  assert.equal(siblingSend.code, 0);
+  assert.equal(siblingSend.value.completed, true);
 });
 
 test("queue inspection, drop, and keep-queue cancel", async (t) => {

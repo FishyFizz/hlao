@@ -12,7 +12,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 1, minor: 1 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 0 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -304,7 +304,6 @@ export interface ListParams {
   cwd?: string;
 }
 export interface ListResult {
-  scope: "operator" | "session";
   sessions: SessionView[];
 }
 export interface GetParams {

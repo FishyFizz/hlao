@@ -74,8 +74,8 @@ test("global flags work before the command", async (t) => {
     { json: false },
   );
   assert.equal(jsonFirst.code, 0);
-  const listed = JSON.parse(jsonFirst.stdout) as { scope: string };
-  assert.equal(listed.scope, "operator");
+  const listed = JSON.parse(jsonFirst.stdout) as { sessions: unknown[] };
+  assert.ok(Array.isArray(listed.sessions));
 
   const homeFirst = await harness.run(
     ["--home", harness.home, "whoami"],

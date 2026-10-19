@@ -428,15 +428,15 @@ export class SupervisorServer {
       case "sessions.spawn":
         return this.#spawn(params as SpawnParams, caller);
       case "sessions.list":
-        return this.#list(params as ListParams, caller);
+        return this.#list(params as ListParams);
       case "sessions.get":
-        return this.#get(params as GetParams, caller);
+        return this.#get(params as GetParams);
       case "sessions.send":
         return this.#send(params as SendParams, caller);
       case "sessions.read":
-        return this.#read(params as ReadParams, caller);
+        return this.#read(params as ReadParams);
       case "sessions.wait":
-        return this.#wait(params as WaitParams, caller, signal);
+        return this.#wait(params as WaitParams, signal);
       case "sessions.cancel":
         return this.#cancel(params as CancelParams, caller);
       case "sessions.close":
@@ -450,13 +450,13 @@ export class SupervisorServer {
       case "sessions.set_config_option":
         return this.#setConfigOption(params as SetConfigOptionParams, caller);
       case "sessions.queue":
-        return this.#queue(params as QueueParams, caller);
+        return this.#queue(params as QueueParams);
       case "sessions.queue_drop":
         return this.#queueDrop(params as QueueDropParams, caller);
       case "sessions.rename":
         return this.#rename(params as RenameParams, caller);
       case "sessions.forget":
-        return this.#forget(params as ForgetParams, caller);
+        return this.#forget(params as ForgetParams);
       case "supervisor.reload":
         return this.#reload(params as ReloadParams, caller);
       case "supervisor.shutdown":
@@ -513,15 +513,11 @@ export class SupervisorServer {
 
     let parent: Session | null = null;
     if (params.parentSessionId !== undefined) {
-      parent = this.#resolve(caller, params.parentSessionId);
+      parent = this.#resolve(params.parentSessionId);
     } else if (caller !== null) {
-      parent = this.#sessions.get(caller) ?? null;
-      if (!parent) {
-        throw new HlaoError(
-          "forbidden",
-          `caller session ${caller} is not live; cannot derive a parent`,
-        );
-      }
+      // A stale or terminal caller is attribution, not an error: the spawn becomes a root.
+      const own = this.#sessions.get(caller);
+      parent = own !== undefined && !own.isTerminal ? own : null;
     }
 
     if (parent?.isTerminal) {
@@ -634,8 +630,8 @@ export class SupervisorServer {
     return result;
   }
 
-  #list(params: ListParams, caller: string | null): ListResult {
-    let sessions = this.#visible(caller);
+  #list(params: ListParams): ListResult {
+    let sessions = [...this.#sessions.values()];
     if (!params.includeClosed) {
       sessions = sessions.filter((session) => session.view().status !== "closed");
     }
@@ -644,13 +640,12 @@ export class SupervisorServer {
     }
     sessions.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     return {
-      scope: caller === null ? "operator" : "session",
       sessions: sessions.map((session) => session.view()),
     };
   }
 
-  #get(params: GetParams, caller: string | null): GetResult {
-    return { session: this.#resolve(caller, params.sessionId).view() };
+  #get(params: GetParams): GetResult {
+    return { session: this.#resolve(params.sessionId).view() };
   }
 
   /**
@@ -673,7 +668,7 @@ export class SupervisorServer {
   }
 
   async #send(params: SendParams, caller: string | null): Promise<SendResult> {
-    const session = this.#resolveSendTarget(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     const sent = await session.send(
       params.text,
       params.wait ?? false,
@@ -691,8 +686,8 @@ export class SupervisorServer {
     };
   }
 
-  #read(params: ReadParams, caller: string | null): ReadResult {
-    const session = this.#resolve(caller, params.sessionId);
+  #read(params: ReadParams): ReadResult {
+    const session = this.#resolve(params.sessionId);
     const read = session.read({
       since: params.since,
       before: params.before,
@@ -716,12 +711,11 @@ export class SupervisorServer {
 
   async #wait(
     params: WaitParams,
-    caller: string | null,
     signal: AbortSignal,
   ): Promise<WaitResult> {
     const ids =
       params.sessionIds ?? (params.sessionId !== undefined ? [params.sessionId] : []);
-    const targets = ids.map((id) => this.#resolve(caller, id));
+    const targets = ids.map((id) => this.#resolve(id));
     const timeoutMs = params.timeoutMs ?? this.#config.waitTimeoutMs;
 
     if (targets.length === 1) {
@@ -837,7 +831,7 @@ export class SupervisorServer {
   }
 
   async #cancel(params: CancelParams, caller: string | null): Promise<CancelResult> {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     const { discarded } = await session.cancel(
       params.keepQueue ?? false,
       actor(caller),
@@ -846,7 +840,7 @@ export class SupervisorServer {
   }
 
   async #close(params: CloseParams, caller: string | null): Promise<CloseResult> {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     const { killed, wasTerminal } = await session.close(
       params.force ?? false,
       actor(caller),
@@ -855,7 +849,7 @@ export class SupervisorServer {
   }
 
   #permit(params: PermitParams, caller: string | null): PermitResult {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     const resolved = session.permit(
       params.optionId,
       params.requestId,
@@ -871,13 +865,13 @@ export class SupervisorServer {
   }
 
   async #setMode(params: SetModeParams, caller: string | null): Promise<SetModeResult> {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     await session.setMode(params.modeId, actor(caller));
     return { session: session.view() };
   }
 
   #setPolicy(params: SetPolicyParams, caller: string | null): SetPolicyResult {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     session.setPolicy(params.permissionPolicy, actor(caller));
     return { session: session.view() };
   }
@@ -886,19 +880,19 @@ export class SupervisorServer {
     params: SetConfigOptionParams,
     caller: string | null,
   ): Promise<SetConfigOptionResult> {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     await session.setConfigOption(params.configId, params.value, actor(caller));
     return { session: session.view() };
   }
 
-  #queue(params: QueueParams, caller: string | null): QueueResult {
-    const session = this.#resolve(caller, params.sessionId);
+  #queue(params: QueueParams): QueueResult {
+    const session = this.#resolve(params.sessionId);
     const { active, queue } = session.queueView();
     return { session: session.view(), active, queue };
   }
 
   #queueDrop(params: QueueDropParams, caller: string | null): QueueDropResult {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     const { dropped, discarded } = session.dropQueued(
       params.position,
       actor(caller),
@@ -907,13 +901,13 @@ export class SupervisorServer {
   }
 
   #rename(params: RenameParams, caller: string | null): RenameResult {
-    const session = this.#resolve(caller, params.sessionId);
+    const session = this.#resolve(params.sessionId);
     session.setName(params.name, actor(caller));
     return { session: session.view() };
   }
 
-  #forget(params: ForgetParams, caller: string | null): ForgetResult {
-    const session = this.#resolve(caller, params.sessionId);
+  #forget(params: ForgetParams): ForgetResult {
+    const session = this.#resolve(params.sessionId);
     if (!session.isTerminal) {
       throw new HlaoError(
         "bad_request",
@@ -968,73 +962,19 @@ export class SupervisorServer {
   }
 
   // -------------------------------------------------------------------------
-  // scope and resolution
+  // resolution
   // -------------------------------------------------------------------------
 
-  #visible(caller: string | null): Session[] {
-    const all = [...this.#sessions.values()];
-    if (caller === null) return all;
-
-    const self = this.#sessions.get(caller);
-    if (!self) return [];
-    const allowed = new Set<string>([self.id]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const session of all) {
-        if (
-          session.parentId !== null &&
-          allowed.has(session.parentId) &&
-          !allowed.has(session.id)
-        ) {
-          allowed.add(session.id);
-          changed = true;
-        }
-      }
-    }
-    return all.filter((session) => allowed.has(session.id));
-  }
-
   /**
-   * The one deliberate exception to visibility: a session may send a message
-   * to its direct parent, so a finding or a blocking question can travel upward.
-   * Reads, waits, cancel, close, and permit remain forbidden on ancestors.
+   * Resolve a session token anywhere in this instance. `callerSessionId` is
+   * attribution, not scope: there is no visibility filter here (ADR 0008).
    */
-  #resolveSendTarget(caller: string | null, token: string): Session {
-    try {
-      return this.#resolve(caller, token);
-    } catch (error) {
-      if (caller === null) throw error;
-      const self = this.#sessions.get(caller);
-      const parent = self?.parentId
-        ? this.#sessions.get(self.parentId)
-        : undefined;
-      if (!parent) throw error;
-      if (token === parent.id || token === parent.name) return parent;
-      const prefixMatches = [...this.#sessions.values()].filter((session) =>
-        session.id.startsWith(token),
-      );
-      if (prefixMatches.length === 1 && prefixMatches[0] === parent) {
-        return parent;
-      }
-      throw error;
-    }
-  }
-
-  #resolve(caller: string | null, token: string): Session {
-    const scope = this.#visible(caller);
+  #resolve(token: string): Session {
+    const all = [...this.#sessions.values()];
     const exact = this.#sessions.get(token);
-    if (exact) {
-      if (!scope.some((session) => session.id === exact.id)) {
-        throw new HlaoError(
-          "forbidden",
-          `session ${token} is outside the caller's scope`,
-        );
-      }
-      return exact;
-    }
+    if (exact) return exact;
 
-    const nameMatches = scope.filter((session) => session.name === token);
+    const nameMatches = all.filter((session) => session.name === token);
     if (nameMatches.length === 1) return nameMatches[0]!;
     if (nameMatches.length > 1) {
       throw new HlaoError(
@@ -1049,7 +989,7 @@ export class SupervisorServer {
       );
     }
 
-    const matches = scope.filter((session) => session.id.startsWith(token));
+    const matches = all.filter((session) => session.id.startsWith(token));
     if (matches.length === 0) {
       throw new HlaoError("not_found", `no session matching "${token}"`);
     }

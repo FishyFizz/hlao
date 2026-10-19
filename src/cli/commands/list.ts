@@ -111,11 +111,11 @@ export async function cmdList(args: string[]): Promise<number> {
     render.tree,
   );
   if (ctx.json) {
-    writeJson({ scope: result.scope, sessions });
+    writeJson({ sessions });
     return 0;
   }
   if (sessions.length === 0) {
-    printEmptyList(ctx, result, filters);
+    printEmptyList(ctx, filters);
     return 0;
   }
   out(
@@ -146,9 +146,7 @@ async function watchList(
       render.tree,
     );
     if (ctx.json) {
-      process.stdout.write(
-        `${JSON.stringify({ scope: result.scope, sessions })}\n`,
-      );
+      process.stdout.write(`${JSON.stringify({ sessions })}\n`);
     } else {
       if (!first) {
         if (process.stdout.isTTY === true) {
@@ -313,12 +311,9 @@ function listFooter(
   ctx: CommandContext,
   usage: boolean,
 ): string {
-  const scope =
-    result.scope === "operator"
-      ? `scope: operator · ${visible} visible`
-      : `scope: self+descendants · ${visible} visible · siblings not shown`;
+  const instance = `instance · ${visible} session${visible === 1 ? "" : "s"}`;
   const usageLine = usage ? usageSummary(result.sessions) : null;
-  return ctx.style.dim(usageLine ? `${scope} · ${usageLine}` : scope);
+  return ctx.style.dim(usageLine ? `${instance} · ${usageLine}` : instance);
 }
 
 function usageSummary(sessions: SessionView[]): string {
@@ -345,7 +340,6 @@ function usageSummary(sessions: SessionView[]): string {
 
 function printEmptyList(
   ctx: CommandContext,
-  result: ListResult,
   filters: ListFilters,
 ): void {
   const filtered =
@@ -358,22 +352,7 @@ function printEmptyList(
   if (filtered) {
     out(ctx.style.dim("no sessions match the filters"));
   } else {
-    out(
-      ctx.style.dim(
-        result.scope === "session"
-          ? "no sessions in your scope"
-          : 'no sessions — hlao spawn <backend> "message"',
-      ),
-    );
-  }
-  if (
-    ctx.callerSessionId &&
-    result.scope === "session" &&
-    !result.sessions.some((session) => session.id === ctx.callerSessionId)
-  ) {
-    process.stderr.write(
-      `hlao: HLAO_SESSION_ID=${ctx.callerSessionId} is not a live session; the scope is empty\n`,
-    );
+    out(ctx.style.dim('no sessions — hlao spawn <backend> "message"'));
   }
 }
 

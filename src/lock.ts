@@ -143,7 +143,11 @@ export function pidAlive(pid: number): boolean {
 }
 
 /** A cheap liveness + token check used during startup and autostart. */
-export function probeSupervisor(info: LockInfo, timeoutMs = 750): Promise<boolean> {
+export function probeSupervisor(
+  info: LockInfo,
+  timeoutMs = 750,
+  expectedMajor: number | null = WIRE_PROTOCOL_MAJOR,
+): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value: boolean): void => {
@@ -182,7 +186,7 @@ export function probeSupervisor(info: LockInfo, timeoutMs = 750): Promise<boolea
         finish(
           response.ok === true &&
             normalized !== null &&
-            normalized.major === WIRE_PROTOCOL_MAJOR,
+            (expectedMajor === null || normalized.major === expectedMajor),
         );
       } catch {
         finish(false);

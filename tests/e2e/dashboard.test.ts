@@ -16,7 +16,6 @@ import {
 } from "./harness.js";
 
 interface ListValue {
-  scope: string;
   sessions: {
     id: string;
     name: string | null;

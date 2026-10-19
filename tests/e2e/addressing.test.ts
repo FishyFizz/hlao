@@ -234,7 +234,7 @@ test("human wait output includes the exit code", async (t) => {
   assert.match(waited.stdout, /exit 3/);
 });
 
-test("human list marks the caller and states the scope", async (t) => {
+test("human list marks the caller and reports the instance", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -253,10 +253,7 @@ test("human list marks the caller and states the scope", async (t) => {
     env: { HLAO_SESSION_ID: id },
   });
   assert.equal(listed.code, 0);
-  assert.match(
-    listed.stdout,
-    /scope: self\+descendants · \d+ visible · siblings not shown/,
-  );
+  assert.match(listed.stdout, /instance · \d+ sessions?/);
   assert.match(listed.stdout, /SELF/);
   const selfLine = listed.stdout
     .split("\n")
@@ -265,7 +262,7 @@ test("human list marks the caller and states the scope", async (t) => {
   assert.match(selfLine, /listed/);
 
   const operator = await harness.run(["list"], { json: false });
-  assert.match(operator.stdout, /scope: operator · \d+ visible/);
+  assert.match(operator.stdout, /instance · \d+ sessions?/);
   assert.doesNotMatch(operator.stdout, /SELF/);
 });
 

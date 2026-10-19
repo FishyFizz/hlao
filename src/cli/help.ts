@@ -30,7 +30,7 @@ Usage:
                                              watch new events / export a page
   hlao wait [<id>...] [--any|--all] [--until idle|permission|exit|change]
                                              one-shot await, one or many sessions
-  hlao list [--all] [--cwd DIR]                sessions in your scope
+  hlao list [--all] [--cwd DIR]                sessions in this instance
   hlao list [--wide] [--usage] [--tree] [--watch]
                                              dashboard / usage / lineage
   hlao cancel [<id>]                           stop the active turn; discard queue
@@ -48,7 +48,7 @@ Usage:
   hlao config show|path|validate               local configuration
   hlao reload                                  re-read config for new spawns
   hlao doctor [--start] [--probe]                 environment and connectivity checks
-  hlao whoami                                  this shell's scope and lineage
+  hlao whoami                                  this shell's identity and lineage
   hlao down [--force]                          stop the supervisor
   hlao help [command]                          this help or one command
   hlao version
@@ -198,9 +198,9 @@ timeout exits 2. If a target ends before the condition is met, the wait exits 3
 (except --until exit, which exits 0).`,
     list: `hlao list [--all] [--cwd DIR] [--wide] [--usage] [--tree] [--watch]
 
-List sessions visible to this shell. A session is shown by id and name; an
-agent sees itself and its descendants, and an operator sees all. The footer
-reports the scope, and a scoped view marks the caller's own session with *.
+List sessions in this HLAO instance. A session is shown by id and name; every
+session in the instance is addressable by every caller. The footer reports the
+instance count, and a view with a known caller marks that session with *.
 --all includes sessions that have closed but are still retained for reading.
 
 Filters: --status S[,S], --backend NAME, --root SESSION, --name TEXT,

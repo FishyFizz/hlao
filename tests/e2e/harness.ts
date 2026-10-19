@@ -213,7 +213,6 @@ export interface SessionValue {
 }
 
 export interface ListValue {
-  scope: "operator" | "session";
   sessions: SessionValue[];
 }
 

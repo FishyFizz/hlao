@@ -30,6 +30,12 @@ export interface ConnectionOptions {
   autostart?: boolean;
   /** How long to wait for a starting supervisor. Default 30s. */
   startupTimeoutMs?: number;
+  /**
+   * Accept a supervisor with a different wire major. Only `down` uses this, so a
+   * 2.x CLI can stop a pre-2.0 supervisor during an upgrade. Normal commands must
+   * require major equality.
+   */
+  allowLegacyProtocol?: boolean;
 }
 
 export interface RequestOptions {
@@ -105,13 +111,14 @@ async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
   while (Date.now() < deadline) {
     const lock = readLock(options.home);
     if (lock) {
-      if (lock.protocolVersion !== WIRE_PROTOCOL_MAJOR) {
+      const expectedMajor = options.allowLegacyProtocol ? null : WIRE_PROTOCOL_MAJOR;
+      if (expectedMajor !== null && lock.protocolVersion !== expectedMajor) {
         throw new HlaoError(
           "version_mismatch",
           `supervisor speaks wire protocol major ${lock.protocolVersion}; this CLI speaks ${WIRE_PROTOCOL_MAJOR}`,
         );
       }
-      if (await probeSupervisor(lock, 500)) {
+      if (await probeSupervisor(lock, 500, expectedMajor)) {
         warnVersionMismatch(lock);
         return lock;
       }

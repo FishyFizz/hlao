@@ -34,7 +34,6 @@ test("a session is spawned, read, sent to, and closed", async (t) => {
   assert.ok(spawned.value.session.lastSeq > 0);
 
   const listed = await harness.json<ListValue>(["list"]);
-  assert.equal(listed.value.scope, "operator");
   assert.ok(listed.value.sessions.some((session) => session.id === id));
 
   const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);

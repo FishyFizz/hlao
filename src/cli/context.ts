@@ -263,7 +263,7 @@ export function renderError(error: HlaoError): string {
   }
 
   if (error.code === "not_found") {
-    text += `run "hlao list" to see sessions in scope\n`;
+    text += `run "hlao list" to see sessions in this instance\n`;
   }
 
   if (error.code === "bad_request") {
