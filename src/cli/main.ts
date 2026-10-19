@@ -842,7 +842,7 @@ async function cmdPermit(args: string[]): Promise<number> {
   out(
     `${styleStatus(result.session.status, ctx.style)} ${sessionLabel(ctx, result.session)} — ` +
       `${option?.kind ?? "selected"} ${optionId}` +
-      (permission.title ? ctx.style.dim(` · ${permission.title}`) : "") +
+      (permission.title ? ctx.style.dim(` · ${sanitize(permission.title)}`) : "") +
       (always ? ctx.style.dim(" · future requests will be allowed automatically") : ""),
   );
   return 0;
