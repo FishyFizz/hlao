@@ -45,29 +45,82 @@ export interface RenderOptions {
   fullTimestamps?: boolean;
 }
 
+export interface SessionTableOptions {
+  wide?: boolean;
+  tree?: boolean;
+}
+
 export function renderSessionTable(
   sessions: SessionView[],
   style: Style,
   selfId: string | null = null,
+  options: SessionTableOptions = {},
 ): string {
   if (sessions.length === 0) return style.dim("no sessions");
   const showSelf = selfId !== null;
-  const rows = sessions.map((session) => [
-    ...(showSelf ? [session.id === selfId ? "*" : ""] : []),
-    session.id,
-    oneLine(session.name ?? "—"),
-    session.backend,
-    styleStatus(session.status, style),
-    String(session.turn),
-    session.queued > 0 ? String(session.queued) : "—",
-    formatAge(session.lastActivityAt),
-    truncateLeft(oneLine(session.cwd), 60),
-  ]);
+  const rows = sessions.map((session) => {
+    const indent = options.tree
+      ? `${"  ".repeat(session.depth)}${session.depth > 0 ? "└ " : ""}`
+      : "";
+    const base = [
+      ...(showSelf ? [session.id === selfId ? "*" : ""] : []),
+      `${indent}${session.id}`,
+      oneLine(session.name ?? "—"),
+      session.backend,
+      styleStatus(session.status, style),
+      String(session.turn),
+      session.queued > 0 ? String(session.queued) : "—",
+      formatAge(session.lastActivityAt),
+    ];
+    if (options.wide) {
+      base.push(
+        busyFor(session),
+        session.permissionPolicy,
+        session.modes?.currentModeId ?? "—",
+        session.pendingPermission
+          ? truncateRight(oneLine(session.pendingPermission.title), 30)
+          : "—",
+        exitDetail(session),
+      );
+    }
+    base.push(truncateLeft(oneLine(session.cwd), 60));
+    return base;
+  });
   return renderTable(
-    [...(showSelf ? ["SELF"] : []), "ID", "NAME", "BACKEND", "STATUS", "TURN", "QUEUED", "AGE", "CWD"],
+    [
+      ...(showSelf ? ["SELF"] : []),
+      "ID",
+      "NAME",
+      "BACKEND",
+      "STATUS",
+      "TURN",
+      "QUEUED",
+      "AGE",
+      ...(options.wide ? ["BUSY", "POLICY", "MODE", "PENDING", "EXIT"] : []),
+      "CWD",
+    ],
     rows,
     style,
   );
+}
+
+function busyFor(session: SessionView): string {
+  if (
+    !session.turnStartedAt ||
+    (session.status !== "busy" && session.status !== "waiting_permission")
+  ) {
+    return "—";
+  }
+  const started = Date.parse(session.turnStartedAt);
+  if (!Number.isFinite(started)) return "—";
+  return formatDuration(Math.max(0, Date.now() - started));
+}
+
+function exitDetail(session: SessionView): string {
+  if (!session.exit) return "—";
+  return session.exit.signal
+    ? `signal ${session.exit.signal}`
+    : `exit ${session.exit.code ?? "?"}`;
 }
 
 export function renderSessionHeader(session: SessionView, style: Style): string {
@@ -641,6 +694,11 @@ function renderPayload(value: unknown, style: Style): string[] {
 function truncateLeft(value: string, max: number): string {
   if (value.length <= max) return value;
   return `…${value.slice(value.length - max + 1)}`;
+}
+
+function truncateRight(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
 }
 
 function truncateMiddle(value: string, max: number): string {

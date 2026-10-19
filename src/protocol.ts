@@ -176,6 +176,7 @@ export const METHODS = [
   "sessions.queue",
   "sessions.queue_drop",
   "sessions.rename",
+  "sessions.forget",
   "supervisor.reload",
   "supervisor.shutdown",
 ] as const;
@@ -361,6 +362,13 @@ export interface RenameParams {
 export interface RenameResult {
   session: SessionView;
 }
+export interface ForgetParams {
+  sessionId: string;
+}
+export interface ForgetResult {
+  sessionId: string;
+  forgotten: true;
+}
 export interface ShutdownParams {
   force?: boolean;
 }
@@ -391,6 +399,7 @@ type ParamsByMethod = {
   "sessions.queue": QueueParams;
   "sessions.queue_drop": QueueDropParams;
   "sessions.rename": RenameParams;
+  "sessions.forget": ForgetParams;
   "supervisor.reload": ReloadParams;
   "supervisor.shutdown": ShutdownParams;
 };
@@ -838,6 +847,13 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
         name: name as string | null,
+      } as ParamsByMethod[M];
+    }
+    case "sessions.forget": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId"], what);
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
       } as ParamsByMethod[M];
     }
     case "supervisor.reload": {

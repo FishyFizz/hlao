@@ -13,11 +13,15 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR]
 hlao read [<id>] [--self] [--since N] [--limit N] [--raw] [--verbose]
-                [--timestamps] [--follow]
+                [--timestamps] [--follow] [--out FILE]
 hlao wait [<id>] [--self] [--until idle|permission|exit|change] [--since N] [--timeout DUR]
-hlao list [--all] [--cwd DIR]
+hlao list [--all] [--cwd DIR] [--cwd-prefix DIR] [--status S] [--backend NAME]
+                [--root SESSION] [--name TEXT] [--pending] [--wide] [--tree]
+                [--sort created|activity] [--watch] [--interval DUR]
 hlao cancel [<id>] [--self] [--keep-queue]
-hlao close [<id>] [--self] [--force] [--tree]
+hlao close [<id>] [--self] [--force] [--tree] [--forget]
+hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run]
+                [--except-self] [--forget] [--force]
 hlao permit [<id>] [--self] [--allow | --deny | --option ID] [--always]
 hlao mode [<id>] [modeId] [--self]
 hlao policy [<id>] [allow|ask|deny] [--self]
@@ -80,6 +84,24 @@ value id. `spawn --model VALUE` selects the option whose category is `model`;
 `queue drop <position>` removes one (1 is next) and settles its caller as cancelled.
 `cancel --keep-queue` stops only the active turn, leaving the backlog to run. Plain `cancel`
 still discards the queue.
+
+`list` filters are a client-side projection over the caller's visible sessions:
+`--status`, `--backend`, `--root` (a session token resolved inside the list), `--name`
+(substring), `--pending`, and `--cwd-prefix`. `--wide` adds BUSY, POLICY, MODE, PENDING, and
+EXIT; `--tree` groups by root and indents by depth. Human output defaults to `--sort activity`;
+JSON preserves supervisor order unless `--sort activity` is explicit. `--watch` is a
+caller-owned redraw loop: one full result per line under `--json`, or a cleared screen in a TTY.
+It never changes supervisor state.
+
+`close` without selectors closes one session. With `--idle DUR` (idle status and no activity for
+DUR), `--status S[,S]`, or `--root SESSION`, it is a CLI assembly over `sessions.list` and
+`sessions.close`: targets close deepest-first, terminal sessions are counted as skipped, and
+`--forget` removes matching terminal sessions instead (`sessions.forget`). `--dry-run` prints
+the targets without changing anything; `--except-self` protects the caller. Forgetting a session
+that still has retained descendants is an error, so forget descendants first.
+
+`read --out FILE` writes the current JSON page to FILE and continues normal output (`saved
+<file>` in human mode, a stderr note with `--json`). It cannot be combined with `--follow`.
 
 A child may `send` to its direct parent (exact id, exact name, or a prefix that uniquely
 identifies it). No other command may target an ancestor: reads, waits, cancel, close, permit,

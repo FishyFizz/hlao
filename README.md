@@ -89,11 +89,11 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 |---|---|
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. `--name` gives it a label. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
-| `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--follow` keeps reading; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
+| `hlao read [<id>] [--since N]` | Orchestration state plus a bounded page of typed events. `--follow` keeps reading; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
 | `hlao wait [<id>] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`. A timeout returns 2; a session that ended first returns 3. |
-| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. |
+| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
-| `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. |
+| `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
 | `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
 | `hlao policy [<id>] [allow\|ask\|deny]` | Read or set the live HLAO permission policy. |
@@ -134,7 +134,14 @@ operator view or self-plus-descendants.
 `hlao read <id> --follow` is a caller-owned loop: one `read` page, then one-shot
 `wait --until change`, repeating until the session ends or Ctrl-C. With `--json`, each page is
 one JSON object per line, so a stream can be consumed without framing. The supervisor still
-owns no timer.
+owns no timer. `read --out FILE` writes the current page as JSON while normal output continues;
+it is the supported export path before `down`.
+
+`hlao list --watch` redraws the visible sessions every `--interval` (default 2s) and never
+starts a supervisor timer. `--wide` adds busy time, policy, mode, pending-permission title, and
+exit detail; `--tree` indents by lineage. Filters (`--status`, `--backend`, `--root`, `--name`,
+`--pending`, `--cwd-prefix`) run over the caller's visible set, so they cannot widen scope.
+Human output sorts by recent activity by default; `--sort created` restores creation order.
 
 `hlao status` probes an existing supervisor and `--start` opts into autostart. `hlao logs` reads
 `supervisor.log` directly (rotated at 2 MiB while running, with one previous file) and can
@@ -330,8 +337,9 @@ options; `hlao permit <id> --option <id>` answers exactly, `--deny` rejects, and
 <id>` abandons the turn.
 
 **History has gaps.** The event log is bounded by count and bytes; `read` reports `truncated`
-and the first retained sequence. Export anything you need (`hlao read <id> --since 0 --json`)
-before `hlao down`, which ends every session and discards in-memory history.
+and the first retained sequence. Export anything you need with `hlao read <id> --since 0 --out
+history.json` (or `--json > file`) before `hlao down`, which ends every session and discards
+in-memory history.
 
 **An agent cannot see a session.** A spawned session sees itself and its descendants only.
 A sibling or parent is outside its scope by design; coordinate through the operator shell or a

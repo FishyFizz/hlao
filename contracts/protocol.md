@@ -168,6 +168,16 @@ Result: `{ session: SessionView }`. Appends a `session.renamed` event with
 `{ name, by: "operator" }`. Names are mutable labels, not identity: they do not affect scope,
 the handle, or `HLAO_SESSION_ID`.
 
+### `sessions.forget`
+
+Params: `{ sessionId: string }`. Result: `{ sessionId: string; forgotten: true }`.
+
+Removes a **terminal** session from the live table immediately instead of waiting for
+`retainClosedMs`. A live session is `bad_request`; a terminal session with retained descendants
+is also `bad_request`, so lineage never dangles. The action is in scope: an operator may forget
+anything, a session may forget itself or a descendant. Forgetting discards the retained event
+log for that session.
+
 ### `sessions.send`
 
 Params:

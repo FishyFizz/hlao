@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+### Added
+
+- Live permission control: `hlao policy` reads or sets `ask`/`allow`/`deny` without a pending
+  request. Every mutating event records the acting caller; prompt events record the sender.
+- A child may `send` to its direct parent (ADR 0006). Reads, waits, stop authority, and policy
+  control remain forbidden on ancestors.
+- Provider config options: `SessionView.configOptions`, `hlao option`, `spawn --model`, and
+  `spawn --config KEY=VALUE`, applied before the first prompt.
+- Queue visibility and control: `hlao queue`, `queue drop`, `cancel --keep-queue`; queue events
+  carry sender and a bounded preview (ADR 0005 amendment).
+- Dashboard: `list --wide`, `--tree`, filters (`--status`, `--backend`, `--root`, `--name`,
+  `--pending`, `--cwd-prefix`), `--sort`, and the caller-owned `--watch` loop.
+- Cleanup: `close --idle`, `--status`, `--root`, `--dry-run`, `--except-self`, and `--forget`
+  backed by `sessions.forget` for terminal sessions.
+- `read --out FILE` exports a page as JSON. `doctor --probe` starts each adapter through ACP
+  `initialize`/`session/new` and closes it.
+
+### Changed
+
+- Read-only probes (`status`, non-start `doctor`) no longer create `HLAO_HOME`.
+- `doctor` reports adapter commands as "present", always shows the log path/size, and treats a
+  stopped supervisor as installed rather than failed.
+- Spawn failures carry the adapter exit code/signal; `session.created` records name, requested
+  mode, and env keys.
+- A CLI/supervisor version mismatch warns once per process.
+- `help` and `version` honor `--json`; `help` parses trailing flags rather than treating them as
+  a topic.
+
 ## 0.2.0 — unreleased
 
 ### Added

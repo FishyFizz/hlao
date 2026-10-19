@@ -36,6 +36,8 @@ import {
   type CloseResult,
   type GetParams,
   type GetResult,
+  type ForgetParams,
+  type ForgetResult,
   type HelloResult,
   type ListParams,
   type ListResult,
@@ -445,6 +447,8 @@ export class SupervisorServer {
         return this.#queueDrop(params as QueueDropParams, caller);
       case "sessions.rename":
         return this.#rename(params as RenameParams, caller);
+      case "sessions.forget":
+        return this.#forget(params as ForgetParams, caller);
       case "supervisor.reload":
         return this.#reload(params as ReloadParams, caller);
       case "supervisor.shutdown":
@@ -771,6 +775,28 @@ export class SupervisorServer {
     const session = this.#resolve(caller, params.sessionId);
     session.setName(params.name, actor(caller));
     return { session: session.view() };
+  }
+
+  #forget(params: ForgetParams, caller: string | null): ForgetResult {
+    const session = this.#resolve(caller, params.sessionId);
+    if (!session.isTerminal) {
+      throw new HlaoError(
+        "bad_request",
+        `session ${session.id} is still ${session.view().status}; close it before forgetting it`,
+      );
+    }
+    const descendants = [...this.#sessions.values()].filter(
+      (candidate) => candidate.parentId === session.id,
+    );
+    if (descendants.length > 0) {
+      throw new HlaoError(
+        "bad_request",
+        `session ${session.id} still has ${descendants.length} retained descendant(s); forget them first`,
+      );
+    }
+    this.#sessions.delete(session.id);
+    this.#logger.info(`forgot ${session.id}`);
+    return { sessionId: session.id, forgotten: true };
   }
 
   #reload(_params: ReloadParams, caller: string | null): ReloadResult {

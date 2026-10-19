@@ -5,6 +5,7 @@ import {
   readFileSync,
   readSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,7 @@ import type {
   AgentsListResult,
   CancelResult,
   CloseResult,
+  ForgetResult,
   GetResult,
   HelloResult,
   ListResult,
@@ -64,6 +66,7 @@ import {
   renderPermission,
   renderReadResult,
   renderSessionTable,
+  renderTable,
   sanitize,
   styleStatus,
   type DoctorCheck,
@@ -430,6 +433,7 @@ async function cmdRead(args: string[]): Promise<number> {
     { name: "verbose", type: "boolean" },
     { name: "timestamps", type: "boolean" },
     { name: "follow", type: "boolean" },
+    { name: "out", type: "path", valueName: "FILE" },
   ]);
   if (helpRequested(parsed, "read")) return 0;
   expectPositionals(parsed, "read", 0, 1);
@@ -440,6 +444,10 @@ async function cmdRead(args: string[]): Promise<number> {
   const raw = booleanOption(parsed, "raw") === true || verbose;
   const timestamps = booleanOption(parsed, "timestamps") === true;
   const follow = booleanOption(parsed, "follow") === true;
+  const outFile = stringOption(parsed, "out");
+  if (follow && outFile !== undefined) {
+    throw usageError("--out cannot be combined with --follow");
+  }
   const since = numberOption(parsed, "since");
   const limit = numberOption(parsed, "limit");
   const conn = await connect(ctx);
@@ -461,6 +469,18 @@ async function cmdRead(args: string[]): Promise<number> {
     raw,
   });
 
+  if (outFile !== undefined) {
+    try {
+      writeFileSync(outFile, `${JSON.stringify(result, null, 2)}\n`);
+    } catch (error) {
+      throw new HlaoError(
+        "bad_request",
+        `cannot write ${outFile}: ${(error as Error).message}`,
+      );
+    }
+    if (ctx.json) process.stderr.write(`hlao: wrote ${outFile}\n`);
+  }
+
   if (ctx.json) {
     writeJson(result);
     return 0;
@@ -471,6 +491,9 @@ async function cmdRead(args: string[]): Promise<number> {
       fullTimestamps: timestamps,
     }),
   );
+  if (outFile !== undefined) {
+    out(ctx.style.dim(`saved ${outFile}`));
+  }
   return 0;
 }
 
@@ -641,55 +664,326 @@ async function cmdWait(args: string[]): Promise<number> {
   }
 }
 
+interface ListFilters {
+  statuses?: string[];
+  backend?: string;
+  root?: string;
+  name?: string;
+  pending?: boolean;
+  cwdPrefix?: string;
+}
+
+interface ListRender {
+  wide: boolean;
+  tree: boolean;
+  sort: "created" | "activity";
+}
+
 async function cmdList(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "all", short: "a", type: "boolean" },
     { name: "cwd", type: "path", valueName: "DIR" },
+    { name: "cwd-prefix", type: "path", valueName: "DIR" },
+    { name: "status", type: "string", valueName: "STATUS" },
+    { name: "backend", type: "string", valueName: "NAME" },
+    { name: "root", type: "string", valueName: "SESSION" },
+    { name: "name", type: "string", valueName: "TEXT" },
+    { name: "pending", type: "boolean" },
+    { name: "wide", type: "boolean" },
+    { name: "tree", type: "boolean" },
+    { name: "sort", type: "string", valueName: "created|activity" },
+    { name: "watch", type: "boolean" },
+    { name: "interval", type: "duration", valueName: "DUR" },
   ]);
   if (helpRequested(parsed, "list")) return 0;
   expectPositionals(parsed, "list", 0, 0);
 
   const ctx = contextFrom(parsed);
-  const conn = await connect(ctx);
-  const cwd = stringOption(parsed, "cwd");
-  const result = await conn.request<ListResult>("sessions.list", {
-    includeClosed: booleanOption(parsed, "all") ?? false,
-    ...(cwd !== undefined ? { cwd: resolve(cwd) } : {}),
-  });
+  const statuses = parseStatuses(stringOption(parsed, "status"));
+  const sortOption = stringOption(parsed, "sort");
+  if (
+    sortOption !== undefined &&
+    sortOption !== "created" &&
+    sortOption !== "activity"
+  ) {
+    throw usageError("--sort must be created or activity");
+  }
+  const filters: ListFilters = {
+    statuses,
+    backend: stringOption(parsed, "backend"),
+    root: stringOption(parsed, "root"),
+    name: stringOption(parsed, "name"),
+    pending: booleanOption(parsed, "pending") === true,
+    cwdPrefix: resolveOptional(stringOption(parsed, "cwd-prefix")),
+  };
+  const render: ListRender = {
+    wide: booleanOption(parsed, "wide") === true,
+    tree: booleanOption(parsed, "tree") === true,
+    sort: sortOption ?? (ctx.json ? "created" : "activity"),
+  };
+  const cwd = resolveOptional(stringOption(parsed, "cwd"));
+  const params = {
+    includeClosed:
+      (booleanOption(parsed, "all") ?? false) ||
+      (statuses?.includes("closed") ?? false),
+    ...(cwd !== undefined ? { cwd } : {}),
+  };
 
+  const conn = await connect(ctx);
+  if (booleanOption(parsed, "watch") === true) {
+    const interval = numberOption(parsed, "interval") ?? 2_000;
+    if (interval < 250) {
+      throw usageError("--interval must be at least 250ms");
+    }
+    return await watchList(conn, ctx, params, filters, render, interval);
+  }
+
+  const result = await conn.request<ListResult>("sessions.list", params);
+  const sessions = sortSessions(
+    filterSessions(result.sessions, filters),
+    render.sort,
+    render.tree,
+  );
   if (ctx.json) {
-    writeJson(result);
+    writeJson({ scope: result.scope, sessions });
     return 0;
   }
-  if (result.sessions.length === 0) {
+  if (sessions.length === 0) {
+    printEmptyList(ctx, result, filters);
+    return 0;
+  }
+  out(
+    renderSessionTable(sessions, ctx.style, ctx.callerSessionId, {
+      wide: render.wide,
+      tree: render.tree,
+    }),
+  );
+  out(listFooter(result, sessions.length, ctx));
+  return 0;
+}
+
+async function watchList(
+  conn: SupervisorConnection,
+  ctx: CommandContext,
+  params: { includeClosed: boolean; cwd?: string },
+  filters: ListFilters,
+  render: ListRender,
+  interval: number,
+): Promise<number> {
+  let first = true;
+  for (;;) {
+    const result = await conn.request<ListResult>("sessions.list", params);
+    const sessions = sortSessions(
+      filterSessions(result.sessions, filters),
+      render.sort,
+      render.tree,
+    );
+    if (ctx.json) {
+      process.stdout.write(
+        `${JSON.stringify({ scope: result.scope, sessions })}\n`,
+      );
+    } else {
+      if (!first) {
+        if (process.stdout.isTTY === true) {
+          process.stdout.write("\u001b[2J\u001b[H");
+        } else {
+          out("—");
+        }
+      }
+      out(
+        ctx.style.dim(
+          `hlao list · ${new Date().toISOString()} · Ctrl-C to stop`,
+        ),
+      );
+      out(
+        renderSessionTable(sessions, ctx.style, ctx.callerSessionId, {
+          wide: render.wide,
+          tree: render.tree,
+        }),
+      );
+      out(listFooter(result, sessions.length, ctx));
+    }
+    first = false;
+    await sleepMs(interval);
+  }
+}
+
+function parseStatuses(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) return undefined;
+  const allowed = [
+    "starting",
+    "idle",
+    "busy",
+    "waiting_permission",
+    "closed",
+    "failed",
+  ];
+  const statuses = raw
+    .split(",")
+    .map((status) => status.trim())
+    .filter((status) => status.length > 0);
+  if (statuses.length === 0) {
+    throw usageError(`--status must list one of: ${allowed.join(", ")}`);
+  }
+  for (const status of statuses) {
+    if (!allowed.includes(status)) {
+      throw usageError(
+        `unknown status "${status}" (${allowed.join(", ")})`,
+      );
+    }
+  }
+  return statuses;
+}
+
+function resolveOptional(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : resolve(value);
+}
+
+function filterSessions(
+  sessions: SessionView[],
+  filters: ListFilters,
+): SessionView[] {
+  let result = [...sessions];
+  if (filters.statuses) {
+    const allowed = new Set(filters.statuses);
+    result = result.filter((session) => allowed.has(session.status));
+  }
+  if (filters.backend !== undefined) {
+    const backend = filters.backend.toLowerCase();
+    result = result.filter(
+      (session) => session.backend.toLowerCase() === backend,
+    );
+  }
+  if (filters.name !== undefined) {
+    const name = filters.name.toLowerCase();
+    result = result.filter((session) =>
+      (session.name ?? "").toLowerCase().includes(name),
+    );
+  }
+  if (filters.pending === true) {
+    result = result.filter((session) => session.pendingPermission !== null);
+  }
+  if (filters.cwdPrefix !== undefined) {
+    const prefix = normalizePath(filters.cwdPrefix);
+    result = result.filter((session) =>
+      normalizePath(session.cwd).startsWith(prefix),
+    );
+  }
+  if (filters.root !== undefined) {
+    const root = resolveInList(sessions, filters.root);
+    result = result.filter((session) => session.rootId === root.rootId);
+  }
+  return result;
+}
+
+function normalizePath(value: string): string {
+  const normalized = resolve(value).replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function resolveInList(sessions: SessionView[], token: string): SessionView {
+  const exact = sessions.find((session) => session.id === token);
+  if (exact) return exact;
+  const named = sessions.filter((session) => session.name === token);
+  if (named.length === 1) return named[0]!;
+  if (named.length > 1) {
+    throw ambiguousSession(token, named);
+  }
+  const prefixed = sessions.filter((session) => session.id.startsWith(token));
+  if (prefixed.length === 1) return prefixed[0]!;
+  if (prefixed.length > 1) {
+    throw ambiguousSession(`prefix "${token}"`, prefixed);
+  }
+  throw new HlaoError("not_found", `no session matching "${token}"`);
+}
+
+function ambiguousSession(
+  what: string,
+  sessions: SessionView[],
+): HlaoError {
+  return new HlaoError(
+    "ambiguous_id",
+    `session ${what} matches ${sessions.length} sessions`,
+    {
+      candidates: sessions.map((session) => ({
+        id: session.id,
+        name: session.name,
+        status: session.status,
+      })),
+    },
+  );
+}
+
+function sortSessions(
+  sessions: SessionView[],
+  sort: "created" | "activity",
+  tree: boolean,
+): SessionView[] {
+  const sorted = [...sessions];
+  if (tree) {
+    sorted.sort(
+      (left, right) =>
+        left.rootId.localeCompare(right.rootId) ||
+        left.depth - right.depth ||
+        left.createdAt.localeCompare(right.createdAt),
+    );
+    return sorted;
+  }
+  if (sort === "activity") {
+    sorted.sort(
+      (left, right) =>
+        right.lastActivityAt.localeCompare(left.lastActivityAt) ||
+        left.createdAt.localeCompare(right.createdAt),
+    );
+  }
+  return sorted;
+}
+
+function listFooter(
+  result: ListResult,
+  visible: number,
+  ctx: CommandContext,
+): string {
+  return ctx.style.dim(
+    result.scope === "operator"
+      ? `scope: operator · ${visible} visible`
+      : `scope: self+descendants · ${visible} visible · siblings not shown`,
+  );
+}
+
+function printEmptyList(
+  ctx: CommandContext,
+  result: ListResult,
+  filters: ListFilters,
+): void {
+  const filtered =
+    filters.statuses !== undefined ||
+    filters.backend !== undefined ||
+    filters.root !== undefined ||
+    filters.name !== undefined ||
+    filters.pending === true ||
+    filters.cwdPrefix !== undefined;
+  if (filtered) {
+    out(ctx.style.dim("no sessions match the filters"));
+  } else {
     out(
       ctx.style.dim(
         result.scope === "session"
           ? "no sessions in your scope"
-          : "no sessions — hlao spawn <backend> \"message\"",
+          : 'no sessions — hlao spawn <backend> "message"',
       ),
     );
-    if (
-      ctx.callerSessionId &&
-      result.scope === "session" &&
-      !result.sessions.some((session) => session.id === ctx.callerSessionId)
-    ) {
-      process.stderr.write(
-        `hlao: HLAO_SESSION_ID=${ctx.callerSessionId} is not a live session; the scope is empty\n`,
-      );
-    }
-    return 0;
   }
-  out(renderSessionTable(result.sessions, ctx.style, ctx.callerSessionId));
-  out(
-    ctx.style.dim(
-      result.scope === "operator"
-        ? `scope: operator · ${result.sessions.length} visible`
-        : `scope: self+descendants · ${result.sessions.length} visible · siblings not shown`,
-    ),
-  );
-  return 0;
+  if (
+    ctx.callerSessionId &&
+    result.scope === "session" &&
+    !result.sessions.some((session) => session.id === ctx.callerSessionId)
+  ) {
+    process.stderr.write(
+      `hlao: HLAO_SESSION_ID=${ctx.callerSessionId} is not a live session; the scope is empty\n`,
+    );
+  }
 }
 
 async function cmdCancel(args: string[]): Promise<number> {
@@ -741,15 +1035,60 @@ async function cmdClose(args: string[]): Promise<number> {
     { name: "self", type: "boolean" },
     { name: "force", type: "boolean" },
     { name: "tree", type: "boolean" },
+    { name: "idle", type: "duration", valueName: "DUR" },
+    { name: "failed", type: "boolean" },
+    { name: "status", type: "string", valueName: "STATUS" },
+    { name: "root", type: "string", valueName: "SESSION" },
+    { name: "dry-run", type: "boolean" },
+    { name: "except-self", type: "boolean" },
+    { name: "forget", type: "boolean" },
   ]);
   if (helpRequested(parsed, "close")) return 0;
-  expectPositionals(parsed, "close", 0, 1);
-  const sessionId = resolveTarget(parsed, "close", "selfDefault");
+
+  const idle = numberOption(parsed, "idle");
+  const failed = booleanOption(parsed, "failed") === true;
+  const statusRaw = stringOption(parsed, "status");
+  const rootToken = stringOption(parsed, "root");
+  const bulk =
+    idle !== undefined ||
+    failed ||
+    statusRaw !== undefined ||
+    rootToken !== undefined;
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
   const force = booleanOption(parsed, "force") ?? false;
+  const forget = booleanOption(parsed, "forget") === true;
+  const dryRun = booleanOption(parsed, "dry-run") === true;
+
+  if (bulk) {
+    if (parsed.positionals.length > 0) {
+      throw usageError("close takes either a session id or selector flags");
+    }
+    if (
+      booleanOption(parsed, "self") === true ||
+      booleanOption(parsed, "tree") === true
+    ) {
+      throw usageError("--self and --tree are only for a single session id");
+    }
+    return await closeBulk(conn, ctx, {
+      idle,
+      statuses: new Set([
+        ...(failed ? ["failed"] : []),
+        ...(parseStatuses(statusRaw) ?? []),
+      ]),
+      rootToken,
+      force,
+      forget,
+      dryRun,
+      exceptSelf: booleanOption(parsed, "except-self") === true,
+    });
+  }
+
+  expectPositionals(parsed, "close", 0, 1);
+  const sessionId = resolveTarget(parsed, "close", "selfDefault");
 
   if (booleanOption(parsed, "tree") === true) {
+    if (forget) throw usageError("--forget cannot be combined with --tree");
     const target = await conn.request<GetResult>("sessions.get", { sessionId });
     // Closed intermediates are retained for lineage; including them lets the
     // subtree reach live grandchildren whose parent has already been closed.
@@ -781,6 +1120,38 @@ async function cmdClose(args: string[]): Promise<number> {
     return 0;
   }
 
+  if (dryRun) {
+    const got = await conn.request<GetResult>("sessions.get", { sessionId });
+    const terminal =
+      got.session.status === "closed" || got.session.status === "failed";
+    const action = terminal
+      ? forget
+        ? "forget"
+        : "skip"
+      : "close";
+    if (ctx.json) {
+      writeJson({ dryRun: true, action, session: got.session });
+      return 0;
+    }
+    out(
+      `would ${action === "skip" ? "skip (already terminal)" : action} ` +
+        sessionLabel(ctx, got.session),
+    );
+    return 0;
+  }
+
+  if (forget) {
+    const forgotten = await conn.request<ForgetResult>("sessions.forget", {
+      sessionId,
+    });
+    if (ctx.json) {
+      writeJson(forgotten);
+      return 0;
+    }
+    out(`forgot ${ctx.style.bold(forgotten.sessionId)}`);
+    return 0;
+  }
+
   const result = await conn.request<CloseResult>("sessions.close", {
     sessionId,
     force,
@@ -797,6 +1168,139 @@ async function cmdClose(args: string[]): Promise<number> {
   out(
     `closed ${label}` +
       (result.killed ? ctx.style.dim(" (forced)") : ""),
+  );
+  return 0;
+}
+
+interface CloseBulkOptions {
+  idle?: number;
+  statuses: Set<string>;
+  rootToken?: string;
+  force: boolean;
+  forget: boolean;
+  dryRun: boolean;
+  exceptSelf: boolean;
+}
+
+async function closeBulk(
+  conn: SupervisorConnection,
+  ctx: CommandContext,
+  options: CloseBulkOptions,
+): Promise<number> {
+  const list = await conn.request<ListResult>("sessions.list", {
+    includeClosed: true,
+  });
+  let targets = list.sessions;
+  if (options.rootToken !== undefined) {
+    const root = resolveInList(list.sessions, options.rootToken);
+    targets = targets.filter((session) => session.rootId === root.rootId);
+  }
+  if (options.statuses.size > 0) {
+    targets = targets.filter((session) => options.statuses.has(session.status));
+  }
+  if (options.idle !== undefined) {
+    const now = Date.now();
+    targets = targets.filter((session) => {
+      if (session.status !== "idle") return false;
+      const last = Date.parse(session.lastActivityAt);
+      return Number.isFinite(last) && now - last >= options.idle!;
+    });
+  }
+  if (options.exceptSelf && ctx.callerSessionId !== null) {
+    targets = targets.filter(
+      (session) => session.id !== ctx.callerSessionId,
+    );
+  }
+  targets = [...targets].sort((left, right) => right.depth - left.depth);
+
+  if (targets.length === 0) {
+    if (ctx.json) {
+      writeJson({ count: 0, forgotten: 0, skipped: 0, sessions: [] });
+    } else {
+      out(ctx.style.dim("no sessions matched"));
+    }
+    return 0;
+  }
+
+  const terminal = (session: SessionView): boolean =>
+    session.status === "closed" || session.status === "failed";
+
+  if (options.dryRun) {
+    const wouldForget = targets.filter(
+      (session) => terminal(session) && options.forget,
+    ).length;
+    const wouldClose = targets.filter((session) => !terminal(session)).length;
+    const skipped = targets.length - wouldForget - wouldClose;
+    if (ctx.json) {
+      writeJson({
+        dryRun: true,
+        count: wouldClose,
+        forgotten: wouldForget,
+        skipped,
+        sessions: targets,
+      });
+      return 0;
+    }
+    out(ctx.style.dim("dry run; no session was changed"));
+    out(
+      renderTable(
+        ["ID", "NAME", "STATUS", "ACTION"],
+        targets.map((session) => [
+          session.id,
+          sanitize(session.name ?? "—"),
+          styleStatus(session.status, ctx.style),
+          terminal(session)
+            ? options.forget
+              ? "forget"
+              : "skip"
+            : "close",
+        ]),
+        ctx.style,
+      ),
+    );
+    out(
+      `would close ${wouldClose} · forget ${wouldForget} · skip ${skipped}`,
+    );
+    return 0;
+  }
+
+  const closed: SessionView[] = [];
+  const forgotten: string[] = [];
+  let skipped = 0;
+  for (const session of targets) {
+    if (terminal(session)) {
+      if (!options.forget) {
+        skipped += 1;
+        continue;
+      }
+      await conn.request<ForgetResult>("sessions.forget", {
+        sessionId: session.id,
+      });
+      forgotten.push(session.id);
+      continue;
+    }
+    const result = await conn.request<CloseResult>("sessions.close", {
+      sessionId: session.id,
+      force: options.force,
+    });
+    if (result.wasTerminal) skipped += 1;
+    else closed.push(result.session);
+  }
+
+  if (ctx.json) {
+    writeJson({
+      count: closed.length,
+      forgotten: forgotten.length,
+      forgottenIds: forgotten,
+      skipped,
+      sessions: closed,
+    });
+    return 0;
+  }
+  for (const session of closed) out(`closed ${sessionLabel(ctx, session)}`);
+  for (const id of forgotten) out(`forgot ${ctx.style.bold(id)}`);
+  out(
+    `closed ${closed.length} · forgot ${forgotten.length} · skipped ${skipped}`,
   );
   return 0;
 }
@@ -2315,10 +2819,13 @@ Usage:
   hlao spawn <backend> [message] [options]     open a session
   hlao send [<id>] [message] [--wait]          queue a prompt
   hlao read [<id>] [--since N] [--raw]         read orchestration state + events
+  hlao read [<id>] --follow [--out FILE]       watch new events / export a page
   hlao wait [<id>] [--until idle|permission|exit|change] [--timeout DUR]
   hlao list [--all] [--cwd DIR]                sessions in your scope
+  hlao list [--wide] [--tree] [--watch]        dashboard / lineage / redraw loop
   hlao cancel [<id>]                           stop the active turn; discard queue
   hlao close [<id>] [--force] [--tree]         end a session
+  hlao close --idle DUR | --status S | --root S [--dry-run] [--forget]
   hlao permit [<id>] --allow|--deny|--option ID  answer a permission request
   hlao mode [<id>] [modeId]                    read or switch a provider mode
   hlao policy [<id>] [allow|ask|deny]          read or set the live permission policy
@@ -2452,6 +2959,7 @@ Options:
   --timestamps           show full ISO timestamps instead of HH:MM:SS
   --follow               keep reading, then one-shot wait, until the session
                          ends or you press Ctrl-C; --json emits one page per line
+  --out FILE             also write this page's JSON result to FILE
 
 The response reports earliestRetainedSeq, lastSeq, nextSeq, hasMore, and
 truncated. Tool payloads are omitted unless --raw/--verbose.`,
@@ -2467,26 +2975,39 @@ Options:
 
 A timeout exits 2. If the session ends before the condition is met, the wait
 exits 3 (except --until exit, which exits 0).`,
-    list: `hlao list [--all] [--cwd DIR]
+    list: `hlao list [--all] [--cwd DIR] [--wide] [--tree] [--watch]
 
 List sessions visible to this shell. A session is shown by id and name; an
 agent sees itself and its descendants, and an operator sees all. The footer
 reports the scope, and a scoped view marks the caller's own session with *.
 --all includes sessions that have closed but are still retained for reading.
---cwd filters to one working directory.`,
+
+Filters: --status S[,S], --backend NAME, --root SESSION, --name TEXT,
+--pending, and --cwd-prefix DIR (subtree). --sort created|activity (human
+default: activity). --wide adds BUSY, POLICY, MODE, PENDING, and EXIT;
+--tree groups and indents by lineage. --watch redraws every --interval DUR
+(default 2s; JSON emits one result per line) until Ctrl-C.`,
     cancel: `hlao cancel [<id>] [--keep-queue]
 
 Request ACP session/cancel for the active turn. By default every queued message
 is discarded as well; --keep-queue stops only the active turn and lets the next
 queued message run. The session survives. Inside a session, omit <id> or pass
 --self.`,
-    close: `hlao close [<id>] [--force] [--tree]
+    close: `hlao close [<id>] [--force] [--tree] [--forget]
+hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run] [--forget]
 
 Close a session. ACP session/close is attempted when advertised, then the
 adapter process is terminated. --force skips the protocol close. --tree closes
 this session's descendants first (a CLI assembly over list + close). Inside a
-session, omit <id> or pass --self. Closing discards the session's queued
-messages and, once retention ends, its in-memory history.`,
+session, omit <id> or pass --self.
+
+Bulk mode selects sessions instead of naming one: --idle matches idle sessions
+whose last activity is older than DUR; --status matches states; --root matches
+a whole job; --except-self excludes the caller. --dry-run prints the targets
+and actions without changing anything. --forget removes a terminal session from
+the table (retention is otherwise one hour); a session with retained
+descendants must have them forgotten first. Closing discards queued messages
+and, once retention ends, in-memory history.`,
     permit: `hlao permit [<id>] --allow|--deny|--option ID [--always]
 
 Answer the session's pending permission request. --allow picks the first allow
