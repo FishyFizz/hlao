@@ -12,6 +12,7 @@ import {
 import { ensureHome, logPath } from "./paths.js";
 import {
   MAX_FRAME_BYTES,
+  WIRE_PROTOCOL_MAJOR,
   type Method,
   type RequestEnvelope,
   type ResponseEnvelope,
@@ -104,10 +105,10 @@ async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
   while (Date.now() < deadline) {
     const lock = readLock(options.home);
     if (lock) {
-      if (lock.protocolVersion !== 1) {
+      if (lock.protocolVersion !== WIRE_PROTOCOL_MAJOR) {
         throw new HlaoError(
           "version_mismatch",
-          `supervisor speaks wire protocol ${lock.protocolVersion}; this CLI speaks 1`,
+          `supervisor speaks wire protocol major ${lock.protocolVersion}; this CLI speaks ${WIRE_PROTOCOL_MAJOR}`,
         );
       }
       if (await probeSupervisor(lock, 500)) {

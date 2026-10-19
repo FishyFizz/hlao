@@ -1,7 +1,62 @@
 import { isAbsolute } from "node:path";
 import { HlaoError, type HlaoErrorCode } from "./errors.js";
 
-export const WIRE_PROTOCOL_VERSION = 1;
+/**
+ * The supervisor wire protocol. `major` changes only when a client written for
+ * the previous major can no longer work; `minor` grows with additive methods and
+ * fields. Clients require major equality and discover optional behavior through
+ * `hello.capabilities`.
+ */
+export interface ProtocolVersion {
+  major: number;
+  minor: number;
+}
+
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 1, minor: 1 };
+export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
+
+/**
+ * Accepts the 0.4 object form and the pre-0.4 numeric form (interpreted as
+ * `major.0`) so a new client can still talk to an older running supervisor.
+ */
+export function normalizeProtocolVersion(value: unknown): ProtocolVersion | null {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return { major: value, minor: 0 };
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.major === "number" &&
+      Number.isInteger(record.major) &&
+      record.major >= 0 &&
+      typeof record.minor === "number" &&
+      Number.isInteger(record.minor) &&
+      record.minor >= 0
+    ) {
+      return { major: record.major, minor: record.minor };
+    }
+  }
+  return null;
+}
+
+/** The ACP version HLAO speaks. Distinct from the supervisor wire version. */
+export const ACP_PROTOCOL_VERSION = 1;
+
+/**
+ * Additive protocol features a client may feature-detect. A capability is
+ * present when the supervisor implements it; absence means the client must fall
+ * back to the older behavior.
+ */
+export const PROTOCOL_CAPABILITIES = [
+  "backends.list",
+  "session.usage",
+  "read.filters",
+  "read.before",
+  "wait.multi",
+] as const;
+
+export type ProtocolCapability = (typeof PROTOCOL_CAPABILITIES)[number];
+
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const MAX_PROMPT_CHARS = 1_000_000;
 const MAX_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -23,39 +78,42 @@ export type SessionStatus =
   | "failed";
 export type WaitUntil = "idle" | "permission" | "exit" | "change";
 
-export type EventType =
-  | "session.created"
-  | "session.initialized"
-  | "session.closed"
-  | "session.failed"
-  | "session.renamed"
-  | "prompt.sent"
-  | "prompt.queued"
-  | "prompt.discarded"
-  | "turn.started"
-  | "turn.ended"
-  | "cancel.requested"
-  | "agent.message"
-  | "agent.thought"
-  | "user.message"
-  | "tool.call"
-  | "tool.update"
-  | "plan"
-  | "plan.update"
-  | "permission.requested"
-  | "permission.resolved"
-  | "policy.changed"
-  | "notice"
-  | "usage"
-  | "mode"
-  | "config"
-  | "commands"
-  | "session.info"
-  | "compaction"
-  | "subagent"
-  | "stderr"
-  | "error"
-  | "raw";
+export const EVENT_TYPES = [
+  "session.created",
+  "session.initialized",
+  "session.closed",
+  "session.failed",
+  "session.renamed",
+  "prompt.sent",
+  "prompt.queued",
+  "prompt.discarded",
+  "turn.started",
+  "turn.ended",
+  "cancel.requested",
+  "agent.message",
+  "agent.thought",
+  "user.message",
+  "tool.call",
+  "tool.update",
+  "plan",
+  "plan.update",
+  "permission.requested",
+  "permission.resolved",
+  "policy.changed",
+  "notice",
+  "usage",
+  "mode",
+  "config",
+  "commands",
+  "session.info",
+  "compaction",
+  "subagent",
+  "stderr",
+  "error",
+  "raw",
+] as const;
+
+export type EventType = (typeof EVENT_TYPES)[number];
 
 export interface PermissionView {
   requestId: string;
@@ -94,6 +152,14 @@ export interface SessionModes {
   availableModes: SessionModeOption[];
 }
 
+export interface SessionUsageView {
+  used: number;
+  size: number;
+  cost: { amount: number; currency: string } | null;
+  /** When the snapshot was observed (the `usage` event's timestamp). */
+  at: string;
+}
+
 export interface SessionView {
   id: string;
   name: string | null;
@@ -118,6 +184,8 @@ export interface SessionView {
   permissionPolicy: PermissionPolicy;
   modes: SessionModes | null;
   configOptions: SessionConfigOptionView[] | null;
+  /** Latest provider usage snapshot, or null when the adapter reported none. */
+  usage: SessionUsageView | null;
 }
 
 export interface EventView {
@@ -140,6 +208,9 @@ export interface AgentView {
   unavailableReason?: string;
 }
 
+/** A configured adapter, as exposed by `backends.list`. */
+export type BackendView = AgentView;
+
 export interface WireError {
   code: HlaoErrorCode;
   message: string;
@@ -160,6 +231,7 @@ export type ResponseEnvelope =
 
 export const METHODS = [
   "hello",
+  "backends.list",
   "sessions.spawn",
   "sessions.list",
   "sessions.get",
@@ -182,15 +254,26 @@ export const METHODS = [
 
 export type Method = (typeof METHODS)[number];
 
-export interface HelloParams {}
+export interface HelloParams {
+  /** The client's wire version. A major mismatch is `version_mismatch`. */
+  protocolVersion?: ProtocolVersion;
+}
 export interface HelloResult {
-  protocolVersion: number;
+  protocolVersion: ProtocolVersion;
+  capabilities: ProtocolCapability[];
   pid: number;
   startedAt: string;
   version: string;
   sessions: number;
   configHash: string;
   configError?: string;
+}
+export interface BackendsListParams {
+  /** Defaults to the caller's cwd, or the supervisor's cwd for an operator. */
+  cwd?: string;
+}
+export interface BackendsListResult {
+  backends: BackendView[];
 }
 export interface SpawnParams {
   backend: string;
@@ -247,30 +330,55 @@ export interface SendResult {
 }
 export interface ReadParams {
   sessionId: string;
+  /** Forward cursor: return events with seq > since. */
   since?: number;
+  /** Backward cursor: return events with seq < before. Exclusive with since. */
+  before?: number;
   limit?: number;
   raw?: boolean;
+  /** Keep only these event types (AND with the other filters). */
+  types?: EventType[];
+  /** Keep only events from this turn. */
+  turn?: number;
+  /** Case-insensitive literal over the event type and its data JSON. */
+  grep?: string;
 }
 export interface ReadResult {
   session: SessionView;
   events: EventView[];
   earliestRetainedSeq: number;
   lastSeq: number;
+  /** Forward cursor for the next page; always present. */
   nextSeq: number;
+  /** Backward cursor for the next older page, or null when there is none. */
+  nextBefore: number | null;
   hasMore: boolean;
   truncated: boolean;
 }
 export interface WaitParams {
-  sessionId: string;
+  /** Exactly one of sessionId or sessionIds. */
+  sessionId?: string;
+  sessionIds?: string[];
+  /** For multiple ids: resolve on the first (`any`) or when all satisfy (`all`). */
+  mode?: "any" | "all";
   until: WaitUntil;
+  /** Only valid with a single id and `until: "change"`. */
   since?: number;
   timeoutMs?: number;
+}
+export interface WaitTargetResult {
+  session: SessionView;
+  satisfied: boolean;
+  /** `pending` means the target was still waiting when the aggregate resolved. */
+  reason: WaitUntil | "timeout" | "pending";
 }
 export interface WaitResult {
   satisfied: boolean;
   reason: WaitUntil | "timeout";
   waitedMs: number;
-  session: SessionView;
+  results: WaitTargetResult[];
+  /** Present for a single-id request; omitted when several ids were given. */
+  session?: SessionView;
 }
 export interface CancelParams {
   sessionId: string;
@@ -376,6 +484,7 @@ export interface ReloadResult {
 
 type ParamsByMethod = {
   hello: HelloParams;
+  "backends.list": BackendsListParams;
   "sessions.spawn": SpawnParams;
   "sessions.list": ListParams;
   "sessions.get": GetParams;
@@ -530,6 +639,78 @@ function reqEnum<T extends string>(
   return value;
 }
 
+function optProtocolVersion(
+  object: JsonObject,
+  key: string,
+  what: string,
+): ProtocolVersion | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  const record = asObject(value, `${what}.${key}`);
+  checkKeys(record, ["major", "minor"], `${what}.${key}`);
+  const major = reqInt(record, "major", `${what}.${key}`, 0, 1_000);
+  const minor = reqInt(record, "minor", `${what}.${key}`, 0, 1_000);
+  return { major, minor };
+}
+
+function optStringArray(
+  object: JsonObject,
+  key: string,
+  what: string,
+  maxItems: number,
+): string[] | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new HlaoError("bad_request", `${what}.${key} must be an array`);
+  }
+  if (value.length === 0) {
+    throw new HlaoError("bad_request", `${what}.${key} must not be empty`);
+  }
+  if (value.length > maxItems) {
+    throw new HlaoError(
+      "bad_request",
+      `${what}.${key} must have at most ${maxItems} entries`,
+    );
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 64) {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key}[${index}] must be a session id of at most 64 characters`,
+      );
+    }
+    return entry;
+  });
+}
+
+function eventTypeArray(
+  object: JsonObject,
+  key: string,
+  what: string,
+): EventType[] | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new HlaoError("bad_request", `${what}.${key} must be an array`);
+  }
+  if (value.length === 0 || value.length > EVENT_TYPES.length) {
+    throw new HlaoError(
+      "bad_request",
+      `${what}.${key} must have between 1 and ${EVENT_TYPES.length} entries`,
+    );
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || !(EVENT_TYPES as readonly string[]).includes(entry)) {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key}[${index}] is not a known event type`,
+      );
+    }
+    return entry as EventType;
+  });
+}
+
 function absolutePath(value: string | undefined, what: string): string | undefined {
   if (value === undefined) return undefined;
   if (!isAbsolute(value)) {
@@ -637,8 +818,17 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
   switch (method) {
     case "hello": {
       const object = asObject(raw ?? {}, what);
-      checkKeys(object, [], what);
-      return object as HelloParams as ParamsByMethod[M];
+      checkKeys(object, ["protocolVersion"], what);
+      return {
+        protocolVersion: optProtocolVersion(object, "protocolVersion", what),
+      } as ParamsByMethod[M];
+    }
+    case "backends.list": {
+      const object = asObject(raw ?? {}, what);
+      checkKeys(object, ["cwd"], what);
+      return {
+        cwd: absolutePath(optString(object, "cwd", what, 1_000), `${what}.cwd`),
+      } as ParamsByMethod[M];
     }
     case "sessions.spawn": {
       const object = asObject(raw, what);
@@ -718,23 +908,66 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
     }
     case "sessions.read": {
       const object = asObject(raw, what);
-      checkKeys(object, ["sessionId", "since", "limit", "raw"], what);
+      checkKeys(
+        object,
+        ["sessionId", "since", "before", "limit", "raw", "types", "turn", "grep"],
+        what,
+      );
+      const since = optInt(object, "since", what, 0, Number.MAX_SAFE_INTEGER);
+      const before = optInt(object, "before", what, 0, Number.MAX_SAFE_INTEGER);
+      if (since !== undefined && before !== undefined) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.since and ${what}.before are mutually exclusive`,
+        );
+      }
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
-        since: optInt(object, "since", what, 0, Number.MAX_SAFE_INTEGER),
+        since,
+        before,
         limit: optInt(object, "limit", what, 1, 1_000),
         raw: optBoolean(object, "raw", what),
+        types: eventTypeArray(object, "types", what),
+        turn: optInt(object, "turn", what, 0, Number.MAX_SAFE_INTEGER),
+        grep: optString(object, "grep", what, 500),
       } as ParamsByMethod[M];
     }
     case "sessions.wait": {
       const object = asObject(raw, what);
-      checkKeys(object, ["sessionId", "until", "since", "timeoutMs"], what);
+      checkKeys(
+        object,
+        ["sessionId", "sessionIds", "mode", "until", "since", "timeoutMs"],
+        what,
+      );
+      const sessionId = optString(object, "sessionId", what, 64);
+      if (sessionId !== undefined && sessionId.length === 0) {
+        throw new HlaoError("bad_request", `${what}.sessionId must not be empty`);
+      }
+      const sessionIds = optStringArray(object, "sessionIds", what, 100);
+      if ((sessionId === undefined) === (sessionIds === undefined)) {
+        throw new HlaoError(
+          "bad_request",
+          `${what} requires exactly one of sessionId or sessionIds`,
+        );
+      }
+      if (sessionIds !== undefined && new Set(sessionIds).size !== sessionIds.length) {
+        throw new HlaoError("bad_request", `${what}.sessionIds must not repeat an id`);
+      }
+      const since = optInt(object, "since", what, 0, Number.MAX_SAFE_INTEGER);
+      if (since !== undefined && (sessionIds?.length ?? 0) > 1) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.since is only valid with a single session id`,
+        );
+      }
       return {
-        sessionId: reqString(object, "sessionId", what, 1, 64),
+        sessionId,
+        sessionIds,
+        mode: optEnum(object, "mode", what, ["any", "all"] as const),
         until:
           optEnum(object, "until", what, ["idle", "permission", "exit", "change"] as const) ??
           "idle",
-        since: optInt(object, "since", what, 0, Number.MAX_SAFE_INTEGER),
+        since,
         timeoutMs: optInt(object, "timeoutMs", what, 0, MAX_TIMEOUT_MS),
       } as ParamsByMethod[M];
     }

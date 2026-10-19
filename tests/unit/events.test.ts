@@ -134,3 +134,117 @@ test("a reader ahead of the log keeps its cursor", () => {
   assert.equal(read.nextSeq, 99);
   assert.equal(read.truncated, false);
 });
+
+test("type, turn, and grep filters apply before the page limit", () => {
+  const events = log();
+  events.append({ type: "notice", data: { text: "alpha" }, turn: 1 });
+  events.append({ type: "tool.call", data: { title: "beta" }, turn: 1 });
+  events.append({ type: "notice", data: { text: "gamma" }, turn: 2 });
+  events.append({ type: "agent.message", data: { text: "delta NEEDLE" }, turn: 2 });
+
+  const notices = events.read({
+    since: 0,
+    limit: 10,
+    raw: false,
+    types: ["notice"],
+  });
+  assert.deepEqual(notices.events.map((event) => event.seq), [1, 3]);
+  assert.equal(notices.nextSeq, 5);
+  assert.equal(notices.hasMore, false);
+
+  const secondTurn = events.read({ since: 0, limit: 10, raw: false, turn: 2 });
+  assert.deepEqual(secondTurn.events.map((event) => event.seq), [3, 4]);
+
+  const needle = events.read({ since: 0, limit: 10, raw: false, grep: "needle" });
+  assert.deepEqual(needle.events.map((event) => event.seq), [4]);
+
+  const combined = events.read({
+    since: 0,
+    limit: 10,
+    raw: false,
+    types: ["agent.message", "notice"],
+    turn: 2,
+  });
+  assert.deepEqual(combined.events.map((event) => event.seq), [3, 4]);
+});
+
+test("a filtered forward read advances past non-matching events", () => {
+  const events = log();
+  for (let index = 0; index < 10; index += 1) {
+    events.append({
+      type: index === 8 ? "notice" : "agent.message",
+      data: { index },
+    });
+  }
+  const first = events.read({ since: 0, limit: 1, raw: false, types: ["notice"] });
+  assert.deepEqual(first.events.map((event) => event.seq), [9]);
+  assert.equal(first.nextSeq, 10);
+  assert.equal(first.hasMore, true);
+
+  const rest = events.read({
+    since: first.nextSeq,
+    limit: 10,
+    raw: false,
+    types: ["notice"],
+  });
+  assert.equal(rest.events.length, 0);
+  assert.equal(rest.nextSeq, 11);
+  assert.equal(rest.hasMore, false);
+});
+
+test("backward paging reads older pages in ascending order", () => {
+  const events = log();
+  for (let index = 0; index < 5; index += 1) {
+    events.append({ type: "notice", data: { index } });
+  }
+
+  const page = events.read({ before: 4, limit: 2, raw: false });
+  assert.deepEqual(page.events.map((event) => event.seq), [2, 3]);
+  assert.equal(page.nextBefore, 2);
+  assert.equal(page.hasMore, true);
+
+  const older = events.read({ before: page.nextBefore!, limit: 10, raw: false });
+  assert.deepEqual(older.events.map((event) => event.seq), [1]);
+  assert.equal(older.nextBefore, null);
+  assert.equal(older.hasMore, false);
+});
+
+test("a filtered tail still offers a backward cursor", () => {
+  const events = log();
+  events.append({ type: "notice", data: { index: 1 } });
+  events.append({ type: "agent.message", data: { index: 2 } });
+  events.append({ type: "notice", data: { index: 3 } });
+
+  const tail = events.read({ limit: 1, raw: false, types: ["notice"] });
+  assert.deepEqual(tail.events.map((event) => event.seq), [3]);
+  assert.equal(tail.nextBefore, 3);
+  assert.equal(tail.hasMore, false);
+
+  const older = events.read({
+    before: tail.nextBefore!,
+    limit: 10,
+    raw: false,
+    types: ["notice"],
+  });
+  assert.deepEqual(older.events.map((event) => event.seq), [1]);
+  assert.equal(older.nextBefore, null);
+});
+
+test("grep does not match private raw payloads unless raw is requested", () => {
+  const events = log();
+  events.append({
+    type: "tool.call",
+    data: { title: "visible", rawInput: { secret: "hidden-needle" } },
+  });
+
+  assert.equal(
+    events.read({ since: 0, limit: 10, raw: false, grep: "hidden-needle" }).events
+      .length,
+    0,
+  );
+  assert.equal(
+    events.read({ since: 0, limit: 10, raw: true, grep: "hidden-needle" }).events
+      .length,
+    1,
+  );
+});

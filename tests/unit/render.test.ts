@@ -41,6 +41,7 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     permissionPolicy: "allow",
     modes: null,
     configOptions: null,
+    usage: null,
     ...overrides,
   };
 }
@@ -69,6 +70,7 @@ function readResult(
     earliestRetainedSeq: overrides.earliestRetainedSeq ?? 1,
     lastSeq,
     nextSeq: lastSeq + 1,
+    nextBefore: null,
     hasMore: false,
     truncated: overrides.truncated ?? false,
   };

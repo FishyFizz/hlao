@@ -48,6 +48,7 @@ export interface RenderOptions {
 export interface SessionTableOptions {
   wide?: boolean;
   tree?: boolean;
+  usage?: boolean;
 }
 
 export function renderSessionTable(
@@ -83,6 +84,16 @@ export function renderSessionTable(
         exitDetail(session),
       );
     }
+    if (options.usage) {
+      base.push(
+        session.usage
+          ? `${formatTokens(session.usage.used)}/${formatTokens(session.usage.size)}`
+          : "—",
+        session.usage?.cost
+          ? `${(session.usage.cost.amount / 100).toFixed(2)} ${session.usage.cost.currency}`
+          : "—",
+      );
+    }
     base.push(truncateLeft(oneLine(session.cwd), 60));
     return base;
   });
@@ -97,6 +108,7 @@ export function renderSessionTable(
       "QUEUED",
       "AGE",
       ...(options.wide ? ["BUSY", "POLICY", "MODE", "PENDING", "EXIT"] : []),
+      ...(options.usage ? ["USAGE", "COST"] : []),
       "CWD",
     ],
     rows,
@@ -104,8 +116,14 @@ export function renderSessionTable(
   );
 }
 
-function busyFor(session: SessionView): string {
-  if (
+export function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "?";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+function busyFor(session: SessionView): string {  if (
     !session.turnStartedAt ||
     (session.status !== "busy" && session.status !== "waiting_permission")
   ) {

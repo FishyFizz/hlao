@@ -6,6 +6,7 @@ import {
   configFingerprint,
   loadConfig,
   mergeBackends,
+  toAgentView,
   type HlaoConfig,
 } from "./config.js";
 import { HlaoError, describeError, toHlaoError } from "./errors.js";
@@ -23,10 +24,14 @@ import { Logger } from "./logger.js";
 import { ensureHome, isWindows, lockPath, supervisorEndpoint } from "./paths.js";
 import {
   MAX_FRAME_BYTES,
+  PROTOCOL_CAPABILITIES,
+  WIRE_PROTOCOL_MAJOR,
   WIRE_PROTOCOL_VERSION,
   isMethod,
   parseEnvelope,
   parseParams,
+  type BackendsListParams,
+  type BackendsListResult,
   type CancelParams,
   type CancelResult,
   type CloseParams,
@@ -35,6 +40,7 @@ import {
   type GetResult,
   type ForgetParams,
   type ForgetResult,
+  type HelloParams,
   type HelloResult,
   type ListParams,
   type ListResult,
@@ -66,6 +72,7 @@ import {
   type SpawnResult,
   type WaitParams,
   type WaitResult,
+  type WaitTargetResult,
 } from "./protocol.js";
 import { Session } from "./session.js";
 
@@ -257,7 +264,7 @@ export class SupervisorServer {
       pid: process.pid,
       token: this.token,
       endpoint: this.endpoint,
-      protocolVersion: WIRE_PROTOCOL_VERSION,
+      protocolVersion: WIRE_PROTOCOL_MAJOR,
       startedAt: this.#startedAt,
       version: this.#version,
       state: "starting",
@@ -389,8 +396,23 @@ export class SupervisorServer {
 
     switch (method) {
       case "hello": {
+        const hello = params as HelloParams;
+        if (
+          hello.protocolVersion !== undefined &&
+          hello.protocolVersion.major !== WIRE_PROTOCOL_MAJOR
+        ) {
+          throw new HlaoError(
+            "version_mismatch",
+            `client speaks wire protocol ${hello.protocolVersion.major}.${hello.protocolVersion.minor}; this supervisor speaks ${WIRE_PROTOCOL_VERSION.major}.${WIRE_PROTOCOL_VERSION.minor}`,
+            {
+              client: hello.protocolVersion,
+              supervisor: WIRE_PROTOCOL_VERSION,
+            },
+          );
+        }
         const result: HelloResult = {
           protocolVersion: WIRE_PROTOCOL_VERSION,
+          capabilities: [...PROTOCOL_CAPABILITIES],
           pid: process.pid,
           startedAt: this.#startedAt,
           version: this.#version,
@@ -401,6 +423,8 @@ export class SupervisorServer {
         };
         return result;
       }
+      case "backends.list":
+        return this.#backends(params as BackendsListParams, caller);
       case "sessions.spawn":
         return this.#spawn(params as SpawnParams, caller);
       case "sessions.list":
@@ -629,6 +653,25 @@ export class SupervisorServer {
     return { session: this.#resolve(caller, params.sessionId).view() };
   }
 
+  /**
+   * Backend discovery for any client. The bundled CLI's `agents` command is the
+   * same merge done locally, so it works without a supervisor; this method is
+   * how a dashboard or MCP client sees the same list without reading config.
+   */
+  #backends(params: BackendsListParams, caller: string | null): BackendsListResult {
+    if (this.#configError !== null) {
+      throw new HlaoError("config_invalid", this.#configError);
+    }
+    const callerSession = caller !== null ? this.#sessions.get(caller) : undefined;
+    const cwd = params.cwd ?? callerSession?.cwd ?? process.cwd();
+    const merged = mergeBackends(this.#config.backends, cwd);
+    return {
+      backends: Object.values(merged)
+        .map(toAgentView)
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    };
+  }
+
   async #send(params: SendParams, caller: string | null): Promise<SendResult> {
     const session = this.#resolveSendTarget(caller, params.sessionId);
     const sent = await session.send(
@@ -652,8 +695,12 @@ export class SupervisorServer {
     const session = this.#resolve(caller, params.sessionId);
     const read = session.read({
       since: params.since,
+      before: params.before,
       limit: params.limit ?? 100,
       raw: params.raw ?? false,
+      types: params.types,
+      turn: params.turn,
+      grep: params.grep,
     });
     return {
       session: session.view(),
@@ -661,6 +708,7 @@ export class SupervisorServer {
       earliestRetainedSeq: read.earliestRetainedSeq,
       lastSeq: read.lastSeq,
       nextSeq: read.nextSeq,
+      nextBefore: read.nextBefore,
       hasMore: read.hasMore,
       truncated: read.truncated,
     };
@@ -671,18 +719,101 @@ export class SupervisorServer {
     caller: string | null,
     signal: AbortSignal,
   ): Promise<WaitResult> {
-    const session = this.#resolve(caller, params.sessionId);
-    const waited = await session.waitFor(
-      params.until,
-      params.since,
-      params.timeoutMs ?? this.#config.waitTimeoutMs,
-      signal,
-    );
-    const result: WaitResult = {
-      ...waited,
-      session: session.view(),
-    };
-    return result;
+    const ids =
+      params.sessionIds ?? (params.sessionId !== undefined ? [params.sessionId] : []);
+    const targets = ids.map((id) => this.#resolve(caller, id));
+    const timeoutMs = params.timeoutMs ?? this.#config.waitTimeoutMs;
+
+    if (targets.length === 1) {
+      const session = targets[0]!;
+      const waited = await session.waitFor(params.until, params.since, timeoutMs, signal);
+      const view = session.view();
+      return {
+        ...waited,
+        results: [{ session: view, satisfied: waited.satisfied, reason: waited.reason }],
+        session: view,
+      };
+    }
+
+    const mode = params.mode ?? "any";
+    const baselines = targets.map((target) => target.view().lastSeq);
+    const startedAt = Date.now();
+
+    return await new Promise<WaitResult>((resolve) => {
+      const controller = new AbortController();
+      const onRequestAbort = (): void => controller.abort();
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onRequestAbort, { once: true });
+
+      const settled = new Map<number, WaitTargetResult>();
+      let finished = false;
+
+      const finish = (satisfied: boolean, reason: WaitResult["reason"]): void => {
+        if (finished) return;
+        finished = true;
+        controller.abort();
+        signal.removeEventListener("abort", onRequestAbort);
+        const results = targets.map((target, index) => {
+          return (
+            settled.get(index) ?? {
+              session: target.view(),
+              satisfied: false,
+              reason: "pending" as const,
+            }
+          );
+        });
+        resolve({
+          satisfied,
+          reason,
+          waitedMs: Date.now() - startedAt,
+          results,
+        });
+      };
+
+      const settleAll = (): void => {
+        const reasons = [...settled.values()].map((entry) => entry.reason);
+        const reason = reasons.every((entry) => entry === "exit") ? "exit" : "timeout";
+        finish(false, reason);
+      };
+
+      targets.forEach((target, index) => {
+        const since = params.until === "change" ? baselines[index] : params.since;
+        void target
+          .waitFor(params.until, since, timeoutMs, controller.signal)
+          .then(
+            (waited) => {
+              settled.set(index, {
+                session: target.view(),
+                satisfied: waited.satisfied,
+                reason: waited.reason,
+              });
+              if (mode === "all" && !waited.satisfied) {
+                finish(false, waited.reason);
+                return;
+              }
+              if (mode === "any" && waited.satisfied) {
+                finish(true, waited.reason);
+                return;
+              }
+              if (settled.size === targets.length) {
+                if (mode === "all") finish(true, params.until);
+                else settleAll();
+              }
+            },
+            () => {
+              settled.set(index, {
+                session: target.view(),
+                satisfied: false,
+                reason: "timeout",
+              });
+              if (settled.size === targets.length) {
+                if (mode === "all") finish(false, "timeout");
+                else settleAll();
+              }
+            },
+          );
+      });
+    });
   }
 
   async #cancel(params: CancelParams, caller: string | null): Promise<CancelResult> {

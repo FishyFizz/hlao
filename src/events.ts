@@ -9,8 +9,12 @@ export interface EventInput {
 
 export interface EventReadOptions {
   since?: number;
+  before?: number;
   limit: number;
   raw: boolean;
+  types?: EventType[];
+  turn?: number;
+  grep?: string;
 }
 
 export interface EventReadResult {
@@ -18,6 +22,7 @@ export interface EventReadResult {
   earliestRetainedSeq: number;
   lastSeq: number;
   nextSeq: number;
+  nextBefore: number | null;
   hasMore: boolean;
   truncated: boolean;
 }
@@ -90,52 +95,168 @@ export class EventLog {
 
   read(options: EventReadOptions): EventReadResult {
     const limit = Math.max(1, Math.min(1_000, Math.floor(options.limit)));
-    const since = options.since;
     const earliest = this.earliestRetainedSeq;
-    let page: StoredEvent[];
-    let truncated = false;
-    let hasMore = false;
-    let nextSeq: number;
+    const matches = createMatcher(options);
 
-    if (since === undefined) {
-      const end = this.#events.length;
-      let start = end;
-      let bytes = 0;
-      while (start > 0 && end - start < limit) {
-        const candidate = this.#events[start - 1]!;
-        if (end - start > 0 && bytes + candidate.bytes > this.#maxPageBytes) break;
-        bytes += candidate.bytes;
-        start -= 1;
+    if (options.before !== undefined) {
+      return this.#readBackward(options.before, limit, matches, options.raw, earliest);
+    }
+    if (options.since !== undefined) {
+      return this.#readForward(options.since, limit, matches, options.raw, earliest);
+    }
+    return this.#readTail(limit, matches, options.raw, earliest);
+  }
+
+  /** The newest page. `hasMore` is false by definition: nothing is newer than the tail. */
+  #readTail(
+    limit: number,
+    matches: (event: StoredEvent) => boolean,
+    raw: boolean,
+    earliest: number,
+  ): EventReadResult {
+    const end = this.#events.length;
+    const page: StoredEvent[] = [];
+    let bytes = 0;
+    let blockedAt: StoredEvent | null = null;
+    let oldestScanned = end;
+
+    for (let index = end - 1; index >= 0; index -= 1) {
+      const event = this.#events[index]!;
+      oldestScanned = index;
+      if (!matches(event)) continue;
+      if (page.length > 0 && bytes + event.bytes > this.#maxPageBytes) {
+        blockedAt = event;
+        break;
       }
-      page = this.#events.slice(start, end);
-      nextSeq = this.#lastSeq + 1;
-      hasMore = false;
-      // A tail window is still incomplete history if events were evicted before it.
-      truncated = earliest > 1;
-    } else {
-      truncated = since + 1 < earliest;
-      let start = this.#firstIndexAfter(since);
-      let end = start;
-      let bytes = 0;
-      while (end < this.#events.length && end - start < limit) {
-        const candidate = this.#events[end]!;
-        if (end > start && bytes + candidate.bytes > this.#maxPageBytes) break;
-        bytes += candidate.bytes;
-        end += 1;
-      }
-      page = this.#events.slice(start, end);
-      const lastInPage = page[page.length - 1];
-      nextSeq = lastInPage ? lastInPage.seq + 1 : Math.max(since, this.#lastSeq + 1);
-      hasMore = lastInPage !== undefined && lastInPage.seq < this.#lastSeq;
+      page.unshift(event);
+      bytes += event.bytes;
+      if (page.length >= limit) break;
     }
 
+    const nextBefore =
+      blockedAt !== null
+        ? blockedAt.seq + 1
+        : oldestScanned > 0
+          ? this.#events[oldestScanned]!.seq
+          : null;
+
     return {
-      events: page.map((event) => toView(event, options.raw)),
+      events: page.map((event) => toView(event, raw)),
+      earliestRetainedSeq: earliest,
+      lastSeq: this.#lastSeq,
+      nextSeq: this.#lastSeq + 1,
+      nextBefore,
+      hasMore: false,
+      truncated: earliest > 1,
+    };
+  }
+
+  /** A forward page, `since` exclusive. Scan past non-matching events so cursors advance. */
+  #readForward(
+    since: number,
+    limit: number,
+    matches: (event: StoredEvent) => boolean,
+    raw: boolean,
+    earliest: number,
+  ): EventReadResult {
+    const start = this.#firstIndexAfter(since);
+    const page: StoredEvent[] = [];
+    let bytes = 0;
+    let scanEnd = start;
+    let blocked = false;
+
+    for (let index = start; index < this.#events.length; index += 1) {
+      const event = this.#events[index]!;
+      if (!matches(event)) {
+        scanEnd = index + 1;
+        continue;
+      }
+      if (page.length > 0 && bytes + event.bytes > this.#maxPageBytes) {
+        // Leave the oversized event for the next page.
+        blocked = true;
+        scanEnd = index;
+        break;
+      }
+      page.push(event);
+      bytes += event.bytes;
+      scanEnd = index + 1;
+      if (page.length >= limit) break;
+    }
+
+    const nextSeq = blocked
+      ? this.#events[scanEnd]!.seq
+      : scanEnd < this.#events.length
+        ? this.#events[scanEnd]!.seq
+        : Math.max(since, this.#lastSeq + 1);
+
+    return {
+      events: page.map((event) => toView(event, raw)),
       earliestRetainedSeq: earliest,
       lastSeq: this.#lastSeq,
       nextSeq,
-      hasMore,
-      truncated,
+      nextBefore:
+        start === 0
+          ? null
+          : start < this.#events.length
+            ? this.#events[start]!.seq
+            : this.#lastSeq + 1,
+      hasMore: scanEnd < this.#events.length,
+      truncated: since + 1 < earliest,
+    };
+  }
+
+  /** A backward page, `before` exclusive. Events are returned in ascending order. */
+  #readBackward(
+    before: number,
+    limit: number,
+    matches: (event: StoredEvent) => boolean,
+    raw: boolean,
+    earliest: number,
+  ): EventReadResult {
+    const end = this.#firstIndexAtOrAfter(before);
+    const page: StoredEvent[] = [];
+    let bytes = 0;
+    let oldestScanned = end;
+    let blockedAt: StoredEvent | null = null;
+
+    for (let index = end - 1; index >= 0; index -= 1) {
+      const event = this.#events[index]!;
+      oldestScanned = index;
+      if (!matches(event)) continue;
+      if (page.length > 0 && bytes + event.bytes > this.#maxPageBytes) {
+        blockedAt = event;
+        break;
+      }
+      page.unshift(event);
+      bytes += event.bytes;
+      if (page.length >= limit) {
+        return {
+          events: page.map((entry) => toView(entry, raw)),
+          earliestRetainedSeq: earliest,
+          lastSeq: this.#lastSeq,
+          nextSeq: this.#lastSeq + 1,
+          nextBefore: index > 0 ? this.#events[index]!.seq : null,
+          hasMore: index > 0,
+          truncated: index === 0 && earliest > 1,
+        };
+      }
+    }
+
+    const nextBefore =
+      blockedAt !== null
+        ? blockedAt.seq + 1
+        : oldestScanned > 0
+          ? this.#events[oldestScanned]!.seq
+          : null;
+
+    return {
+      events: page.map((event) => toView(event, raw)),
+      earliestRetainedSeq: earliest,
+      lastSeq: this.#lastSeq,
+      nextSeq: this.#lastSeq + 1,
+      nextBefore,
+      hasMore: blockedAt !== null,
+      truncated: oldestScanned === 0 && earliest > 1,
     };
   }
 
@@ -145,6 +266,17 @@ export class EventLog {
     while (low < high) {
       const mid = (low + high) >>> 1;
       if (this.#events[mid]!.seq <= seq) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  }
+
+  #firstIndexAtOrAfter(seq: number): number {
+    let low = 0;
+    let high = this.#events.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.#events[mid]!.seq < seq) low = mid + 1;
       else high = mid;
     }
     return low;
@@ -164,6 +296,39 @@ export class EventLog {
 function toView(event: StoredEvent, includeRaw: boolean): EventView {
   const data = includeRaw ? event.data : stripPrivateData(event.data);
   return { seq: event.seq, at: event.at, type: event.type, turn: event.turn, data };
+}
+
+/**
+ * Filters are applied to the event as the caller would see it: when `raw` is
+ * false, private ACP payloads are not searchable.
+ */
+function createMatcher(
+  options: EventReadOptions,
+): (event: StoredEvent) => boolean {
+  const types =
+    options.types && options.types.length > 0 ? new Set(options.types) : null;
+  const turn = options.turn;
+  const grep =
+    options.grep !== undefined && options.grep.length > 0
+      ? options.grep.toLowerCase()
+      : null;
+  if (types === null && turn === undefined && grep === null) return () => true;
+
+  return (event) => {
+    if (types !== null && !types.has(event.type)) return false;
+    if (turn !== undefined && event.turn !== turn) return false;
+    if (grep !== null) {
+      const data = options.raw ? event.data : stripPrivateData(event.data);
+      let haystack: string;
+      try {
+        haystack = `${event.type} ${JSON.stringify(data)}`.toLowerCase();
+      } catch {
+        haystack = event.type.toLowerCase();
+      }
+      if (!haystack.includes(grep)) return false;
+    }
+    return true;
+  };
 }
 
 const PRIVATE_KEYS = ["raw", "rawInput", "rawOutput", "content"] as const;

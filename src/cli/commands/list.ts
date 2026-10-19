@@ -14,13 +14,14 @@ import {
   COMMON,
   connect,
   contextFrom,
+  ensureCapability,
   out,
   sleepMs,
   writeJson,
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
-import { renderSessionTable } from "../render.js";
+import { formatTokens, renderSessionTable } from "../render.js";
 
 interface ListFilters {
   statuses?: string[];
@@ -34,6 +35,7 @@ interface ListFilters {
 interface ListRender {
   wide: boolean;
   tree: boolean;
+  usage: boolean;
   sort: "created" | "activity";
 }
 
@@ -50,6 +52,7 @@ export async function cmdList(args: string[]): Promise<number> {
     { name: "pending", type: "boolean" },
     { name: "wide", type: "boolean" },
     { name: "tree", type: "boolean" },
+    { name: "usage", type: "boolean" },
     { name: "sort", type: "string", valueName: "created|activity" },
     { name: "watch", type: "boolean" },
     { name: "interval", type: "duration", valueName: "DUR" },
@@ -78,6 +81,7 @@ export async function cmdList(args: string[]): Promise<number> {
   const render: ListRender = {
     wide: booleanOption(parsed, "wide") === true,
     tree: booleanOption(parsed, "tree") === true,
+    usage: booleanOption(parsed, "usage") === true,
     sort: sortOption ?? (ctx.json ? "created" : "activity"),
   };
   const cwd = resolveOptional(stringOption(parsed, "cwd"));
@@ -89,6 +93,9 @@ export async function cmdList(args: string[]): Promise<number> {
   };
 
   const conn = await connect(ctx);
+  if (render.usage) {
+    await ensureCapability(conn, "session.usage", "list --usage");
+  }
   if (booleanOption(parsed, "watch") === true) {
     const interval = numberOption(parsed, "interval") ?? 2_000;
     if (interval < 250) {
@@ -115,9 +122,10 @@ export async function cmdList(args: string[]): Promise<number> {
     renderSessionTable(sessions, ctx.style, ctx.callerSessionId, {
       wide: render.wide,
       tree: render.tree,
+      usage: render.usage,
     }),
   );
-  out(listFooter(result, sessions.length, ctx));
+  out(listFooter(result, sessions.length, ctx, render.usage));
   return 0;
 }
 
@@ -158,9 +166,10 @@ async function watchList(
         renderSessionTable(sessions, ctx.style, ctx.callerSessionId, {
           wide: render.wide,
           tree: render.tree,
+          usage: render.usage,
         }),
       );
-      out(listFooter(result, sessions.length, ctx));
+      out(listFooter(result, sessions.length, ctx, render.usage));
     }
     first = false;
     await sleepMs(interval);
@@ -302,12 +311,36 @@ function listFooter(
   result: ListResult,
   visible: number,
   ctx: CommandContext,
+  usage: boolean,
 ): string {
-  return ctx.style.dim(
+  const scope =
     result.scope === "operator"
       ? `scope: operator · ${visible} visible`
-      : `scope: self+descendants · ${visible} visible · siblings not shown`,
-  );
+      : `scope: self+descendants · ${visible} visible · siblings not shown`;
+  const usageLine = usage ? usageSummary(result.sessions) : null;
+  return ctx.style.dim(usageLine ? `${scope} · ${usageLine}` : scope);
+}
+
+function usageSummary(sessions: SessionView[]): string {
+  const reported = sessions.filter((session) => session.usage !== null);
+  if (reported.length === 0) return "usage: none reported";
+  let used = 0;
+  let size = 0;
+  const costs = new Map<string, number>();
+  for (const session of reported) {
+    used += session.usage!.used;
+    size += session.usage!.size;
+    const cost = session.usage!.cost;
+    if (cost) costs.set(cost.currency, (costs.get(cost.currency) ?? 0) + cost.amount);
+  }
+  const costText =
+    costs.size === 0
+      ? ""
+      : ` · ${[...costs.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([currency, amount]) => `${(amount / 100).toFixed(2)} ${currency}`)
+          .join(" + ")}`;
+  return `usage: ${formatTokens(used)}/${formatTokens(size)} tokens${costText}`;
 }
 
 function printEmptyList(

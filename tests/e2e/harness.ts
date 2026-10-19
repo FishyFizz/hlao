@@ -204,6 +204,12 @@ export interface SessionValue {
     currentValue: string | boolean;
     values: { value: string; name: string; group?: string }[];
   }[] | null;
+  usage: {
+    used: number;
+    size: number;
+    cost: { amount: number; currency: string } | null;
+    at: string;
+  } | null;
 }
 
 export interface ListValue {
@@ -217,6 +223,7 @@ export interface ReadValue {
   earliestRetainedSeq: number;
   lastSeq: number;
   nextSeq: number;
+  nextBefore: number | null;
   hasMore: boolean;
   truncated: boolean;
 }
@@ -235,6 +242,11 @@ export interface WaitValue {
   satisfied: boolean;
   reason: string;
   waitedMs: number;
+  results: {
+    session: SessionValue;
+    satisfied: boolean;
+    reason: string;
+  }[];
   session: SessionValue;
 }
 

@@ -97,3 +97,92 @@ test("send text must be present", () => {
       error instanceof HlaoError && error.code === "bad_request",
   );
 });
+
+test("hello accepts an optional major.minor version", () => {
+  const empty = parseParams("hello", {});
+  assert.equal(empty.protocolVersion, undefined);
+
+  const versioned = parseParams("hello", {
+    protocolVersion: { major: 1, minor: 1 },
+  });
+  assert.deepEqual(versioned.protocolVersion, { major: 1, minor: 1 });
+
+  assert.throws(
+    () => parseParams("hello", { protocolVersion: { major: 1 } }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+  assert.throws(
+    () => parseParams("hello", { protocolVersion: 1 }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
+test("backends.list validates an absolute cwd", () => {
+  assert.deepEqual(parseParams("backends.list", {}), { cwd: undefined });
+  assert.deepEqual(parseParams("backends.list", { cwd: "C:\\work" }), {
+    cwd: "C:\\work",
+  });
+  assert.throws(
+    () => parseParams("backends.list", { cwd: "relative" }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
+test("read filters validate and since/before are exclusive", () => {
+  const params = parseParams("sessions.read", {
+    sessionId: "abc",
+    types: ["tool.call", "agent.message"],
+    turn: 2,
+    grep: "needle",
+  });
+  assert.deepEqual(params.types, ["tool.call", "agent.message"]);
+  assert.equal(params.turn, 2);
+  assert.equal(params.grep, "needle");
+
+  assert.throws(
+    () => parseParams("sessions.read", { sessionId: "abc", types: ["nope"] }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+  assert.throws(
+    () =>
+      parseParams("sessions.read", {
+        sessionId: "abc",
+        since: 1,
+        before: 2,
+      }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
+test("wait accepts one id or a list, never both", () => {
+  const single = parseParams("sessions.wait", { sessionId: "abc" }) as WaitParams;
+  assert.equal(single.sessionId, "abc");
+  assert.equal(single.sessionIds, undefined);
+
+  const many = parseParams("sessions.wait", {
+    sessionIds: ["abc", "def"],
+    mode: "all",
+  }) as WaitParams;
+  assert.deepEqual(many.sessionIds, ["abc", "def"]);
+  assert.equal(many.mode, "all");
+
+  for (const bad of [
+    {},
+    { sessionId: "abc", sessionIds: ["abc"] },
+    { sessionIds: [] },
+    { sessionIds: ["abc", "abc"] },
+    { sessionIds: ["abc", "def"], since: 1 },
+    { sessionIds: ["abc", "def"], mode: "first" },
+  ]) {
+    assert.throws(
+      () => parseParams("sessions.wait", bad),
+      (error: unknown) =>
+        error instanceof HlaoError && error.code === "bad_request",
+    );
+  }
+});

@@ -26,11 +26,12 @@ import type {
   SessionConfigValueView,
   SessionModes,
   SessionStatus,
+  SessionUsageView,
   SessionView,
   StopReason,
   WaitUntil,
 } from "./protocol.js";
-import { WIRE_PROTOCOL_VERSION, MAX_PROMPT_CHARS } from "./protocol.js";
+import { ACP_PROTOCOL_VERSION, MAX_PROMPT_CHARS } from "./protocol.js";
 
 const MAX_QUEUED_PROMPTS = 1_000;
 
@@ -78,8 +79,12 @@ export interface SendResult {
 
 export interface ReadOptions {
   since?: number;
+  before?: number;
   limit?: number;
   raw?: boolean;
+  types?: EventType[];
+  turn?: number;
+  grep?: string;
 }
 
 export interface ReadResult {
@@ -87,6 +92,7 @@ export interface ReadResult {
   earliestRetainedSeq: number;
   lastSeq: number;
   nextSeq: number;
+  nextBefore: number | null;
   hasMore: boolean;
   truncated: boolean;
 }
@@ -150,6 +156,7 @@ export class Session {
   #lastMessageId: string | null = null;
   #pending: PendingPermission | null = null;
   #lastStopReason: StopReason | null = null;
+  #usage: SessionUsageView | null = null;
   #lastActivityAt: string;
   #endedAt: string | null = null;
   #exit: { code: number | null; signal: string | null } | null = null;
@@ -240,6 +247,12 @@ export class Session {
             ...option,
             values: option.values.map((value) => ({ ...value })),
           }))
+        : null,
+      usage: this.#usage
+        ? {
+            ...this.#usage,
+            cost: this.#usage.cost ? { ...this.#usage.cost } : null,
+          }
         : null,
     };
   }
@@ -467,8 +480,12 @@ export class Session {
   read(options: ReadOptions): ReadResult {
     return this.#log.read({
       since: options.since,
+      before: options.before,
       limit: options.limit ?? 100,
       raw: options.raw ?? false,
+      types: options.types,
+      turn: options.turn,
+      grep: options.grep,
     });
   }
 
@@ -1135,7 +1152,7 @@ export class Session {
 
     const init = await withTimeout(
       this.#conn.agent.request("initialize", {
-        protocolVersion: WIRE_PROTOCOL_VERSION,
+        protocolVersion: ACP_PROTOCOL_VERSION,
         clientCapabilities: {
           session: {
             // Boolean config options are optional in ACP; advertising support
@@ -1149,10 +1166,10 @@ export class Session {
       "ACP initialize",
     );
 
-    if (init.protocolVersion !== WIRE_PROTOCOL_VERSION) {
+    if (init.protocolVersion !== ACP_PROTOCOL_VERSION) {
       throw new HlaoError(
         "spawn_failed",
-        `${this.backend} speaks ACP v${init.protocolVersion}; HLAO requires v${WIRE_PROTOCOL_VERSION}`,
+        `${this.backend} speaks ACP v${init.protocolVersion}; HLAO requires v${ACP_PROTOCOL_VERSION}`,
       );
     }
     this.#caps = init.agentCapabilities ?? {};
@@ -1385,6 +1402,25 @@ export class Session {
   #emit(type: EventType, data: Record<string, unknown>, turn?: number | null): EventView {
     this.#lastActivityAt = nowIso();
     const event = this.#log.append({ type, turn: turn ?? this.#active?.turn ?? null, data });
+    if (type === "usage") {
+      const rawCost = data.cost;
+      let cost: SessionUsageView["cost"] = null;
+      if (rawCost !== null && typeof rawCost === "object") {
+        const record = rawCost as Record<string, unknown>;
+        if (typeof record.amount === "number" && Number.isFinite(record.amount)) {
+          cost = {
+            amount: record.amount,
+            currency: typeof record.currency === "string" ? record.currency : "USD",
+          };
+        }
+      }
+      this.#usage = {
+        used: typeof data.used === "number" ? data.used : 0,
+        size: typeof data.size === "number" ? data.size : 0,
+        cost,
+        at: event.at,
+      };
+    }
     this.#notifyWaiters();
     return event;
   }

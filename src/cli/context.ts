@@ -2,7 +2,11 @@ import { fileURLToPath } from "node:url";
 import { connectSupervisor, type SupervisorConnection } from "../client.js";
 import { HlaoError } from "../errors.js";
 import { resolveHome } from "../paths.js";
-import type { SessionView } from "../protocol.js";
+import type {
+  HelloResult,
+  ProtocolCapability,
+  SessionView,
+} from "../protocol.js";
 import {
   booleanOption,
   stringOption,
@@ -140,6 +144,39 @@ export function connect(
     callerSessionId: ctx.callerSessionId,
     autostart,
   });
+}
+
+let capabilityCache: {
+  endpoint: string;
+  capabilities: Set<string>;
+} | null = null;
+
+/**
+ * Feature-detect an additive wire capability. A new CLI may meet a supervisor
+ * started before an upgrade; the protocol requires major equality, so the
+ * command is refused with a clear restart hint rather than an unknown-field
+ * error from an older parser.
+ */
+export async function ensureCapability(
+  conn: SupervisorConnection,
+  capability: ProtocolCapability,
+  command: string,
+): Promise<void> {
+  if (capabilityCache === null || capabilityCache.endpoint !== conn.lock.endpoint) {
+    const hello = await conn.request<HelloResult>("hello", {});
+    capabilityCache = {
+      endpoint: conn.lock.endpoint,
+      capabilities: new Set(
+        Array.isArray(hello.capabilities) ? hello.capabilities : [],
+      ),
+    };
+  }
+  if (!capabilityCache.capabilities.has(capability)) {
+    throw new HlaoError(
+      "version_mismatch",
+      `${command} needs the "${capability}" protocol capability; the running supervisor predates it. Restart it with "hlao down" and retry.`,
+    );
+  }
 }
 
 export function sleepMs(ms: number): Promise<void> {

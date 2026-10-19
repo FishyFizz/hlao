@@ -24,11 +24,15 @@ There is no scheduler and no session store.
 Usage:
   hlao spawn <backend> [message] [options]     open a session
   hlao send [<id>] [message] [--wait]          queue a prompt
-  hlao read [<id>] [--since N] [--raw]         read orchestration state + events
-  hlao read [<id>] --follow [--out FILE]       watch new events / export a page
-  hlao wait [<id>] [--until idle|permission|exit|change] [--timeout DUR]
+  hlao read [<id>] [--since N | --before N] [--type T] [--grep TEXT]
+                                             read orchestration state + events
+  hlao read [<id>] --follow [--jsonl] [--out FILE]
+                                             watch new events / export a page
+  hlao wait [<id>...] [--any|--all] [--until idle|permission|exit|change]
+                                             one-shot await, one or many sessions
   hlao list [--all] [--cwd DIR]                sessions in your scope
-  hlao list [--wide] [--tree] [--watch]        dashboard / lineage / redraw loop
+  hlao list [--wide] [--usage] [--tree] [--watch]
+                                             dashboard / usage / lineage
   hlao cancel [<id>]                           stop the active turn; discard queue
   hlao close [<id>] [--force] [--tree]         end a session
   hlao close --idle DUR | --status S | --root S [--dry-run] [--forget]
@@ -157,31 +161,42 @@ Read orchestration state plus a bounded page of typed events.
 
 Options:
   --self                 target this shell's own session
-  --since N              events with seq > N (omit for the most recent page)
+  --since N              forward: events with seq > N (omit for the newest page)
+  --before N             backward: events with seq < N (exclusive with --since)
   --limit N              page size, 1..1000 (default 100)
+  --type TYPE            keep only this event type; repeatable
+  --turn N               keep only this turn
+  --grep TEXT            case-insensitive literal over type and data JSON
   --verbose              human mode: include bounded tool input/output
   --raw                  with --json, include original ACP payloads; in human
                          mode, reveal adapter stderr and command updates
   --timestamps           show full ISO timestamps instead of HH:MM:SS
   --follow               keep reading, then one-shot wait, until the session
                          ends or you press Ctrl-C; --json emits one page per line
+  --jsonl                emit one event object per line (not with --json/--out)
   --out FILE             also write this page's JSON result to FILE
 
-The response reports earliestRetainedSeq, lastSeq, nextSeq, hasMore, and
-truncated. Tool payloads are omitted unless --raw/--verbose.`,
-    wait: `hlao wait [<id>] [options]
+The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
+hasMore, and truncated. Filters are applied before the page limit, and cursors
+advance past non-matching events. Tool payloads are omitted unless
+--raw/--verbose; --grep does not search private payloads without --raw.`,
+    wait: `hlao wait [<id>...] [options]
 
 One-shot await on orchestration state. It never re-arms.
 
 Options:
   --self                 target this shell's own session
+  --any                  with several ids, resolve on the first to satisfy
+  --all                  with several ids, resolve when every one satisfies
   --until idle|permission|exit|change   default idle
-  --since N              baseline for "change" (default: now)
+  --since N              baseline for "change" (single id only; default: now)
   --timeout DUR          bound; default from config (30m), 0 = no bound
 
-A timeout exits 2. If the session ends before the condition is met, the wait
-exits 3 (except --until exit, which exits 0).`,
-    list: `hlao list [--all] [--cwd DIR] [--wide] [--tree] [--watch]
+With several ids, the JSON result includes per-target results in request order;
+a target still waiting when the wait resolves is reported as "pending". A
+timeout exits 2. If a target ends before the condition is met, the wait exits 3
+(except --until exit, which exits 0).`,
+    list: `hlao list [--all] [--cwd DIR] [--wide] [--usage] [--tree] [--watch]
 
 List sessions visible to this shell. A session is shown by id and name; an
 agent sees itself and its descendants, and an operator sees all. The footer
@@ -191,8 +206,9 @@ reports the scope, and a scoped view marks the caller's own session with *.
 Filters: --status S[,S], --backend NAME, --root SESSION, --name TEXT,
 --pending, and --cwd-prefix DIR (subtree). --sort created|activity (human
 default: activity). --wide adds BUSY, POLICY, MODE, PENDING, and EXIT;
---tree groups and indents by lineage. --watch redraws every --interval DUR
-(default 2s; JSON emits one result per line) until Ctrl-C.`,
+--usage adds USAGE/COST and a per-currency footer total; --tree groups and
+indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
+emits one result per line) until Ctrl-C.`,
     cancel: `hlao cancel [<id>] [--keep-queue]
 
 Request ACP session/cancel for the active turn. By default every queued message
@@ -266,13 +282,15 @@ the name. Inside a session, use --self <name> (or --self --clear).`,
     agents: `hlao agents [--cwd DIR]
 
 Show built-in, user, and project backends with their source and readiness.
-Reads configuration locally and never starts a supervisor. Environment values
+Reads configuration locally so it works without a supervisor; the same view is
+available to any client as the wire method backends.list. Environment values
 are never printed, only their names.`,
     status: `hlao status [--start]
 
 Probe the supervisor without starting one and report pid, version, uptime, live
-sessions, protocol, config errors, and whether the config on disk is fresher.
-Exits 1 when nothing is running. --start autostarts the supervisor first.`,
+sessions, wire protocol version, capability count, config errors, and whether
+the config on disk is fresher. Exits 1 when nothing is running. --start
+autostarts the supervisor first.`,
     logs: `hlao logs [--lines N] [--follow]
 
 Read the supervisor's diagnostic log directly; no supervisor is needed. The

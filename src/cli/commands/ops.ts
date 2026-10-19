@@ -18,10 +18,12 @@ import {
 import { HlaoError, toHlaoError } from "../../errors.js";
 import { pidAlive, probeSupervisor, readLock, removeLock } from "../../lock.js";
 import { configPath, logPath } from "../../paths.js";
-import type {
-  HelloResult,
-  ReloadResult,
-  SpawnResult,
+import {
+  normalizeProtocolVersion,
+  WIRE_PROTOCOL_MAJOR,
+  type HelloResult,
+  type ReloadResult,
+  type SpawnResult,
 } from "../../protocol.js";
 import { formatDuration } from "../../time.js";
 import { VERSION } from "../../version.js";
@@ -123,7 +125,15 @@ export async function cmdStatus(args: string[]): Promise<number> {
     `running · pid ${hello.pid} · supervisor ${hello.version} · up ${up}` +
       ctx.style.dim(` · ${hello.sessions} live session${hello.sessions === 1 ? "" : "s"}`),
   );
-  out(ctx.style.dim(`protocol v${hello.protocolVersion} · ${conn.lock.endpoint}`));
+  const protocol = normalizeProtocolVersion(hello.protocolVersion) ?? {
+    major: 0,
+    minor: 0,
+  };
+  out(
+    ctx.style.dim(
+      `protocol v${protocol.major}.${protocol.minor} · ${hello.capabilities?.length ?? 0} capabilities · ${conn.lock.endpoint}`,
+    ),
+  );
   if (hello.configError) out(ctx.style.red(`config error: ${hello.configError}`));
   if (hello.configHash !== configFingerprint(ctx.home)) {
     out(ctx.style.yellow("config on disk differs from the supervisor; run: hlao reload"));
@@ -397,10 +407,14 @@ export async function cmdDoctor(args: string[]): Promise<number> {
 
   if (conn) {
     const hello = await conn.request<HelloResult>("hello", {});
+    const protocol = normalizeProtocolVersion(hello.protocolVersion) ?? {
+      major: 0,
+      minor: 0,
+    };
     checks.push({
       name: "wire",
-      status: hello.protocolVersion === 1 ? "ok" : "fail",
-      detail: `protocol v${hello.protocolVersion} · supervisor ${hello.version}`,
+      status: protocol.major === WIRE_PROTOCOL_MAJOR ? "ok" : "fail",
+      detail: `protocol v${protocol.major}.${protocol.minor} · ${hello.capabilities?.length ?? 0} capabilities · supervisor ${hello.version}`,
     });
     if (hello.version !== VERSION) {
       checks.push({

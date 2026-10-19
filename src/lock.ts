@@ -9,12 +9,13 @@ import {
 import { connect } from "node:net";
 import { HlaoError } from "./errors.js";
 import { lockPath } from "./paths.js";
-import { WIRE_PROTOCOL_VERSION } from "./protocol.js";
+import { normalizeProtocolVersion, WIRE_PROTOCOL_MAJOR } from "./protocol.js";
 
 export interface LockInfo {
   pid: number;
   token: string;
   endpoint: string;
+  /** Wire protocol major version. Minor version is negotiated through `hello`. */
   protocolVersion: number;
   startedAt: string;
   version: string;
@@ -174,11 +175,14 @@ export function probeSupervisor(info: LockInfo, timeoutMs = 750): Promise<boolea
       try {
         const response = JSON.parse(buffer.slice(0, newline)) as {
           ok?: boolean;
-          result?: { protocolVersion?: number };
+          result?: { protocolVersion?: unknown };
         };
+        const reported = response.result?.protocolVersion;
+        const normalized = normalizeProtocolVersion(reported);
         finish(
           response.ok === true &&
-            response.result?.protocolVersion === WIRE_PROTOCOL_VERSION,
+            normalized !== null &&
+            normalized.major === WIRE_PROTOCOL_MAJOR,
         );
       } catch {
         finish(false);
