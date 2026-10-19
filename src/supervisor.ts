@@ -748,19 +748,39 @@ export class SupervisorServer {
       const settled = new Map<number, WaitTargetResult>();
       let finished = false;
 
+      const snapshot = (index: number): WaitTargetResult => {
+        const target = targets[index]!;
+        const view = target.view();
+        const terminal = view.status === "closed" || view.status === "failed";
+        switch (params.until) {
+          case "idle":
+            return view.status === "idle"
+              ? { session: view, satisfied: true, reason: "idle" }
+              : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
+          case "permission":
+            return view.pendingPermission !== null
+              ? { session: view, satisfied: true, reason: "permission" }
+              : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
+          case "exit":
+            return {
+              session: view,
+              satisfied: terminal,
+              reason: terminal ? "exit" : "pending",
+            };
+          case "change":
+            return view.lastSeq > (baselines[index] ?? 0)
+              ? { session: view, satisfied: true, reason: "change" }
+              : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
+        }
+      };
+
       const finish = (satisfied: boolean, reason: WaitResult["reason"]): void => {
         if (finished) return;
         finished = true;
         controller.abort();
         signal.removeEventListener("abort", onRequestAbort);
-        const results = targets.map((target, index) => {
-          return (
-            settled.get(index) ?? {
-              session: target.view(),
-              satisfied: false,
-              reason: "pending" as const,
-            }
-          );
+        const results = targets.map((_target, index) => {
+          return settled.get(index) ?? snapshot(index);
         });
         resolve({
           satisfied,
