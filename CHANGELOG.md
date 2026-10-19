@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 — unreleased
+
+### Added
+
+- The socket protocol is now the client contract (ADR 0007). `contracts/protocol.md` documents
+  transport, token/scope, versioning, polling, and a raw-client conformance test. The bundled
+  CLI is the reference client; a dashboard, TUI, or MCP server uses the same wire.
+- Protocol `1.1`: `hello` accepts and returns `{ major, minor }` and reports `capabilities`.
+  Major mismatch is `version_mismatch`; additive changes bump the minor.
+- `backends.list` exposes the merged builtin/user/project adapter view to any client, with the
+  same `cwd` semantics as local `hlao agents`.
+- `SessionView.usage` carries the latest `usage_update` snapshot (`used`, `size`, `cost`, `at`).
+  `hlao list --usage` adds USAGE/COST columns and a per-currency footer total.
+- `sessions.read` filters: `types`, `turn`, and case-insensitive `grep`; backward paging with
+  `before`; the result adds `nextBefore`. Filters apply before the page limit, and cursors skip
+  non-matching events. CLI: `read --type/--turn/--grep/--before/--jsonl`.
+- `sessions.wait` accepts `sessionIds` with `any`/`all`, returning per-target `results` and a
+  `pending` reason for targets still waiting when the aggregate resolves. CLI:
+  `hlao wait <id>... [--any|--all]`.
+- `hlao status` reports the protocol version and capability count; `doctor` checks the major.
+
+### Changed
+
+- The wire version is `major.minor`. The lock file stores the major only; clients also accept
+  the pre-0.4 numeric `hello.protocolVersion` from a supervisor that has not restarted.
+- `sessions.wait` keeps `session` for a single-id call and always includes `results`.
+- `sessions.read` always includes `nextBefore`, and a tail read still reports `hasMore: false`.
+- A core-module import of `src/cli/*` fails a unit test, making the client boundary explicit.
+
 ## 0.3.0 — unreleased
 
 ### Added
