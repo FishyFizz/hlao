@@ -64,7 +64,7 @@ have to keep true, and none of the design's claims need it:
 - **A sibling or late joiner is reached by the spawner's joining facts**, or by whatever contact
   list the agents maintain. That list is a convention on the filesystem, not a primitive.
 - **If the parent dies, the tree is gone.** That is not a regression: a mechanism to rebuild it
-  would be a global registry, which the shallow-delegation scope explicitly excludes.
+  would be a global registry, which the shallow-delegation model explicitly excludes.
 
 Consequence: no cold-host reconstruction requirement, and no lineage write on spawn beyond the
 environment the spawn already injects.
@@ -142,9 +142,9 @@ Building the orchestrator on them would reproduce frozen orchestration under a n
   supervisor (the `acpx` / tmux-server model), or re-attach on every call via
   `session/load` / `session/resume`. This must be decided in architecture before any code.
 - **ACP v2 is a draft.** The stable wire version is `1`.
-- **`session/list` is capability-gated and agent-scoped.** It does not provide global
-  visibility; self-and-descendants must be enforced by the injected identity and held handles,
-  not by asking the protocol for a global list.
+- **`session/list` is capability-gated and agent-scoped.** It does not provide a global
+  address space. HLAO does not depend on it for addressing; the supervisor's live table is the
+  instance-wide address space. ACP list remains a provider-side recovery aid, not an authority.
 - **License check:** every proposed core dependency is Apache-2.0 or MIT. No copyleft. The one
   exception is the proprietary Claude Agent SDK behind the Claude adapter.
 
@@ -167,7 +167,7 @@ protocol, not a security boundary.
 
 **Observed but not adopted:** cold-host reconstruction of lineage. The design delivers identity
 at spawn and keeps no registry to recover it; rebuilding the tree would require the global
-registry that the shallow-delegation scope excludes.
+registry that the shallow-delegation model excludes.
 
 **Rejected from prior art:** Moderator/Owner/Spawner roles, templates, virtual models, model
 policy, SQLite/NATS, central-daemon-as-authority, transcript-as-store, PTY as the primary
@@ -180,7 +180,7 @@ transport, and `session/fork`.
 | 1 | Shape of read/observe | ACP provides a typed event stream. Reads are cursor-addressed and bounded; the orchestration projection reports turn state, pending prompts, pending permissions, and last sequence, separate from raw leaf output |
 | 2 | Where orchestration state lives | Live provider sessions are the truth; ACP can reconstruct lists/history/resume. Lineage is not system state at all: identity is injected into the child at spawn, and a parent's knowledge of its descendants is the handles it holds. A durable contact list, if wanted, is an agent-maintained file convention — not a primitive, not a store. No database, no global registry, no cold-host tree reconstruction |
 | 4 | The ratchet / who can halt | `session/cancel` is the graceful halt (session survives); process kill is the hard halt. Both are existing primitives, no new object |
-| 6 | Visibility: global or scoped | ACP `session/list` is agent-scoped and capability-gated, not global. Self-and-descendants is enforced by the injected identity (`ROOT`/`PARENT`) plus the handles a session holds; the protocol grants no visibility the design did not grant. A shared contact list is a convention, not an enumeration authority |
+| 6 | Visibility: global or scoped | Resolved 2026-10-20 (ADR 0008): one HLAO instance is one address space and one swarm boundary. Every session in it is addressable by every caller; `callerSessionId` is attribution, not scope; lineage is context. Isolation is another instance. ACP `session/list` is not the mechanism — the supervisor's live table is |
 | 7/8 | Ledger delivery and write authority | Delivery: first prompt as a reference, with `systemPrompt` as an unstable optional path. Write authority remains a product decision; ACP does not constrain it |
 
 Q3 (frequency/cost) and Q5 (audience) are not stack questions.

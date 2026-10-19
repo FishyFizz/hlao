@@ -17,8 +17,8 @@ Presentation changes constantly; session state and authority must not.
 ## Decision
 
 - The supervisor's NDJSON socket protocol is the product boundary. Core owns session state,
-  ACP, the event log, scope, and the wire methods. It owns no rendering, keybindings, flags, or
-  polling cadence.
+  ACP, the event log, addressing, and the wire methods. It owns no rendering, keybindings,
+  flags, or polling cadence.
 - Every client — the bundled CLI, a future TUI or web dashboard, an MCP server — uses only the
   socket. A client that needs a capability the wire lacks must extend the wire deliberately.
 - The bundled CLI remains in the tree as the reference client and the agent-facing surface. It

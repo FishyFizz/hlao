@@ -2,7 +2,11 @@
 
 The wire between the supervisor and any client. The bundled CLI is the reference client; a
 TUI, web dashboard, or MCP server is another client and must not need private access. Core owns
-session state, authority, and these methods. It owns no presentation.
+session state, addressing, and these methods. It owns no presentation.
+
+An HLAO instance — one `HLAO_HOME`, supervisor, socket, and token — is one address space and
+one swarm boundary. Every session in it is addressable by every client. Isolation is another
+instance; there is no cross-instance visibility.
 
 ```
 human  -> dashboard / TUI  --\
@@ -24,7 +28,7 @@ agent  -> CLI / MCP        --/
 
 - Call `hello` first. It reports the protocol version, capabilities, and supervisor health.
 - Poll `sessions.list` for a fleet view and `sessions.read` with `nextSeq`/`nextBefore` for a
-  session's log. There is no push subscription in protocol 1.x. A live client should poll at a
+  session's log. There is no push subscription in protocol 2.x. A live client should poll at a
   cadence it chooses; the supervisor owns no recurring timer.
 - Use `sessions.wait` when a client would otherwise poll a blocking condition. It is one-shot:
   it resolves once and must be re-armed.
@@ -42,7 +46,7 @@ type RequestEnvelope = {
   method: string;                // one of the methods below
   params?: unknown;              // method-specific, validated at the boundary
   token: string;                 // from supervisor.json
-  callerSessionId?: string | null; // from HLAO_SESSION_ID; absent for the operator
+  callerSessionId?: string | null; // from HLAO_SESSION_ID; attribution and self-defaulting
 };
 
 type Response =
@@ -56,8 +60,9 @@ type WireError = {
 };
 ```
 
-`callerSessionId` is a coordination claim, not an authenticated identity. It scopes what the
-caller can see; it is not a security boundary.
+`callerSessionId` is **attribution, not permission**. It records who acted (`by`) and supplies
+self-defaulting; it is not a security boundary and it does not filter what the caller can see.
+The token is the instance boundary.
 
 ## Error codes
 
@@ -65,11 +70,11 @@ caller can see; it is not a security boundary.
 |---|---|
 | `bad_request` | malformed envelope or invalid params |
 | `unauthorized` | wrong or missing token |
-| `version_mismatch` | CLI and supervisor protocol versions differ |
-| `not_found` | no session matching the id, name, or prefix in scope |
-| `ambiguous_id` | a name or prefix matches more than one session in scope (`details.candidates`) |
-| `forbidden` | target session is outside the caller's scope |
-| `operator_only` | method is reserved for an unscoped operator shell |
+| `version_mismatch` | client and supervisor protocol versions differ |
+| `not_found` | no session matching the id, name, or prefix in this instance |
+| `ambiguous_id` | a name or prefix matches more than one session (`details.candidates`) |
+| `forbidden` | reserved; core session methods do not emit it after protocol 2.0 |
+| `operator_only` | method is reserved for an operator shell (no `callerSessionId`) |
 | `backend_not_found` | no such backend manifest |
 | `backend_unavailable` | manifest resolved but its command is missing |
 | `spawn_failed` | the adapter failed to start or complete the ACP handshake |
@@ -94,24 +99,22 @@ caller can see; it is not a security boundary.
   compatible with an older client; a newer client must use capabilities or version checks
   before relying on an addition.
 - `capabilities` lists additive features this supervisor implements. Unknown capabilities must
-  be ignored. Known values in 1.1: `backends.list`, `session.usage`, `read.filters`,
-  `read.before`, `wait.multi`.
+  be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
+  `wait.multi`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
+- **2.0** removes the `scope` field and makes every session in an instance addressable by every
+  caller. There is no per-session visibility filter. Isolation is a separate instance.
 
 ## Methods
 
 All `sessionId` params accept an exact handle first, then a unique session name, then a unique
-handle prefix, resolved within the caller's scope. Duplicate names are `ambiguous_id` with
+handle prefix, resolved within **this HLAO instance**. Duplicate names are `ambiguous_id` with
 `details.candidates`; the full handle still resolves.
 
-`sessions.send` has one deliberate scope exception: a caller may target its **direct parent**
-by exact id, exact name, or a prefix that uniquely identifies the parent. No other method may
-reach an ancestor; reads, waits, cancel, close, permit, policy, mode, option, and rename remain
-`forbidden` there.
-
-Scope is enforced against the caller's live session when one is named. If `callerSessionId` is
-absent, the request is an operator request and sees every session.
+Every session in the instance is addressable by every caller. `callerSessionId` is recorded as
+attribution but does not restrict addressing. `parentId`/`rootId`/`depth` are lineage, not
+authority. The only isolation boundary is another instance (`HLAO_HOME`, socket, and token).
 
 ### `hello`
 
@@ -152,7 +155,7 @@ Result: `{ backends: AgentView[] }`.
 
 The same merged view (builtin, user, project) as the bundled `hlao agents` command, sorted by
 name. `cwd` must be absolute; when omitted it defaults to the caller session's cwd, or the
-supervisor's cwd for an operator. A scoped caller sees the same list it could spawn from. This
+supervisor's cwd for an operator. A session caller defaults to its own cwd. This
 exists so a dashboard or MCP client does not reimplement config merging or read config files.
 
 ```ts
@@ -184,7 +187,7 @@ Params:
   mode?: string;                 // provider mode to select before returning (sessions.set_mode)
   model?: string;                // value for the option whose category is "model"
   config?: Record<string, string | boolean>; // session config options applied before the prompt
-  parentSessionId?: string;      // defaults to callerSessionId
+  parentSessionId?: string;      // lineage; defaults to the caller's live session, else a root
   permissionPolicy?: "ask" | "allow" | "deny"; // defaults to config
   env?: Record<string, string>;  // extra environment for the adapter
 }
@@ -208,9 +211,10 @@ timeout is reported as `firstTurn.timedOut = true`, not as an error.
 
 Params: `{ includeClosed?: boolean; cwd?: string }`.
 
-Result: `{ scope: "operator" | "session", sessions: SessionView[] }`
+Result: `{ sessions: SessionView[] }`
 
-Operator scope lists all sessions. Session scope lists the caller and its descendants.
+Every session in this instance, sorted by creation time. There is no per-caller scope. A client
+may filter or sort the flat list locally.
 
 ### `sessions.get`
 
@@ -221,8 +225,9 @@ Params: `{ sessionId: string }`. Result: `{ session: SessionView }`.
 Params: `{ sessionId: string; name: string | null }` (`null` clears the name).
 
 Result: `{ session: SessionView }`. Appends a `session.renamed` event with
-`{ name, by: "operator" }`. Names are mutable labels, not identity: they do not affect scope,
-the handle, or `HLAO_SESSION_ID`.
+`{ name, by: "operator" }`. Names are mutable labels, not identity: they do not affect
+addressing, the handle, or `HLAO_SESSION_ID`. Duplicate names are instance-wide and resolve as
+`ambiguous_id`; the full handle always resolves.
 
 ### `sessions.forget`
 
@@ -230,8 +235,8 @@ Params: `{ sessionId: string }`. Result: `{ sessionId: string; forgotten: true }
 
 Removes a **terminal** session from the live table immediately instead of waiting for
 `retainClosedMs`. A live session is `bad_request`; a terminal session with retained descendants
-is also `bad_request`, so lineage never dangles. The action is in scope: an operator may forget
-anything, a session may forget itself or a descendant. Forgetting discards the retained event
+is also `bad_request`, so lineage never dangles. Any caller in the instance may forget a
+terminal session. Forgetting discards the retained event
 log for that session.
 
 ### `sessions.send`
@@ -349,7 +354,7 @@ with reason `exit`; for `all`, that resolves the whole wait immediately. A targe
 settled when the aggregate resolves is evaluated at that moment: it is reported as satisfied
 if it already meets the condition, otherwise as `pending`. `change` uses each target's `lastSeq`
 at call time as its baseline; `since` is rejected with more than one id. All ids are resolved
-in the caller's scope before waiting; one forbidden or unknown id fails the request.
+in this instance before waiting; one unknown or ambiguous id fails the request.
 
 ### `sessions.cancel`
 

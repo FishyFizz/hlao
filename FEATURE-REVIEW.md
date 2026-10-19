@@ -115,7 +115,7 @@ Original numbering is preserved for traceability.
   history loss; `close` has `--dry-run`, `down` does not. Print the live session list or add
   `--dry-run`.
 - **P2-36 — `whoami` does not validate a stale `HLAO_SESSION_ID`.** It reports the environment
-  as-is; `list` warns when the scope is empty. Add a live check or a `live: false` field.
+  as-is. Add a live check or a `live: false` field.
 - **P2-50 — Package metadata lacks `repository`, `homepage`, and `bugs`.** Minor distribution
   polish.
 - **P2-53 — A queued message cancelled before it starts returns exit 0.** `send --wait` reports
@@ -126,6 +126,6 @@ Original numbering is preserved for traceability.
 
 ## Note
 
-Everything above is outside the shipped 0.4.0 surface. The implementation and its tests
-(54 unit, 79 end-to-end) are described in `README.md`, `contracts/`, and
-`docs/milestones/0.4.md`.
+Everything above is outside the shipped 0.5.0 surface. The implementation and its tests
+(54 unit, 80 end-to-end) are described in `README.md`, `contracts/`, and
+`docs/milestones/0.5.md`.

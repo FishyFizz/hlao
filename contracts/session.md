@@ -165,15 +165,15 @@ export class Session {
    default, `ask` opt-in, and `permit(..., always)` can switch a live session to `allow`.
 6. **Provider modes and config options are data.** `view().modes` and `view().configOptions`
    report what the adapter advertises; setters change them and record the actor.
-7. **Names are labels.** `setName` changes `name` and emits an event; the handle, scope, and
-   the environment already injected into the running adapter (`HLAO_NAME`) are unchanged.
+7. **Names are labels.** `setName` changes `name` and emits an event; the handle, addressing,
+   and the environment already injected into the running adapter (`HLAO_NAME`) are unchanged.
 8. **Events are monotonic.** `append` assigns the next sequence before waiters run.
 9. **Reads never mutate.** A read does not acknowledge or consume anything.
 10. **Timeouts are bounds, not schedules.** Nothing in this module starts a recurring timer.
 11. **Cancel is explicit about the queue.** The default discards the backlog; `keepQueue`
     stops only the active turn. Every discard is attributed and previewed.
-12. **One upward channel.** This module has no scope logic; the supervisor allows only
-    `send` to a direct parent.
+12. **No addressing policy.** This module has no visibility or scope logic; the supervisor
+    resolves any session in the instance. `parentId` is lineage, not authority.
 
 ## Dependencies the session expects
 

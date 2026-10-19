@@ -58,7 +58,7 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `config` | Backend manifests and user/project config | config merge rules | `paths`, `errors` |
 | `events` | Bounded, seq-addressed event log | retention and cursors | — |
 | `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
-| `supervisor` | Process lifecycle, lock/socket, dispatch, self-and-descendants scope | live session table | `session`, `config`, `lock`, `logger`, `paths`, `protocol`, `errors` |
+| `supervisor` | Process lifecycle, lock/socket, dispatch, universal addressing | live session table | `session`, `config`, `lock`, `logger`, `paths`, `protocol`, `errors` |
 | `client` | Client-side transport and autostart | — | `lock`, `protocol`, `paths`, `errors` |
 | `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
@@ -131,8 +131,8 @@ bounded by bytes as well as count, so a page of 1000 maximally-sized events cann
 The cron failure had two frozen decisions: a fired session could not manage its own job, and
 the primitive could not express "stop when". In HLAO:
 
-- A session's own handle is in its scope, so `hlao cancel $HLAO_SESSION_ID` and `close` work
-  from inside it. A participant that can see its situation is never locked out of managing
+- A session's own handle is always addressable, so `hlao cancel $HLAO_SESSION_ID` and `close`
+  work from inside it. A participant that can see its situation is never locked out of managing
   it.
 - Nothing fires. Recurrence exists only while a caller keeps issuing one-shot waits; when
   the caller stops, the leak stops.
@@ -179,17 +179,22 @@ the session view reports the adapter's `modes`, `spawn --mode` selects one, and 
 reads or switches it. The provider can therefore stop asking at the source while HLAO keeps
 the guarantee that a request cannot silently hang.
 
-## Visibility and authority
+## Addressing and isolation
 
-- An operator shell has no `HLAO_SESSION_ID`; it sees every live session.
-- An agent shell inherits `HLAO_SESSION_ID`; it sees itself and its descendants only.
-- Every session-targeting request is checked against that scope in the supervisor.
-- Authority follows visibility: a session may cancel or close itself and its descendants,
-  not its parent or siblings. The halt rule is structural, not a separate policy layer.
+- **One instance is one address space.** `HLAO_HOME`, the supervisor, the socket, and the token
+  define a single HLAO instance. Every session in it is addressable by every caller.
+- An operator shell has no `HLAO_SESSION_ID`; an agent shell inherits one for attribution and
+  self-defaulting. Neither is a visibility filter.
+- `callerSessionId` is recorded as `by` on mutating events. It grants nothing and forbids
+  nothing (ADR 0008).
+- `parentId`, `rootId`, and `depth` are lineage and context. They do not decide who may read,
+  wait on, stop, or resume a session.
+- Isolation is another instance: a different `HLAO_HOME`, socket, and token. There is no
+  cross-instance visibility or addressing.
 - This is a coordination boundary, not a security boundary. A process that deliberately
   strips its environment can act as the operator. `PRODUCT.md` states the same: coordination
-  is a trust protocol. The structural guarantee is that the default, inherited behavior is
-  the bounded one.
+  is a trust protocol. Any caller in an instance can interfere with any session, exactly as a
+  human with the harness can; attribution makes it visible, and conventions prevent it.
 
 ## Failure behavior
 

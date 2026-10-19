@@ -192,15 +192,16 @@ fallback for when copying is costly — see Open question 7.)*
 Two consequences:
 
 - **This tightens open question 6 rather than sitting beside it.** A change notification
-  requires the announcer to know the participant set *at the moment of change*. Under the
-  resolved visibility rule, that set is the announcer's own subtree, and it is complete there:
-  an announcer is correct for its subtree. A job-wide change must therefore come from a common
-  ancestor — ultimately the root — whose subtree contains every affected participant. The
-  boundary stays visible: the agent knows its announcement cannot reach outside its subtree,
-  which is the actionable form of the gap.
-- **An announcement is an assembly, never a primitive.** It is `list sessions` scoped to the
-  announcer's subtree, plus `send` × n. "Announcement" is exactly the kind of concept that
-  would otherwise arrive as a new object, and objects are where black boxes live.
+  requires the announcer to know the participant set *at the moment of change*. Under universal
+  addressing, the announcer can name any session, but its *knowledge* is still bounded by the
+  handles it spawned and the agreements it has read: an announcer is correct for the set it
+  knows. A job-wide change must therefore come from a common ancestor — ultimately the root —
+  whose known set contains every affected participant. The gap stays visible: the agent knows
+  whom it can name and that its picture may be incomplete outside the set it knows.
+- **An announcement is an assembly, never a primitive.** It is `list sessions` filtered to the
+  announcer's known handles (or a user-space membership file), plus `send` × n. "Announcement"
+  is exactly the kind of concept that would otherwise arrive as a new object, and objects are
+  where black boxes live.
 
 ### Why announce at all: waste avoidance
 
@@ -368,25 +369,30 @@ confirm or correct.*
    state.
    *Resolved by:* whether anyone else reaches for it unprompted.
 
-6. **Is session enumeration global or scoped?** **Resolved: self-and-descendants.**
+6. **Is session enumeration global or scoped?** **Resolved (2026-10-20): universal within an
+   instance; the instance is the swarm boundary.**
 
-   A participant sees **itself and the sessions it spawned** — its direct descendants under the
-   shallow-delegation scope. This is delivered structurally, not looked up: the spawner
-   injects the participant's own identity and its parent/root identifiers into the child, and a
-   parent's knowledge of its descendants is the handles it holds. No registry stores the tree.
+   One HLAO instance — one `HLAO_HOME`, supervisor, socket, and token — is one address space.
+   Every session in it is addressable by every caller. `callerSessionId` is attribution and
+   self-defaulting, not a visibility filter. `parentId`/`rootId`/`depth` are lineage and
+   context, not authority.
 
-   Globally visible was rejected: it would hand every agent authority over sessions that are
-   none of its business, and its completeness is unachievable once the tree is deep.
-   Self-and-descendants bounds ignorance without granting authority, and under the
-   shallow-delegation scope it is complete for the job root. It also settles what stops an
-   agent from touching sessions that are not its business: it cannot see them.
+   Isolation is another instance: a separate home, socket, and token. There is no cross-instance
+   visibility or addressing. Inside an instance, swarm membership, roles, and agreements are
+   user-space conventions — context passed at spawn and files readable by the participants.
+   Nothing in core enforces them.
 
-   Anything wider than the two-level tree — siblings, cousins, a late joiner across branches —
-   is reached by the agents' own contact-list convention, not by enumeration.
+   The earlier self-and-descendants rule was rejected: it invents a boundary a harness does not
+   have, and it turns the spawn ledger into an authority over who may see and stop what. A
+   person with the harness can address any session it can name; an agent should use the same
+   moves. The trade is stated openly: any caller in an instance can interfere with any session.
+   Attribution makes the actor visible; conventions and separate instances are the mitigations.
+   Enforced namespaces or roles, if ever wanted, belong in a plugin, not the primitive surface.
 
-   Consequence for announcements: an announcer is correct for its own subtree. A job-wide
-   change must come from a common ancestor — ultimately the root — whose subtree contains every
-   affected participant.
+   Consequence for announcements: an announcer is still *correct* for the participants it
+   knows it spawned. A job-wide change should still come from a common ancestor — not because
+   addressing forbids otherwise, but because only that ancestor knows the complete participant
+   set. Siblings and cousins are reached by the agents' own contact-list convention.
 
 7. **Is announcing by reference the default, or a fallback?** A copy-broadcast is the lazy
    path and the one that rots as the participant set changes; a reference is durable and

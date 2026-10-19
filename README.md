@@ -49,12 +49,11 @@ renamed builder (k7m2qp)
 $ hlao spawn claude "Check whether the retry package is declared in package.json." --name check
 spawned check (3f9xw2) (claude) in D:\work\svc  parent k7m2qp  policy allow
 
-An agent sees itself and its descendants, and may `send` a message to its direct parent so a
-finding or a blocking question can travel upward. It cannot read, wait on, stop, or re-policy
-an ancestor. An operator shell has no `HLAO_SESSION_ID` and sees everything. That scope is also
-the halt authority: a session can `cancel` or `close` itself and its descendants, never its
-parent or a sibling. Authority follows visibility instead of being granted by a separate
-policy.
+Every session in an HLAO instance is addressable by every caller. An agent can `send` to,
+read, wait on, cancel, or close its parent, a sibling, or an unrelated session; `parentId` is
+lineage, not authority. `HLAO_SESSION_ID` is attribution and self-defaulting, not a scope. If
+two groups of agents need isolation, run two HLAO instances with different `HLAO_HOME`, socket,
+and token — the instance is the hard swarm boundary.
 
 ## Requirements
 
@@ -91,7 +90,7 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
 | `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3. |
-| `hlao list [--all] [--cwd DIR]` | Sessions in this shell's scope, with a scope footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
+| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
@@ -99,7 +98,7 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao policy [<id>] [allow\|ask\|deny]` | Read or set the live HLAO permission policy. |
 | `hlao option [<id>] [key value]` | Read or set provider config options such as model and reasoning effort. |
 | `hlao queue [<id>]` / `hlao queue drop [<id>] N` | Inspect queued prompts with sender and preview, or drop one. |
-| `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the caller's scope. |
+| `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the instance. |
 | `hlao agents` | Configured backends, their source, config file, and whether the adapter command is present. Reads config locally so it works without a supervisor; the same view is on the wire as `backends.list`. |
 | `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. Reports the wire protocol version and capabilities. |
 | `hlao logs [--lines N] [--follow]` | Read the supervisor's diagnostic log directly. |
@@ -126,8 +125,8 @@ inside a session, so `hlao read` is enough.
 Human reads show `HH:MM:SS` cursors (`--timestamps` switches to ISO), coalesce a streamed
 message into one block and start a new block when the adapter's message id changes, and strip
 ANSI/control sequences from agent-provided text. A tail read that lost history says how many
-events were evicted. `hlao list` marks the caller with `*` and states whether the scope is the
-operator view or self-plus-descendants.
+events were evicted. `hlao list` marks the caller with `*` and reports the instance session
+count.
 
 ### Watching and operating a supervisor
 
@@ -140,7 +139,7 @@ it is the supported export path before `down`.
 `hlao list --watch` redraws the visible sessions every `--interval` (default 2s) and never
 starts a supervisor timer. `--wide` adds busy time, policy, mode, pending-permission title, and
 exit detail; `--tree` indents by lineage. Filters (`--status`, `--backend`, `--root`, `--name`,
-`--pending`, `--cwd-prefix`) run over the caller's visible set, so they cannot widen scope.
+`--pending`, `--cwd-prefix`) run over the instance list, so they only narrow the local view.
 Human output sorts by recent activity by default; `--sort created` restores creation order.
 
 `hlao status` probes an existing supervisor and `--start` opts into autostart. `hlao logs` reads
@@ -206,7 +205,7 @@ A provider may ask before running a tool. HLAO's `permissionPolicy` decides how 
 session's policy to `allow`, so later requests are answered automatically. When the provider
 offers an allow-always option, it is preferred, which can stop the provider from asking at all
 for matching commands. `hlao policy <id> [allow|ask|deny]` reads or changes the live policy
-without needing a pending request; a parent may re-policy a descendant.
+without needing a pending request; any caller in the instance may re-policy any session.
 
 Provider-native modes are a separate layer. `hlao spawn claude ... --mode auto` starts a
 session in the adapter's Auto mode; `hlao mode <id>` lists the modes and `hlao mode <id> auto`
@@ -361,9 +360,9 @@ and the first retained sequence. Export anything you need with `hlao read <id> -
 history.json` (or `--json > file`) before `hlao down`, which ends every session and discards
 in-memory history.
 
-**An agent cannot see a session.** A spawned session sees itself and its descendants only.
-A sibling or parent is outside its scope by design; coordinate through the operator shell or a
-common ancestor.
+**An agent cannot find a session.** It may be in another HLAO instance (a different
+`HLAO_HOME`), already forgotten, or misspelled. Run `hlao list` in the intended instance;
+every session in that instance is addressable.
 
 **`hlao agents` shows an old backend.** `agents` reads the file on disk, while spawns use the
 supervisor's loaded config. Run `hlao reload` for new spawns; live sessions keep their settings.

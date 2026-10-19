@@ -1,6 +1,7 @@
 # ADR 0006 — A child may send to its direct parent
 
-**Status:** accepted, 2026-10-19 (milestone 0.3).
+**Status:** superseded by ADR 0008 (universal addressing), 2026-10-20. Kept for history.
+**Original status:** accepted, 2026-10-19 (milestone 0.3).
 
 ## Context
 

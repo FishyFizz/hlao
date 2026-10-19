@@ -7,12 +7,14 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.4.0, built 2026-10-20 on `milestone/0.4-socket-contract`
-  (socket protocol as the client boundary; observation completeness).
+- **Version:** 0.5.0, built 2026-10-20 on `milestone/0.5-universal-addressing`
+  (one instance is one address space; ADR 0008).
 - **Status:** the primitive surface, supervisor, CLI, tests, and the four acceptance
   assemblies are implemented and green. The socket is a public client contract: the bundled
   CLI, a future dashboard/TUI, and an MCP server are interchangeable clients (ADR 0007).
-- **Verification:** `npm test` runs 133 tests: 54 unit and 79 end-to-end through the real CLI
+  Every session in an HLAO instance is addressable by every caller; isolation is another
+  instance.
+- **Verification:** `npm test` runs 134 tests: 54 unit and 80 end-to-end through the real CLI
   and supervisor against a scripted ACP agent, including the five acceptance-assembly tests
   and a raw-NDJSON conformance test that never invokes the CLI.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
@@ -36,7 +38,7 @@ A small set of plain operations both a human and an agent use:
 - `send` — queue a prompt; one turn at a time.
 - `read` — orchestration state plus a bounded, cursor-addressed event page.
 - `wait` — one-shot await on idle, permission, exit, or change.
-- `list` — sessions in the caller's scope (operator: all; agent: self and descendants).
+- `list` — every session in this HLAO instance; there is no per-session scope.
 - `cancel` / `close` / `permit` — the lifecycle operations around the five observables.
 
 There is no scheduler. Recurring work is a loop the caller writes, using a bounded wait's
@@ -55,7 +57,9 @@ and announced by reference; the examples show it.
    environment. ACP session ids stay internal.
 5. **One adapter process per session.** A crash, permission block, or close touches one
    session.
-6. **Self-and-descendants scope is enforced in the supervisor**, not in the CLI.
+6. **One HLAO instance is one address space.** Every session in it is addressable by every
+   caller. Isolation is another `HLAO_HOME`, socket, and token. `callerSessionId` is
+   attribution, not scope; lineage is context, not authority (ADR 0008).
 7. **Do not advertise `clientCapabilities.subagents`, `fs`, or `terminal`.** Provider
    subagents stay inside the leaf; HLAO does not become a filesystem or terminal provider.
 8. **A refactor never changes behavior in the same commit.**
@@ -67,7 +71,7 @@ and announced by reference; the examples show it.
 | a CLI command, flag, or human rendering | `src/cli/main.ts`, `src/cli/render.ts` |
 | the wire schema or validation | `src/protocol.ts`, `contracts/protocol.md` |
 | ACP handshake, prompt queue, permissions, cancellation | `src/session.ts`, `contracts/session.md` |
-| supervisor lifecycle, scope enforcement, dispatch | `src/supervisor.ts` |
+| supervisor lifecycle, universal addressing, dispatch | `src/supervisor.ts` |
 | autostart, lock probing, request transport | `src/client.ts`, `src/lock.ts` |
 | backend manifests and config merge | `src/config.ts`, `contracts/backends.md` |
 | retention / cursor / eviction rules | `src/events.ts`, ADR 0002 |
@@ -127,8 +131,9 @@ lineage reconstruction, or durable event store. Each absence is a constraint fro
   request, so the supervisor owns no recurring housekeeping timer.
 - **A very large single event is previewed**, marked `rawTruncated`, rather than allowed to
   evict the rest of the log.
-- **The scope rule is coordination, not security.** A process that strips its environment
-  can act as the operator.
+- **The instance is the coordination boundary, not a security boundary.** A process that
+  strips its environment can act as the operator. Inside an instance, any caller can address
+  any session; isolation is another instance.
 - **ACP v1 is the only transport.** The optional `node-pty` fallback in `STACK.md` is not
   implemented in 0.1.0 and is not installed. A backend without an ACP adapter cannot be
   driven yet.
