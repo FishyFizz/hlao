@@ -81,6 +81,8 @@ export interface SpawnOptions {
   skill: boolean;                // prepend the skill pointer to the first prompt
   skillPath: string;             // injected as HLAO_SKILL; home copy of skills/hlao/SKILL.md
   skillVersion: string;          // injected as HLAO_SKILL_VERSION
+  resumeSessionId?: string;      // reopen with ACP session/load instead of session/new
+  forkSessionId?: string;        // copy with ACP session/fork
   log: (line: string) => void;   // supervisor diagnostics only
 }
 
@@ -191,6 +193,19 @@ export class Session {
 13. **The skill is a pointer, not a payload.** When enabled, the first prompt prepends a short
     text block naming the skill path; the prompt carries no file contents. `HLAO_SKILL` and
     `HLAO_SKILL_VERSION` describe the same file to the adapter's environment.
+14. **Resume replays the provider, it does not copy it.** With `resumeSessionId`, startup
+    calls ACP `session/load` on that id instead of `session/new`. The provider's replay
+    notifications arrive before the request resolves, so the session id filter is installed
+    first; every event appended during the call is marked `replay: true`, and
+    `session.resumed` records the seq range. A backend without the `loadSession` capability
+    is refused with `spawn_failed`; the session never starts empty under a resumed id. The
+    event log is still a bounded projection: a transcript larger than retention evicts its
+    own earliest replay events, and says so.
+15. **Fork copies; it does not mutate.** With `forkSessionId`, startup calls ACP
+    `session/fork` and adopts the provider-assigned id. The source session is untouched.
+    When `loadSession` is also available, the new session is loaded immediately so the copied
+    history is replayed and marked like a resume; otherwise `session.forked` reports
+    `historyLoaded: false`. Fork and resume cannot be combined.
 
 ## Dependencies the session expects
 

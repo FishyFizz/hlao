@@ -16,6 +16,11 @@ the parent, the root, and the depth are placed in the adapter's environment. The
 id returned by `session/new` is stored only in the supervisor and exposed as
 `agentSessionId` for diagnostics.
 
+*Amended 2026-10-21 (ADR 0011):* `agentSessionId` is the durable provider handle, not
+diagnostics only. It is returned by spawn and accepted by `spawn --resume`, because it is the
+id the provider's own resume understands. It is still not the HLAO handle; the identity rules
+above are unchanged.
+
 One adapter process hosts exactly one ACP session. This makes the environment unambiguous:
 there is no moment where two sessions share a process and therefore share identity.
 

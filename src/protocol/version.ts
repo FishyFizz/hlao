@@ -9,7 +9,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 6 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 7 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -70,6 +70,8 @@ export const PROTOCOL_CAPABILITIES = [
   "session.agent",
   "session.messages",
   "session.elicitation",
+  "spawn.resume",
+  "spawn.fork",
 ] as const;
 
 export type ProtocolCapability = (typeof PROTOCOL_CAPABILITIES)[number];

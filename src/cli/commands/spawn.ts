@@ -48,6 +48,8 @@ export async function cmdSpawn(args: string[]): Promise<number> {
     { name: "env", type: "string", valueName: "K=V", multiple: true },
     { name: "no-skill", type: "boolean" },
     { name: "idempotency-key", type: "string", valueName: "KEY" },
+    { name: "resume", type: "string", valueName: "PROVIDER_ID" },
+    { name: "fork", type: "string", valueName: "PROVIDER_ID" },
   ]);
   if (helpRequested(parsed, "spawn")) return 0;
   expectPositionals(parsed, "spawn", 1, Number.POSITIVE_INFINITY);
@@ -72,6 +74,11 @@ export async function cmdSpawn(args: string[]): Promise<number> {
 
   const conn = await connect(ctx);
   const idempotencyKey = stringOption(parsed, "idempotency-key");
+  const resumeSessionId = stringOption(parsed, "resume");
+  const forkSessionId = stringOption(parsed, "fork");
+  if (resumeSessionId !== undefined && forkSessionId !== undefined) {
+    throw usageError("--resume and --fork cannot be combined");
+  }
   // In human mode, wait in two phases so the handle is printed as soon as the
   // session exists. JSON keeps the single-call shape with firstTurn. An
   // idempotency key makes the spawn and its first prompt one atomic request.
@@ -94,6 +101,8 @@ export async function cmdSpawn(args: string[]): Promise<number> {
       env: parseEnv(multipleOption(parsed, "env")),
       ...(booleanOption(parsed, "no-skill") === true ? { skill: false } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+      ...(forkSessionId !== undefined ? { forkSessionId } : {}),
     },
     { timeoutMs: 0 },
   );
@@ -105,9 +114,24 @@ export async function cmdSpawn(args: string[]): Promise<number> {
 
   const session = result.session;
   const configKeys = Object.keys(config ?? {});
+  const verb = result.duplicate
+    ? result.resumed
+      ? "already attached, reusing"
+      : "duplicate spawn, reusing"
+    : result.resumed
+      ? "resumed"
+      : result.forked
+        ? "forked"
+        : "spawned";
   out(
-    `${result.duplicate ? "duplicate spawn, reusing" : "spawned"} ` +
+    `${verb} ` +
       `${sessionLabel(ctx, session)} (${session.backend}) in ${session.cwd}` +
+      (session.agentSessionId
+        ? ctx.style.dim(`  provider ${sanitize(session.agentSessionId)}`)
+        : "") +
+      (session.forkedFrom
+        ? ctx.style.dim(`  forked from ${sanitize(session.forkedFrom)}`)
+        : "") +
       (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
       ctx.style.dim(`  policy ${session.permissionPolicy}`) +
       (session.createdBy

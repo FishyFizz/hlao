@@ -46,7 +46,16 @@ hlao permit <id> --allow        # answer a pending permission request
 hlao elicit <id> --accept k=v   # answer a provider question (--decline/--cancel)
 hlao get <id>                   # state only, no events
 hlao list --mine                # the sessions in your job's root subtree
+hlao spawn <backend> --resume <provider-id> --cwd <dir>   # pull an interrupted agent back up
+hlao spawn <backend> --fork <provider-id> --cwd <dir>     # copy one; the source is untouched
 ```
+
+Spawning reports a provider session id (`provider …` in human output, `agentSessionId` in
+JSON). Keep it in your context. Your HLAO id is an alias for the supervisor's lifetime; the
+provider id survives a restart. `spawn --resume <provider-id> --cwd <original cwd>` reopens
+that provider session and replays its history; the interrupted turn is not replayed, so
+re-send the instruction. `spawn --fork <provider-id> --cwd <original cwd>` copies the session
+instead; the source keeps running and can still be resumed separately.
 
 A session runs one turn at a time. Messages queue visibly and run in order. `--wait` waits for
 that message's turn; a timeout leaves the work running.
@@ -91,7 +100,8 @@ provider is waiting for an answer; `exit` means the session ended.
 - If you are blocked, send a concise fact to `$HLAO_PARENT_ID`: what you tried, what is
   missing, and what would unblock you. Do not guess.
 - If a command fails, read the error and stop; do not loop on a dead adapter.
-- Do not spawn a replacement session unless the operator asked.
+- Do not spawn a replacement session unless the operator asked. Resuming a session you
+  spawned with `--resume` continues it; it is not a replacement.
 
 ## Permission and trust
 

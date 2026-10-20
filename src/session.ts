@@ -7,6 +7,7 @@ import type {
   ContentBlock,
   CreateElicitationRequest,
   CreateElicitationResponse,
+  NewSessionResponse,
   PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -102,6 +103,10 @@ export interface SpawnOptions {
   skill: boolean;
   skillPath: string;
   skillVersion: string;
+  /** Provider session to reopen with ACP `session/load` instead of `session/new`. */
+  resumeSessionId?: string;
+  /** Provider session to copy with ACP `session/fork`. */
+  forkSessionId?: string;
   log: (line: string) => void;
 }
 
@@ -168,6 +173,10 @@ export class Session {
   #child: ChildProcess | null = null;
   #conn: ClientConnection | null = null;
   #agentSessionId: string | null = null;
+  #resumeSessionId: string | null;
+  #forkSessionId: string | null;
+  /** Events emitted while `session/load` replays are marked as history. */
+  #replaying = false;
   #caps: AgentCapabilities = {};
   #modes: SessionModes | null = null;
   #configOptions: SessionConfigOptionView[] | null = null;
@@ -221,6 +230,8 @@ export class Session {
     this.#name = options.name;
     this.backend = options.backend.name;
     this.cwd = options.cwd;
+    this.#resumeSessionId = options.resumeSessionId ?? null;
+    this.#forkSessionId = options.forkSessionId ?? null;
     this.parentId = options.parentId;
     this.rootId = options.rootId;
     this.depth = options.depth;
@@ -307,6 +318,7 @@ export class Session {
         : null,
       lastStopReason: this.#lastStopReason,
       agentSessionId: this.#agentSessionId,
+      forkedFrom: this.#forkSessionId,
       processId: this.#child?.pid ?? null,
       exit: this.#exit,
       permissionPolicy: this.#permissionPolicy,
@@ -1456,6 +1468,9 @@ export class Session {
       rootId: this.rootId,
       depth: this.depth,
       permissionPolicy: this.#permissionPolicy,
+      ...(this.#forkSessionId !== null
+        ? { forkedFrom: this.#forkSessionId }
+        : {}),
       envKeys: [
         ...new Set([
           ...Object.keys(this.#backendManifest.env),
@@ -1619,16 +1634,110 @@ export class Session {
     this.#agentName = init.agentInfo?.name ?? null;
     this.#agentVersion = init.agentInfo?.version ?? null;
 
-    const created = await withTimeout(
-      this.#conn.agent.request("session/new", {
-        cwd: this.cwd,
-        mcpServers: [],
-      }),
-      this.#config.startupTimeoutMs,
-      "ACP session/new",
-    );
-
-    this.#agentSessionId = created.sessionId;
+    const replayStartSeq = this.#log.lastSeq + 1;
+    let created: {
+      sessionId: string;
+      modes?: NewSessionResponse["modes"];
+      configOptions?: NewSessionResponse["configOptions"];
+    };
+    if (this.#resumeSessionId !== null && this.#forkSessionId !== null) {
+      throw new HlaoError(
+        "spawn_failed",
+        "a spawn cannot both resume and fork a provider session",
+      );
+    }
+    if (this.#forkSessionId !== null) {
+      if (
+        this.#caps.sessionCapabilities?.fork === undefined ||
+        this.#caps.sessionCapabilities?.fork === null
+      ) {
+        throw new HlaoError(
+          "spawn_failed",
+          `${this.backend} cannot fork provider session ${this.#forkSessionId}: the adapter does not advertise session/fork`,
+        );
+      }
+      const forked = await withTimeout(
+        this.#conn.agent.request("session/fork", {
+          sessionId: this.#forkSessionId,
+          cwd: this.cwd,
+          mcpServers: [],
+        }),
+        this.#config.startupTimeoutMs,
+        "ACP session/fork",
+      );
+      this.#agentSessionId = forked.sessionId;
+      let modes = forked.modes;
+      let configOptions = forked.configOptions;
+      // `session/fork` returns a new session with the copied conversation but
+      // sends no history to the client. Replay it explicitly when the backend
+      // can load, so the new session shows what a human forking would see.
+      if (this.#caps.loadSession) {
+        this.#replaying = true;
+        let loaded: {
+          modes?: NewSessionResponse["modes"];
+          configOptions?: NewSessionResponse["configOptions"];
+        };
+        try {
+          loaded = await withTimeout(
+            this.#conn.agent.request("session/load", {
+              sessionId: forked.sessionId,
+              cwd: this.cwd,
+              mcpServers: [],
+            }),
+            this.#config.startupTimeoutMs,
+            "ACP session/load",
+          );
+        } finally {
+          this.#replaying = false;
+        }
+        modes = loaded.modes ?? modes;
+        configOptions = loaded.configOptions ?? configOptions;
+      }
+      created = { sessionId: forked.sessionId, modes, configOptions };
+    } else if (this.#resumeSessionId !== null) {
+      // A backend that cannot replay history must fail loudly. Silently starting
+      // a fresh conversation under the same id would present an empty session as
+      // the interrupted one.
+      if (!this.#caps.loadSession) {
+        throw new HlaoError(
+          "spawn_failed",
+          `${this.backend} cannot resume provider session ${this.#resumeSessionId}: the adapter does not advertise loadSession`,
+        );
+      }
+      // Replay notifications arrive before `session/load` resolves, so the
+      // session id filter must already accept them.
+      this.#agentSessionId = this.#resumeSessionId;
+      this.#replaying = true;
+      let loaded: { modes?: NewSessionResponse["modes"]; configOptions?: NewSessionResponse["configOptions"] };
+      try {
+        loaded = await withTimeout(
+          this.#conn.agent.request("session/load", {
+            sessionId: this.#resumeSessionId,
+            cwd: this.cwd,
+            mcpServers: [],
+          }),
+          this.#config.startupTimeoutMs,
+          "ACP session/load",
+        );
+      } finally {
+        this.#replaying = false;
+      }
+      created = {
+        sessionId: this.#resumeSessionId,
+        modes: loaded.modes,
+        configOptions: loaded.configOptions,
+      };
+    } else {
+      created = await withTimeout(
+        this.#conn.agent.request("session/new", {
+          cwd: this.cwd,
+          mcpServers: [],
+        }),
+        this.#config.startupTimeoutMs,
+        "ACP session/new",
+      );
+      this.#agentSessionId = created.sessionId;
+    }
     if (created.modes) {
       this.#modes = {
         currentModeId: created.modes.currentModeId,
@@ -1640,6 +1749,7 @@ export class Session {
       };
     }
     this.#configOptions = toConfigOptionViews(created.configOptions);
+    const replayEndSeq = this.#log.lastSeq;
     this.#ready = true;
     this.#status = "idle";
     this.#emit("session.initialized", {
@@ -1652,7 +1762,31 @@ export class Session {
         this.#caps.sessionCapabilities?.list !== null,
       closeSession: this.#caps.sessionCapabilities?.close !== undefined &&
         this.#caps.sessionCapabilities?.close !== null,
+      forkSession: this.#caps.sessionCapabilities?.fork !== undefined &&
+        this.#caps.sessionCapabilities?.fork !== null,
+      resumed: this.#resumeSessionId !== null,
+      forked: this.#forkSessionId !== null,
+      ...(this.#forkSessionId !== null
+        ? { forkedFrom: this.#forkSessionId }
+        : {}),
     });
+    if (this.#resumeSessionId !== null) {
+      this.#emit("session.resumed", {
+        agentSessionId: created.sessionId,
+        historyStartSeq: replayStartSeq,
+        historyEndSeq: replayEndSeq,
+        historyEvents: Math.max(0, replayEndSeq - replayStartSeq + 1),
+      });
+    } else if (this.#forkSessionId !== null) {
+      this.#emit("session.forked", {
+        agentSessionId: created.sessionId,
+        forkedFrom: this.#forkSessionId,
+        historyLoaded: Boolean(this.#caps.loadSession),
+        historyStartSeq: replayStartSeq,
+        historyEndSeq: replayEndSeq,
+        historyEvents: Math.max(0, replayEndSeq - replayStartSeq + 1),
+      });
+    }
     this.#changed();
   }
 
@@ -1982,7 +2116,12 @@ export class Session {
 
   #emit(type: EventType, data: Record<string, unknown>, turn?: number | null): EventView {
     this.#lastActivityAt = nowIso();
-    const event = this.#log.append({ type, turn: turn ?? this.#active?.turn ?? null, data });
+    const event = this.#log.append({
+      type,
+      turn: turn ?? this.#active?.turn ?? null,
+      data,
+      replay: this.#replaying,
+    });
     this.#lastEvent = {
       type,
       title: eventTitle(type, event.data),

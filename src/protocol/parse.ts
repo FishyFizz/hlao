@@ -404,9 +404,19 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           "env",
           "skill",
           "idempotencyKey",
+          "resumeSessionId",
+          "forkSessionId",
         ],
         what,
       );
+      const resumeSessionId = optString(object, "resumeSessionId", what, 200);
+      const forkSessionId = optString(object, "forkSessionId", what, 200);
+      if (resumeSessionId !== undefined && forkSessionId !== undefined) {
+        throw new HlaoError(
+          "bad_request",
+          `${what} cannot set both resumeSessionId and forkSessionId`,
+        );
+      }
       const prompt = optString(object, "prompt", what, MAX_PROMPT_CHARS);
       if (prompt !== undefined && prompt.length === 0) {
         throw new HlaoError("bad_request", `${what}.prompt must not be empty`);
@@ -430,6 +440,8 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         env: stringRecord(object, "env", what),
         skill: optBoolean(object, "skill", what),
         idempotencyKey: optString(object, "idempotencyKey", what, 200),
+        resumeSessionId,
+        forkSessionId,
       } as ParamsByMethod[M];
     }
     case "sessions.list": {

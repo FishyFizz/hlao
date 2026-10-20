@@ -96,6 +96,26 @@ export function eventTitle(
       );
     case "session.info":
       return text(data.title);
+    case "session.resumed": {
+      const id = text(data.agentSessionId);
+      const count = data.historyEvents;
+      const replayed =
+        typeof count === "number"
+          ? `${count} event${count === 1 ? "" : "s"} replayed`
+          : "history replayed";
+      return id ? `${id} · ${replayed}` : replayed;
+    }
+    case "session.forked": {
+      const from = text(data.forkedFrom);
+      const count = data.historyEvents;
+      const copied =
+        data.historyLoaded === false
+          ? "copied; history not replayed"
+          : typeof count === "number"
+            ? `${count} event${count === 1 ? "" : "s"} replayed`
+            : "copied";
+      return from ? `from ${from} · ${copied}` : copied;
+    }
     case "session.initialized": {
       const name = text(data.agentName);
       const version = text(data.agentVersion);

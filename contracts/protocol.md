@@ -263,7 +263,7 @@ The token is the instance boundary.
   `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
   `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
   `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
-  `session.messages`, `session.elicitation`.
+  `session.messages`, `session.elicitation`, `spawn.resume`, `spawn.fork`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -287,6 +287,13 @@ The token is the instance boundary.
   data, and structured `compaction` data. Capabilities: `session.compaction`,
   `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`.
   A client that ignores the fields and event type is unaffected.
+- **2.6** adds provider elicitation: `sessions.respond_elicitation`, optional
+  `SessionView.pendingElicitation`, and the `elicitation.requested`/`elicitation.resolved`
+  event types. Capability: `session.elicitation`.
+- **2.7** adds provider session resume and fork: `spawn.resumeSessionId`/`forkSessionId`,
+  `SpawnResult.resumed`/`forked`, `SessionView.forkedFrom`, the `session.resumed` and
+  `session.forked` event types, and optional `EventView.replay`. Capabilities:
+  `spawn.resume`, `spawn.fork`. A client that ignores them is unaffected.
 
 ## Client model
 
@@ -439,6 +446,8 @@ Params:
   env?: Record<string, string>;  // extra environment for the adapter
   skill?: boolean;               // include the HLAO skill pointer in the first prompt (default true)
   idempotencyKey?: string;       // reuse the session produced by an earlier spawn (2.3)
+  resumeSessionId?: string;      // provider session id to reopen with ACP session/load (2.7)
+  forkSessionId?: string;        // provider session id to copy with ACP session/fork (2.7)
 }
 ```
 
@@ -452,6 +461,8 @@ Result:
   firstTurn?: { stopReason: StopReason; text: string; timedOut: boolean };
   messageId?: string;            // the first prompt's id, when one was sent (2.3)
   duplicate?: boolean;           // the idempotency key matched an existing session (2.3)
+  resumed?: boolean;             // this spawn reopened a provider session (2.7)
+  forked?: boolean;              // this spawn copied a provider session (2.7)
   createdBy?: string;            // same value as session.createdBy (2.3)
 }
 ```
@@ -468,6 +479,29 @@ timeout is reported as `firstTurn.timedOut = true`, not as an error.
 the first prompt only. `idempotencyKey` dedupes spawns for one hour (256 keys); a duplicate
 returns the existing session and its first-prompt `messageId` without spawning. If that
 session is no longer in the live table, the key is released.
+
+`resumeSessionId` reopens a provider session with ACP `session/load` instead of
+`session/new`. The provider replays its durable history as `session/update` notifications;
+HLAO projects them as events with `replay: true`, then emits `session.resumed` with the
+provider id and the replayed seq range. The interrupted turn is not replayed, so the caller
+re-issues the prompt. A backend that does not advertise ACP `loadSession` is refused with
+`spawn_failed` rather than started with an empty conversation under the same id. If a live
+session in this supervisor already holds that provider id, the call returns that session
+with `duplicate: true` and `resumed: true` instead of opening a second adapter against the
+same transcript. The adapter creates the resumed query in the `cwd` it is given, so pass the
+original cwd to keep one transcript.
+
+`SessionView.agentSessionId` is the durable provider handle (for example the id
+`claude --resume` accepts). The HLAO session id is an alias for this supervisor's lifetime.
+An agent that spawned a session keeps the provider id in its own context and passes it back
+as `resumeSessionId` after a restart.
+
+`forkSessionId` copies a provider session with ACP `session/fork` instead of reopening it.
+The source is never modified and keeps its own id; the new session gets a provider-assigned
+id and `SessionView.forkedFrom` records the source. When the backend also advertises
+`loadSession`, HLAO immediately loads the new session so the copied history is replayed with
+`replay: true`; otherwise the fork starts with the copied context but sends no history.
+`resumeSessionId` and `forkSessionId` are mutually exclusive.
 
 ### `sessions.list`
 
@@ -865,10 +899,12 @@ type EventView = {
   type: EventType;
   turn: number | null;
   data: Record<string, unknown>; // raw:true adds data.raw = original ACP update
+  replay?: true;                 // rebuilt by session/load, not observed live (2.7)
 };
 
 type EventType =
-  | "session.created" | "session.initialized" | "session.renamed"
+  | "session.created" | "session.initialized" | "session.resumed" | "session.forked"
+  | "session.renamed"
   | "session.closed" | "session.failed"
   | "prompt.sent" | "prompt.queued" | "prompt.discarded"
   | "turn.started" | "turn.ended" | "cancel.requested"
@@ -922,7 +958,13 @@ Provider-native events (2.5) are structured; `raw` is not required to read them:
   on the experimental `subagents` capability, which HLAO deliberately does not advertise; a
   compliant adapter will not send them, and HLAO still projects them if a custom adapter does.
 - `session.info` carries the provider `title`; `session.initialized` carries `agentName` and
-  `agentVersion`.
+  `agentVersion`, plus `resumed: true` when the session was reopened, or `forked: true` and
+  `forkedFrom` when it was copied (2.7).
+- `session.resumed` (2.7) carries `agentSessionId`, `historyStartSeq`, `historyEndSeq`, and
+  `historyEvents`. Every event between the start and end seq is marked `replay: true`.
+- `session.forked` (2.7) carries `agentSessionId`, `forkedFrom`, `historyLoaded`,
+  `historyStartSeq`, `historyEndSeq`, and `historyEvents`. `historyLoaded: false` means the
+  backend could not replay the copy; the forked agent still has the copied context.
 - A `notice` may be derived from a `usage` update at 75% and 90% of the context size; the
   notice severity is `warning` then `error`, and the thresholds reset below 70%. This is
   derived state, not a timer.
@@ -956,7 +998,8 @@ type SessionView = {
   pendingPermission: PermissionView | null;
   pendingElicitation?: ElicitationView | null; // 2.6
   lastStopReason: StopReason | null;
-  agentSessionId: string | null; // exposed for diagnostics only
+  agentSessionId: string | null; // durable provider handle; pass as spawn.resumeSessionId (2.7)
+  forkedFrom?: string | null;    // provider id this session was forked from (2.7)
   processId: number | null;
   exit: { code: number | null; signal: string | null } | null;
   permissionPolicy: "ask" | "allow" | "deny";

@@ -68,6 +68,29 @@ test("spawn params validate and default", () => {
     (error: unknown) =>
       error instanceof HlaoError && error.code === "bad_request",
   );
+
+  const resumed = parseParams("sessions.spawn", {
+    backend: "fake",
+    resumeSessionId: "provider-1",
+  }) as SpawnParams;
+  assert.equal(resumed.resumeSessionId, "provider-1");
+
+  const forked = parseParams("sessions.spawn", {
+    backend: "fake",
+    forkSessionId: "provider-1",
+  }) as SpawnParams;
+  assert.equal(forked.forkSessionId, "provider-1");
+
+  assert.throws(
+    () =>
+      parseParams("sessions.spawn", {
+        backend: "fake",
+        resumeSessionId: "provider-1",
+        forkSessionId: "provider-1",
+      }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
 });
 
 test("wait defaults to idle and validates the condition", () => {

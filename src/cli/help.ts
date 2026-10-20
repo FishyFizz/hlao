@@ -89,6 +89,8 @@ Exit codes: 0 ok · 1 error · 2 a bounded wait expired (work continues) ·
 
 Examples:
   hlao spawn claude "Audit the build log and report the first failure."
+  hlao spawn claude --resume 7f3c9a1e --cwd D:\work\svc   # reattach by provider id
+  hlao spawn claude --fork 7f3c9a1e --cwd D:\work\svc     # copy it, leave the source alone
   hlao send --self "Check the log again."     # deferred until this turn ends
   hlao read --since 42
   hlao wait --until permission --timeout 10m
@@ -199,13 +201,30 @@ Options:
                          (the skill file and $HLAO_SKILL are still present)
   --idempotency-key KEY  reuse the session produced by an earlier spawn with
                          the same key instead of spawning again
+  --resume PROVIDER_ID   reopen a provider session with ACP session/load
+                         instead of creating a new one. Pass the provider id
+                         an earlier spawn printed, and its original --cwd.
+  --fork PROVIDER_ID     copy a provider session with ACP session/fork into a
+                         new session. The source is untouched; the copy's
+                         history is replayed when the backend supports loading.
 
 A session can be addressed by id, id prefix, or name. In human mode --wait
 prints the new handle before it starts waiting, so a long first turn is
-observable. The spawn result includes the handle, label, policy, and cursor.
-The first message id is printed when a message is sent. Text passed as a
-positional or --prompt is visible in process listings and shell history; use
---stdin or --prompt-file for secrets.`,
+observable. The spawn result includes the handle, label, provider id, policy,
+and cursor. The first message id is printed when a message is sent. Text passed
+as a positional or --prompt is visible in process listings and shell history;
+use --stdin or --prompt-file for secrets.
+
+The HLAO id is an alias for this supervisor's lifetime. The provider id is the
+durable handle: --resume replays the provider's history into the new event log
+(those events carry replay: true), and the interrupted turn is not replayed, so
+re-issue the prompt. If a live session already holds that provider id, --resume
+returns that session instead of opening a second adapter.
+
+--fork creates a new provider session from a copy of the given one. The source
+keeps running unchanged; the fork gets its own provider id. --resume and --fork
+cannot be combined. A backend that does not advertise the ACP capability is
+refused rather than silently ignored.`,
     send: `hlao send [<id>] [message] [options]
 
 Queue a prompt. One turn runs at a time; a message sent while busy waits in a

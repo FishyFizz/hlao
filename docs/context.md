@@ -111,6 +111,9 @@ hlao down
 
 - Persistent per-user supervisor instead of re-attach per CLI call: ADR 0001.
 - Bounded in-memory event log instead of a durable transcript: ADR 0002.
+- Provider history is read, never authored. The provider session id is the durable handle;
+  `spawn --resume` reopens it with ACP `session/load`, and `spawn --fork` copies it with
+  `session/fork`: ADR 0011.
 - Identity generated before process start; ACP ids internal: ADR 0003.
 - Permission requests are orchestration state; the default policy is `allow`, with `ask`
   opt-in, `permit --always` for a live session, and provider modes exposed: ADR 0004.
@@ -121,7 +124,8 @@ hlao down
 No scheduler, DAG, workflow engine, global registry, SQLite/NATS, task table, HTTP API,
 MCP-only surface, provider subagent surfacing, client fs/terminal capabilities, cold-host
 lineage reconstruction, or durable event store. Each absence is a constraint from
-`PRODUCT.md`, not an unfinished feature.
+`PRODUCT.md`, not an unfinished feature. Provider history is not absent: it lives in the
+provider, and `spawn --resume` reads it through ACP `session/load` (ADR 0011).
 
 ## Known limitations and edges
 

@@ -354,6 +354,15 @@ export function renderSessionState(
     style.dim(`config   ${config}`),
     style.dim(`usage    ${usage}`),
     style.dim(`lineage  ${lineage}`),
+    ...(session.forkedFrom
+      ? [style.dim(`forked   ${oneLine(session.forkedFrom)}`)]
+      : []),
+    style.dim(
+      `provider ${session.agentSessionId ? oneLine(session.agentSessionId) : "—"}` +
+        (session.agentSessionId
+          ? ` · resume with: ${commandPrefix} spawn ${session.backend} --resume ${session.agentSessionId} --cwd ${oneLine(session.cwd)}`
+          : ""),
+    ),
     style.dim(`pending  ${pending}`),
     style.dim(
       `exit     ${exit}${session.endedAt ? ` · ended ${formatAge(session.endedAt)}` : ""}`,
@@ -562,9 +571,22 @@ export function renderEvents(
     flushCompaction();
   };
 
+  let replayState = false;
   for (const event of events) {
     const data = event.data;
     const dayChanged = markDay(event.at);
+    const replay = event.replay === true;
+    if (replay !== replayState) {
+      flush();
+      lines.push(
+        style.dim(
+          replay
+            ? "— history restored from the provider —"
+            : "— live —",
+        ),
+      );
+      replayState = replay;
+    }
     switch (event.type) {
       case "agent.message": {
         flushThought();
@@ -792,6 +814,50 @@ export function renderEvents(
         lines.push(
           `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
             `session renamed · ${name}` + (by ? ` (by ${by})` : ""),
+          )}`,
+        );
+        break;
+      }
+      case "session.resumed": {
+        flush();
+        const id =
+          typeof data.agentSessionId === "string"
+            ? oneLine(data.agentSessionId)
+            : "provider session";
+        const count =
+          typeof data.historyEvents === "number" ? data.historyEvents : null;
+        const replayed =
+          count === null
+            ? ""
+            : ` · ${count} event${count === 1 ? "" : "s"} replayed`;
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `resumed ${id}${replayed}`,
+          )}`,
+        );
+        break;
+      }
+      case "session.forked": {
+        flush();
+        const id =
+          typeof data.agentSessionId === "string"
+            ? oneLine(data.agentSessionId)
+            : "provider session";
+        const from =
+          typeof data.forkedFrom === "string"
+            ? oneLine(data.forkedFrom)
+            : "provider session";
+        const count =
+          typeof data.historyEvents === "number" ? data.historyEvents : null;
+        const outcome =
+          data.historyLoaded === false
+            ? " · history not replayed"
+            : count === null
+              ? ""
+              : ` · ${count} event${count === 1 ? "" : "s"} replayed`;
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `forked ${id} from ${from}${outcome}`,
           )}`,
         );
         break;

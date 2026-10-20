@@ -5,6 +5,8 @@ export interface EventInput {
   type: EventType;
   turn?: number | null;
   data?: Record<string, unknown>;
+  /** Mark an event reconstructed by ACP `session/load`, not observed live. */
+  replay?: boolean;
 }
 
 export interface EventReadOptions {
@@ -85,6 +87,7 @@ export class EventLog {
       turn: input.turn ?? null,
       data: bounded,
       bytes: 0,
+      ...(input.replay === true ? { replay: true as const } : {}),
     };
     event.bytes = serializedSize(event);
     this.#events.push(event);
@@ -295,7 +298,14 @@ export class EventLog {
 
 function toView(event: StoredEvent, includeRaw: boolean): EventView {
   const data = includeRaw ? event.data : stripPrivateData(event.data);
-  return { seq: event.seq, at: event.at, type: event.type, turn: event.turn, data };
+  return {
+    seq: event.seq,
+    at: event.at,
+    type: event.type,
+    turn: event.turn,
+    data,
+    ...(event.replay === true ? { replay: true as const } : {}),
+  };
 }
 
 /**

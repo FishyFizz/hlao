@@ -35,8 +35,8 @@ test("package, lock, CLI, skill, and changelog versions agree", async () => {
   assert.match(read("CHANGELOG.md"), new RegExp(`^## ${pkg.version} —`, "m"));
 });
 
-test("the wire is 2.6 with the provider-state and elicitation capabilities", () => {
-  assert.deepEqual(WIRE_PROTOCOL_VERSION, { major: 2, minor: 6 });
+test("the wire is 2.7 with provider-state, elicitation, and resume capabilities", () => {
+  assert.deepEqual(WIRE_PROTOCOL_VERSION, { major: 2, minor: 7 });
   const capabilities = PROTOCOL_CAPABILITIES as readonly string[];
   for (const capability of [
     "session.compaction",
@@ -46,6 +46,8 @@ test("the wire is 2.6 with the provider-state and elicitation capabilities", () 
     "session.agent",
     "session.messages",
     "session.elicitation",
+    "spawn.resume",
+    "spawn.fork",
   ]) {
     assert.ok(capabilities.includes(capability), capability);
   }

@@ -179,6 +179,11 @@ class SupervisorServer {
   >();
   /** In-flight spawns by idempotency key, so concurrent retries share one spawn. */
   #pendingSpawns = new Map<string, Promise<SpawnResult>>();
+  /**
+   * In-flight resumes by provider session id. A live-table lookup alone is not
+   * enough: two concurrent resumes can both miss it before either registers.
+   */
+  #pendingResumes = new Map<string, Promise<SpawnResult>>();
   #spawnIdleResolvers: (() => void)[] = [];
   #shutdownAfterResponse: { force: boolean } | null = null;
   #stoppedPromise: Promise<void>;
@@ -665,14 +670,33 @@ class SupervisorServer {
       }
     }
 
+    const resumeKey =
+      params.resumeSessionId !== undefined
+        ? `${params.backend}\u0000${params.resumeSessionId}`
+        : undefined;
+    if (resumeKey !== undefined) {
+      const pending = this.#pendingResumes.get(resumeKey);
+      if (pending !== undefined) {
+        try {
+          return { ...(await pending), duplicate: true };
+        } catch {
+          // The original attempt failed; this caller may try again.
+        }
+      }
+    }
+
     this.#inflightSpawns += 1;
     const work = this.#spawnInner(params, caller);
     if (key !== undefined) this.#pendingSpawns.set(key, work);
+    if (resumeKey !== undefined) this.#pendingResumes.set(resumeKey, work);
     try {
       return await work;
     } finally {
       if (key !== undefined && this.#pendingSpawns.get(key) === work) {
         this.#pendingSpawns.delete(key);
+      }
+      if (resumeKey !== undefined && this.#pendingResumes.get(resumeKey) === work) {
+        this.#pendingResumes.delete(resumeKey);
       }
       this.#inflightSpawns -= 1;
       if (this.#inflightSpawns === 0) {
@@ -728,6 +752,26 @@ class SupervisorServer {
       );
     }
 
+    // Reattaching by provider id is idempotent while this supervisor is alive:
+    // two adapters must never drive the same provider transcript. This is a
+    // lookup in the live table, not a store.
+    if (params.resumeSessionId !== undefined) {
+      const attached = [...this.#sessions.values()].find(
+        (candidate) =>
+          !candidate.isTerminal &&
+          candidate.view().agentSessionId === params.resumeSessionId,
+      );
+      if (attached !== undefined) {
+        if (attached.backend !== backend.name) {
+          throw new HlaoError(
+            "bad_request",
+            `provider session ${params.resumeSessionId} is attached to ${attached.id} on backend ${attached.backend}, not ${backend.name}`,
+          );
+        }
+        return { ...this.#duplicateSpawn(attached, null), resumed: true };
+      }
+    }
+
     let parent: Session | null = null;
     if (params.parentSessionId !== undefined) {
       parent = this.#resolve(params.parentSessionId);
@@ -772,6 +816,12 @@ class SupervisorServer {
       skill: params.skill ?? true,
       skillPath: homeSkillPath(this.#home),
       skillVersion: SKILL_VERSION,
+      ...(params.resumeSessionId !== undefined
+        ? { resumeSessionId: params.resumeSessionId }
+        : {}),
+      ...(params.forkSessionId !== undefined
+        ? { forkSessionId: params.forkSessionId }
+        : {}),
       log: (line) => this.#logger.info(line),
     });
 
@@ -825,6 +875,8 @@ class SupervisorServer {
       session: session.view(),
       nextSeq: 0,
       createdBy: actor(caller),
+      ...(params.resumeSessionId !== undefined ? { resumed: true } : {}),
+      ...(params.forkSessionId !== undefined ? { forked: true } : {}),
     };
 
     if (params.prompt !== undefined) {

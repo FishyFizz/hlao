@@ -11,6 +11,7 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--config KEY=VALUE]... [--parent SESSION]
                 [--permission allow|ask|deny] [--env K=V]...
                 [--no-skill] [--idempotency-key KEY]
+                [--resume PROVIDER_ID | --fork PROVIDER_ID]
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR] [--idempotency-key KEY]
 hlao read [<id>] [--self] [--since N | --before N] [--limit N]
@@ -199,6 +200,21 @@ instead of waiting. In human mode the header is printed once and later pages con
 events; in JSON mode each complete `ReadResult` is emitted on its own line (NDJSON). Closing
 the CLI aborts the pending wait; nothing else is cancelled.
 
+`spawn --resume PROVIDER_ID` reopens the provider session an earlier spawn reported
+(`SessionView.agentSessionId`, printed as `provider …`). It calls ACP `session/load` instead
+of `session/new`; replayed events carry `replay: true`, and `session.resumed` records the
+range. Pass the original `--cwd` so the provider continues one transcript. The interrupted
+turn is not replayed: re-issue the prompt. If a live session already holds that provider id,
+`spawn --resume` returns it (`duplicate: true`, `resumed: true`) rather than opening a second
+adapter. A backend without `loadSession` fails with `spawn_failed` and does not start.
+
+`spawn --fork PROVIDER_ID` copies the provider session with ACP `session/fork` into a new
+session. The source keeps its id and is not modified. When the backend also supports
+`loadSession`, the copy's history is replayed with `replay: true`; otherwise the copy still
+has the provider context but the client sees no history, and `session.forked` reports
+`historyLoaded: false`. `--fork` and `--resume` cannot be combined, and a backend without
+`session/fork` fails with `spawn_failed`.
+
 `spawn --wait` in human mode is assembled in two calls: `sessions.spawn` without the prompt
 (so the handle is printed immediately), then `sessions.send` with `wait: true`. JSON mode keeps
 the single `sessions.spawn` call and its `firstTurn` result. A long human wait on `spawn
@@ -294,7 +310,11 @@ There are no ANSI escapes when stdout is not a TTY, when `NO_COLOR` is set, or u
 
 ## Human rendering guarantees
 
-- `spawn` prints the handle and a ready-to-run `read` cursor command.
+- `spawn` prints the handle, the durable provider id (`provider …`), the fork source
+  (`forked from …`) when present, and a ready-to-run `read` cursor command.
+- `read` marks events restored by `session/load` with a `— history restored from the
+  provider —` boundary and a `— live —` boundary when observation resumes, and renders
+  `session.resumed`/`session.forked` with the provider id and replay count.
 - `read` coalesces streamed message chunks into one block until the adapter's message id
   changes. Cursors show `HH:MM:SS`; `--timestamps` shows the full ISO time. Adapter stderr and
   command-list churn are hidden in human mode unless `--raw`; they are always present in the

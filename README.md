@@ -21,7 +21,7 @@ claude  builtin  yes    —                         …\dist\index.js           
 codex   builtin  yes    —                         …\dist\index.js             OpenAI Codex through the ACP adapter
 
 $ hlao spawn claude "Audit the build log at build.log and report the first failure." --wait
-spawned k7m2qp (claude) in D:\work\svc
+spawned k7m2qp (claude) in D:\work\svc  provider 4f2a9c1e  policy allow
 — turn 1 ended: end_turn —
 next: hlao read k7m2qp --since 0
 
@@ -47,7 +47,7 @@ $ hlao rename k7m2qp builder
 renamed builder (k7m2qp)
 
 $ hlao spawn claude "Check whether the retry package is declared in package.json." --name check
-spawned check (3f9xw2) (claude) in D:\work\svc  parent k7m2qp  policy allow
+spawned check (3f9xw2) (claude) in D:\work\svc  provider 7b31de02  parent k7m2qp  policy allow
 
 Every session in an HLAO instance is addressable by every caller. An agent can `send` to,
 read, wait on, cancel, or close its parent, a sibling, or an unrelated session; `parentId` is
@@ -86,7 +86,7 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 
 | Command | What it does |
 |---|---|
-| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn. |
+| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn; `--resume PROVIDER_ID` reopens the provider session an earlier spawn reported, replaying its durable history through ACP `session/load`; `--fork PROVIDER_ID` copies it through ACP `session/fork` and leaves the source untouched. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
 | `hlao export <id> [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. |
@@ -372,9 +372,21 @@ operator / agent shell
   on Windows), so `down` is the supported shutdown path. The design accepts this to avoid a
   second authority over "which sessions exist".
 - **Identity is generated before the process starts** and injected into its environment, so
-  every leaf tool sees it from birth. ACP's own session id is internal.
+  every leaf tool sees it from birth. The HLAO id is an alias for this supervisor's lifetime;
+  ACP's own session id is the durable provider handle, reported as
+  `SessionView.agentSessionId`.
 - **Reads are cursor-addressed and bounded.** The event log is retained by count and bytes.
   Evictions are reported with `truncated`, never silent.
+- **Provider history stays reachable.** The bounded log is a projection, not the transcript.
+  `spawn --resume <provider id>` reopens the provider session with ACP `session/load`, which
+  replays the durable history into the new log with `replay: true` on each event. An agent
+  that spawned a session keeps the provider id from its spawn result and uses it to pull the
+  interrupted agent back up after a supervisor restart. The interrupted turn itself is not
+  replayed; re-issue the prompt as a human would after resuming.
+- **A fork is a copy, not a branch of HLAO state.** `spawn --fork <provider id>` copies the
+  provider session with ACP `session/fork`; the source keeps running and keeps its id. When
+  the backend can also load, the copy's history is replayed into the new log. Nothing about
+  the fork is recorded in the source session.
 - **A session runs one turn at a time.** Messages queue visibly. `cancel` clears the queue as
   well as stopping the active turn.
 - **Permissions are state.** `waiting_permission` appears in `list`, `read`, and

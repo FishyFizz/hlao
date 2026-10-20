@@ -27,6 +27,8 @@ export type WaitUntil = "idle" | "settled" | "permission" | "exit" | "change";
 export const EVENT_TYPES = [
   "session.created",
   "session.initialized",
+  "session.resumed",
+  "session.forked",
   "session.closed",
   "session.failed",
   "session.renamed",
@@ -186,7 +188,19 @@ export interface SessionView {
   /** A provider question awaiting an operator answer (2.6). */
   pendingElicitation?: ElicitationView | null;
   lastStopReason: StopReason | null;
+  /**
+   * The provider's durable session id, or null before the ACP session exists.
+   * This is the handle a human would pass to the provider's own resume command
+   * (for example `claude --resume`). Pass it to `spawn.resumeSessionId` to
+   * reattach after a supervisor restart. The HLAO session id, by contrast, is
+   * an alias that lives only as long as this supervisor process. (2.7)
+   */
   agentSessionId: string | null;
+  /**
+   * The provider session this one was forked from, when `spawn.forkSessionId`
+   * created it. Null for every other session. (2.7)
+   */
+  forkedFrom?: string | null;
   processId: number | null;
   exit: { code: number | null; signal: string | null } | null;
   permissionPolicy: PermissionPolicy;
@@ -211,6 +225,12 @@ export interface EventView {
   type: EventType;
   turn: number | null;
   data: Record<string, unknown>;
+  /**
+   * True when the event was reconstructed by ACP `session/load` rather than
+   * observed live. Consumers should not count replayed history as new activity.
+   * (2.7)
+   */
+  replay?: true;
 }
 
 export interface AgentView {
@@ -383,6 +403,21 @@ export interface SpawnParams {
   skill?: boolean;
   /** Dedupe key for a retrying spawn (1h in the supervisor). */
   idempotencyKey?: string;
+  /**
+   * A provider session id from an earlier spawn. When set, the session is
+   * reopened with ACP `session/load` instead of created with `session/new`;
+   * the provider replays its durable history into the new event log. If a
+   * live session already holds this provider id, that session is returned.
+   * (2.7)
+   */
+  resumeSessionId?: string;
+  /**
+   * A provider session id to fork with ACP `session/fork`. A new provider
+   * session is created from a copy of that conversation, and its history is
+   * replayed through `session/load` when the backend supports it. Unlike
+   * `resumeSessionId`, the source session is never modified. (2.7)
+   */
+  forkSessionId?: string;
 }
 export interface FirstTurnResult {
   stopReason?: StopReason;
@@ -402,6 +437,10 @@ export interface SpawnResult {
   messageId?: string;
   /** True when the idempotency key matched an existing session. */
   duplicate?: boolean;
+  /** True when this spawn reopened a provider session with `session/load`. (2.7) */
+  resumed?: boolean;
+  /** True when this spawn created a provider session with `session/fork`. (2.7) */
+  forked?: boolean;
   createdBy?: string;
 }
 export interface ListParams {

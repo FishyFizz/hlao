@@ -229,12 +229,14 @@ the guarantee that a request cannot silently hang.
 | Supervisor exits gracefully | all child sessions end; lock and socket are removed |
 | Supervisor is killed hard | the session table is gone; adapter processes can survive on Windows; `down --force` removes an unverified stale lock without killing its pid |
 | Stale lock after a crash | next command detects a dead pid, removes the lock, autostarts |
-| Event log evicts unread events | `read` reports `truncated: true` and the earliest retained sequence |
+| Event log evicts unread events | `read` reports `truncated: true` and the earliest retained sequence; the provider's transcript is still reachable with `spawn --resume <provider id>` (ADR 0011) |
 
 ## What is deliberately absent
 
 - No job object, workflow graph, scheduler, DAG, task table, or global registry.
-- No durable event store or transcript authority.
+- No durable event store or transcript authority. The provider owns the transcript;
+  `spawn --resume` reads it with ACP `session/load`, and `spawn --fork` copies it with
+  `session/fork` (ADR 0011).
 - No cold-host lineage reconstruction; the tree is the live handles.
 - No provider-internal subagent surfacing: `clientCapabilities.subagents` is never
   advertised, so provider subagents stay inside the leaf.
@@ -249,3 +251,6 @@ the guarantee that a request cannot silently hang.
 - `0003-lineage-at-spawn.md` — identity is generated before process start and injected.
 - `0004-permissions-are-orchestration-state.md` — ask/allow/deny and `permit`.
 - `0005-prompt-queue-and-cancel.md` — serialized turns; cancel clears the queue.
+- `0011-provider-session-resume.md` — the provider session id is the durable handle;
+  `spawn --resume` reads the provider's transcript through ACP `session/load`, and
+  `spawn --fork` copies it through `session/fork`.

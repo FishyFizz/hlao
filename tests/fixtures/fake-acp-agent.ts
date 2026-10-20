@@ -16,11 +16,15 @@ import type {
 } from "@agentclientprotocol/sdk";
 
 const mode = process.env.FAKE_MODE ?? "echo";
+const loadEnabled = process.env.FAKE_LOAD_SESSION === "1";
+const forkEnabled = process.env.FAKE_FORK_SESSION === "1";
+const resumeHistory = (process.env.FAKE_RESUME_HISTORY ?? "restored user prompt\nrestored first reply\nrestored second reply").split("\n");
 const delayMs = Number(process.env.FAKE_DELAY_MS ?? 5_000);
 const counterFile = process.env.FAKE_COUNTER_FILE;
 const doneAt = Number(process.env.FAKE_DONE_AT ?? 2);
 
 let nextSession = 0;
+let nextFork = 0;
 let cancelActive: (() => void) | null = null;
 let currentMode = "default";
 let promptCount = 0;
@@ -74,13 +78,56 @@ const app = agent({ name: "fake-acp" })
     return {
       protocolVersion: params.protocolVersion,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: loadEnabled,
         sessionCapabilities: {
           close: {},
           list: {},
+          ...(loadEnabled ? { resume: {} } : {}),
+          ...(forkEnabled ? { fork: {} } : {}),
         },
       },
       agentInfo: { name: "fake-acp", version: "1.0.0" },
+    };
+  })
+  .onRequest("session/fork", ({ params }) => {
+    if (!forkEnabled) {
+      throw new Error("session/fork is not advertised");
+    }
+    nextFork += 1;
+    return {
+      sessionId: `${params.sessionId}-fork-${nextFork}`,
+      modes: {
+        currentModeId: currentMode,
+        availableModes,
+      },
+      configOptions: configOptions() as never,
+    };
+  })
+  .onRequest("session/load", async ({ params, client }) => {
+    if (!loadEnabled) {
+      throw new Error("loadSession is not advertised");
+    }
+    if (!params.sessionId.startsWith("fake-")) {
+      throw new Error(`unknown session ${params.sessionId}`);
+    }
+    let index = 0;
+    for (const text of resumeHistory) {
+      index += 1;
+      await client.notify("session/update", {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: index === 1 ? "user_message_chunk" : "agent_message_chunk",
+          content: { type: "text", text },
+          messageId: "restored-history",
+        } as never,
+      });
+    }
+    return {
+      modes: {
+        currentModeId: currentMode,
+        availableModes,
+      },
+      configOptions: configOptions() as never,
     };
   })
   .onRequest("session/new", ({ params }) => {

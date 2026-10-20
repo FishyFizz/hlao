@@ -1,11 +1,11 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-20 after milestone 0.11. The additive 0.10 review was merged here and
+**Updated:** 2026-10-21 after milestone 0.12. The additive 0.10 review was merged here and
 deleted after its resolved findings were removed.
 **Scope:** unresolved findings only. This is the long-standing ledger. The 0.1–0.4 review, the
 0.5 review, and the 0.10 review were merged here; resolved items were removed. Shipped fixes
-are described in `docs/milestones/0.2.md` through `docs/milestones/0.10.md` and ADR 0005–0010.
+are described in `docs/milestones/0.2.md` through `docs/milestones/0.12.md` and ADR 0005–0011.
 
 The substrate is unchanged: five primitives, a per-user supervisor, a bounded cursor-addressed
 event log, identity at spawn, and one-shot waits. The gaps below are affordances around those
@@ -15,8 +15,9 @@ must be added to the wire deliberately. 0.6 added framed transport adapters and 
 streams (protocol 2.1); 0.7 added settled waits, change filters, session activity, and an
 optional JSON envelope (protocol 2.2); 0.8 added message identity, the skill at birth,
 provenance, and process groups (protocol 2.3); 0.9 was maintenance with no behavior or wire
-change; 0.10 finished the truth pass and added crash/injection metadata (protocol 2.4). None of
-that changes the primitive set.
+change; 0.10 finished the truth pass and added crash/injection metadata (protocol 2.4); 0.11
+added provider-native state and elicitation (protocol 2.5/2.6); 0.12 added provider session
+resume and fork (protocol 2.7). None of that changes the primitive set.
 
 0.8 resolved N-07, N-12, N-14, the spawn requester record (part of N-08), P2-36, P2-0.5-26,
 P2-53, P2-0.5-3, P2-0.5-14, and P2-0.5-22. Attachments and `--context`/`--ledger` (N-13) are
@@ -31,35 +32,18 @@ R-30 polish, the documentation half of R-14, and P2-0.5-18. Those entries were r
 
 0.11 resolved provider-native state: compaction and notices (R-10), plans and titles (R-11),
 ACP session messages and user-message chunks (R-12), and the residual agent identity (R-13).
-Those sections were removed; the wire is now 2.5. `docs/protocol-stability.md` records the
-dashboard readiness assessment. R-14's mechanism and every other open finding are below.
+0.12 resolved provider session continuity: resume (P0-14) and fork (R-19) through ACP
+`session/load` and `session/fork`, the provider session id as a durable handle, replay
+provenance, and the dashboard client update. Those entries were removed; the wire is now 2.7.
+The design also raised new concerns (RF-01 through RF-08 below), which remain open. R-14's
+mechanism and every other open finding are below.
 
 ---
 
 ## P0 — remaining
 
-### P0-14. No resume after an adapter crash `[design tradeoff]`
-
-**Expect:** after an adapter crash or supervisor restart, either resume the session or have a
-documented recovery path; at minimum, the loss is signalled.
-
-**Current (0.10):** a failed session is terminal. `read` retains it for `retainClosedMs` (one
-hour), `hlao export <id>` pages the full retained history, and `down` warns about live and
-retained histories and supports `--dry-run`. A supervisor crash is now signalled: `lastCrash`
-in `hello`, `status`, and `doctor`, plus a warning from the next autostarting command, names the
-previous pid and states that its live table and retained history were lost. There is still no
-`hlao resume` and no ACP `session/load`/`resume` path, so a long job cannot continue after its
-adapter process dies.
-
-**Why it matters:** long jobs can lose hours of context. ADR 0002 deliberately rejects a
-durable transcript; this is a warm-host recovery gap, not a request for a store.
-
-**Smallest useful fix:** `hlao resume <id>` using ACP `session/load`/`resume` when the adapter
-advertises it: spawn a new adapter process, load the provider session, keep the same HLAO
-handle, and continue the event log with a `session.resumed` event. Warm-host only; the live
-table still owns identity.
-
-**Effort:** L.
+None. P0-14 (resume after an adapter crash) shipped in 0.12 as `spawn --resume`; RF-01 below
+covers the orphaned-adapter hazard that remains after a hard kill.
 
 ---
 
@@ -189,7 +173,6 @@ complements P2-0.5-9.
 |---|---|---|---|
 | Interrupt-and-send | Replace a running turn with a new instruction | Manual `cancel` + `send` | `send --interrupt` assembly |
 | Per-turn timeout | Stop a hung turn | `--timeout` bounds the wait, not the turn | Documented cancel assembly, or `--turn-timeout` with product sign-off |
-| Resume | Recover a crashed session | None (see P0-14) | ACP load/resume, warm-host only |
 
 ### Operations and configuration
 
@@ -224,11 +207,149 @@ complements P2-0.5-9.
 
 ---
 
+## Concerns raised by the 0.12 resume/fork design
+
+These did not exist before the provider session became the recovery authority. They are not
+regressions in the shipped surface; they are the decisions and hazards 0.12 deferred. The
+`RF-` IDs are new and do not reuse old numbers.
+
+### RF-01. A hard-killed supervisor can orphan adapters that still own the transcript `[correctness]`
+
+**Current:** while a supervisor is alive, a live-table lookup and an in-flight resume map keep
+two adapters off one provider session. After a hard kill neither exists. `docs/context.md`
+already notes that adapter processes can survive, especially on Windows; a resumed or forked
+session can then start a second writer against the same transcript.
+
+**Why it matters:** resume makes the provider transcript the recovery authority. Double-driving
+it can corrupt conversation state, not merely duplicate events.
+
+**Fix shape:** on attach, detect a surviving orphan for the provider id and refuse with a clear
+error; or make `down --force` reap adapter children (which needs the supervisor to record their
+pids somewhere crash-visible). Do not add a durable lease unless the simple check proves
+insufficient. Document the Windows behavior.
+
+**Effort:** S/M.
+
+### RF-02. Replay can immediately re-evict the fresh log
+
+**Current:** replay goes through the same bounded `EventLog` (5,000 events / 16 MiB default). A
+provider history larger than that produces a resumed or forked session that reports `truncated`
+again immediately, with the earliest replayed content absent from the client view even though
+the provider still holds it. The 0.12 e2e uses a three-event history, so this is untested.
+
+**Why it matters:** seeing the history is the point of resume. A replay that scrolls off the
+start looks like the recovery failed.
+
+**Fix shape:** decide whether replayed events belong in the live buffer at all. Options: a
+separate retained history store that does not count against the live cap; a larger per-session
+bound while replaying; or paginated provider reads instead of one replay. Whatever is chosen,
+`session.resumed.historyEvents` must remain honest when replay was itself evicted.
+
+**Effort:** M.
+
+### RF-03. A live session that evicted its buffer has no direct load path
+
+**Current:** resume reattaches (and returns the same live session when already attached); fork
+creates a copy. A live session whose log evicted can only reach its provider transcript by
+forking, which changes the session. A human in a TUI can scroll back in the same session.
+
+**Why it matters:** the parity rule is "what a human has, nothing less". Forking is a workaround
+with different semantics, not the same affordance.
+
+**Fix shape:** consider a `sessions.load`/`history` operation that calls ACP `session/load` on
+the live session and surfaces the replayed events as history. Decide how append-ordered `seq`
+and conversation order are reconciled, whether a separate history view is needed, and whether
+loading into a live session is safe across adapters. Until then, document that fork is the only
+live-session recovery path.
+
+**Effort:** M/L.
+
+### RF-04. Provider session enumeration/adoption is not exposed
+
+**Current:** the durable handle is carried by the spawner's own context. A client that did not
+spawn the session — a human opening the dashboard after a restart, or another agent — has no
+HLAO way to discover provider sessions. Both bundled adapters advertise `session/list`; HLAO
+exposes no verb.
+
+**Why it matters:** recovery currently assumes the spawner remembers. A human can run
+`claude --resume` and pick from a list; an HLAO client cannot.
+
+**Fix shape:** add a capability-gated provider-session list (`sessions.provider_list` or a
+`backends.sessions` passthrough) returning `{ sessionId, cwd, title, updatedAt }` for a cwd.
+Use it to adopt a session; keep the supervisor's live table as the instance-wide address space.
+
+**Effort:** S/M.
+
+### RF-05. Resume does not validate the cwd, so a transcript can split
+
+**Current:** `spawn --resume` takes `--cwd` and defaults to the process cwd. The adapter reads
+the transcript by provider id, but creates the resumed query in the given cwd, so a mismatch can
+make later writes land in a different project directory. Help says to pass the original cwd;
+nothing checks it.
+
+**Why it matters:** a split transcript makes the next resume/load ambiguous and breaks the
+one-file expectation.
+
+**Fix shape:** when `session/list` is available, look up the provider id's cwd and either
+default to it or refuse a mismatch. Otherwise warn loudly when the passed cwd differs from the
+cwd recorded in the original spawn result.
+
+**Effort:** S.
+
+### RF-06. Fork without load leaves the client with no history view
+
+**Current:** ACP `session/fork` copies the conversation but sends no replay. HLAO follows with
+`session/load` when available; if not, it emits `session.forked` with `historyLoaded: false`
+and the client sees only the structural events. The forked agent has context; the client does
+not.
+
+**Why it matters:** a fork that looks empty is indistinguishable from a failed fork unless the
+client reads `historyLoaded`.
+
+**Fix shape:** decide whether fork should require `loadSession` (refuse otherwise) or keep the
+honest partial state. Make the dashboard render `historyLoaded: false` as a distinct notice.
+Add a capability test for a fork-only adapter.
+
+**Effort:** S.
+
+### RF-07. Fork lineage is provider-scoped, not navigable in HLAO
+
+**Current:** `forkedFrom` is the source provider id. The source HLAO session (when one exists)
+gains no event and no lineage edge; `parentId` remains the agent hierarchy. A dashboard cannot
+link a fork to its source session.
+
+**Why it matters:** operators read "forked from" as a navigable relation.
+
+**Fix shape:** map a live provider id to its HLAO session in the view (an optional
+`forkedFromSessionId`), or state plainly that the source is a provider conversation, not
+necessarily an HLAO session. Do not add a fork graph to lineage.
+
+**Effort:** S.
+
+### RF-08. Resume/fork fidelity is verified only against a fake adapter
+
+**Current:** the e2e tests use `tests/fixtures/fake-acp-agent.ts`, which advertises the
+capabilities and replays scripted messages. Real adapters differ in replay granularity, missing
+transcripts, permission/elicitation traffic during replay, large histories, and Codex's
+load/resume behavior. `loadSession: true` is a capability claim, not a fidelity guarantee.
+
+**Why it matters:** resume is now a documented recovery path; it should not be trusted on a
+boolean alone.
+
+**Fix shape:** add an opt-in real-adapter smoke for Claude and Codex that spawns, prompts,
+restarts, resumes, and forks, recording replay counts and divergences. Run it where credentials
+exist; otherwise document the manual procedure.
+
+**Effort:** M.
+
+---
+
 ## P2 — remaining polish and edge cases
 
 IDs beginning with `P2-0.5-` come from the 0.5 review; the other numbers preserve the original
-0.1–0.4 numbering. Items resolved in 0.7, 0.8, and 0.10 were removed. The R-xx items below are
-the unresolved remainder of the 0.10 review; their IDs are preserved for traceability.
+0.1–0.4 numbering. Items resolved in 0.7, 0.8, 0.10, 0.11, and 0.12 were removed. The R-xx
+items below are the unresolved remainder of the 0.10 review; their IDs are preserved for
+traceability.
 
 - **P2-2 — String options can still swallow a following flag.** Path, number, and duration
   options are strict, but e.g. `spawn --name --json` accepts `--json` as the name. Reject
@@ -285,8 +406,6 @@ the unresolved remainder of the 0.10 review; their IDs are preserved for traceab
 - **P2-0.5-24 — Help topics are incomplete.** Unknown-command suggestions landed in 0.10, but
   `hlao help version` is still unknown, `-h` before a command prints full help rather than that
   command's, and `-a`, `-n`, `-f` are undocumented.
-- **P2-0.5-27 — No interactive surface.** The wire is ready for a dashboard or TUI (2.1 adds
-  persistent streams). Build one client before adding more core features.
 
 ### From the 0.10 review
 
@@ -295,7 +414,6 @@ the unresolved remainder of the 0.10 review; their IDs are preserved for traceab
 | R-16 | Project config is not discovered from subdirectories | `projectBackendsPath(cwd)` joins the effective cwd with `.hlao/agents.json`; from `<proj>/sub` neither `agents` nor `spawn --cwd .` finds the root config | Walk up to the first `.hlao/agents.json` (optionally stop at `.git`), document precedence, add `--no-project-config` | S/M |
 | R-17 | No time-range filtering or regex search | `read --since N` is a sequence cursor; `--grep` is a literal; no `--after`/`--before` time, `--regex`, or `--context` | Add time/duration filters over `event.at`, opt-in `--regex`, context lines, and the same flags on `find` | S/M |
 | R-18 | No instance-wide export/backup, though `down` discards everything | `export` takes one session; `down --dry-run` cannot save | `export --all --out DIR` with a manifest, and/or `down --export DIR`; report per-session failures and truncation | S/M |
-| R-19 | No fork/branch primitive | No `fork`; ACP `loadSession` is recorded but unused; resume is separate | Only call it `fork` if ACP load truly branches; otherwise `spawn --from` with a transcript reference and copied policy/mode/config | M/L |
 | R-20 | Queue pause/reorder is absent; cancel is destructive without a dry-run | `queue` lists and drops only; plain `cancel` discards the backlog; bulk cancel prints a count only | `queue hold`/`resume`/`move` (may need a small wire addition); `cancel --dry-run` and per-target output; print dropped previews | M for queue; S for dry-run |
 | R-21 | Tables do not adapt to terminal width | `list --wide --usage` produces a 237-character line; `agents` 198; no `process.stdout.columns` handling | Drop/shorten CWD, middle-truncate, add `--no-cwd`/`--fields`; width-aware by default in a TTY, full width otherwise | S/M |
 | R-22 | JSON is full-fidelity and pretty, so list/watch payloads scale badly | `list --json` is ~2 KB/session because every view carries `modes` and `configOptions`; `--watch --json` repeats it every interval | Add `--fields` and compact JSON; omit static options from list items; let watch emit changed fields; keep full view explicit | S/M |
@@ -303,7 +421,7 @@ the unresolved remainder of the 0.10 review; their IDs are preserved for traceab
 | R-24 | Retained closed sessions poison friendly names | A retained closed `echo1` and a new `echo1` make `read echo1` ambiguous for `retainClosedMs`; the error suggests neither the live id nor `--forget` | Prefer a live match, release the name at close, or block duplicate creation with a remedy; add the remedy to the error | S |
 | R-25 | `find` output is raw JSON, truncated without an ellipsis, and lacks context | Preview is `JSON.stringify(data).slice(0, 140)`, no session name/timestamp/context; "scan capped" conflates `--max` with the 20-page cap | Render a centered one-line snippet with `…`, name/id, time, and event title; add `--context`; separate the cap reasons; reuse R-17 filters | S |
 | R-27 | `option <id> <key>` cannot read one option | `option <id>` lists all and `<key> <value>` sets, but `<key>` alone errors | Allow reading one option's value and metadata; update help | S |
-| R-29 | No auto-name/title | `SessionView` has no title; provider `session_info_update` is only an event; no first-prompt fallback | Keep operator names authoritative; use provider title or a truncated first-prompt preview as a display-only fallback | S/M |
+| R-29 | No first-prompt display fallback | Provider titles land in `SessionView.title` (0.11) and `list`/`get` use them, but a session whose provider reports no title still shows the bare handle | Keep operator names authoritative; add a truncated first-prompt preview as a display-only fallback | S |
 | R-30 | Residual polish | `hlao logs` collides with session transcript naming; no `--color=always`; bidi controls are stripped (RTL tradeoff) | Add a `logs <id>` alias or document the distinction; add `--color auto\|always\|never`; document/soften the bidi tradeoff | S |
 
 ---
@@ -318,15 +436,21 @@ The remaining work is grouped so each milestone has one design decision:
    here. See `docs/milestones/0.10.md`.
 4. **0.11 — provider-native state.** Shipped; resolved R-10..R-13 (compaction, notices, plans,
    titles, agent identity, and ACP session messages). See `docs/milestones/0.11.md`.
-5. **0.12 — fleet observation and bulk operations.** R-15, R-17, R-18, R-21, R-22, R-23, R-25,
+5. **0.12 — provider session continuity.** Shipped; resolved P0-14 and R-19 (resume/fork, the
+   durable provider handle, and replay provenance; wire 2.7). See
+   `docs/milestones/0.12.md`.
+6. **0.13 — fleet observation and bulk operations.** R-15, R-17, R-18, R-21, R-22, R-23, R-25,
    R-29.
-6. **Safety and policy.** N-08 enforcement, N-10, N-11, and R-14's mechanism. This may move
-   ahead of 0.12 if risk dominates.
-7. **Ergonomics and control tail.** R-16, R-19, R-20, R-24, R-27, and the remaining P2 items.
-8. **Resume.** P0-14 on its own; it needs ACP `session/load`/`resume` and a recovery contract.
-9. **Surfaces.** Dashboard/TUI/MCP over the 2.1 persistent streams, plus the 0.6 transport
-   policy work (opt-in loopback TCP, TLS/credential rules, WebSocket adapter).
-10. **1.0 — contract freeze.** Decide whether `--json=envelope` becomes the default, align the
+7. **Safety and policy.** N-08 enforcement, N-10, N-11, R-14's mechanism, and RF-01 (orphan
+   safety). This may move ahead of 0.13 if risk dominates.
+8. **Provider continuity hardening.** RF-02 through RF-08: replay retention, live-session
+   history, provider enumeration, cwd validation, fork-without-load, fork navigation, and
+   real-adapter fidelity. Each is a recovery-semantics decision, not a new primitive.
+9. **Ergonomics and control tail.** R-16, R-20, R-24, R-27, and the remaining P2 items.
+10. **Surfaces.** The dashboard is now a working client; the remaining transport policy work
+    (opt-in loopback TCP, TLS/credential rules, WebSocket adapter) and any TUI/MCP surface sit
+    here.
+11. **1.0 — contract freeze.** Decide whether `--json=envelope` becomes the default, align the
     remaining inner JSON shapes, finish package/update metadata, and document the multi-instance
     ("project home") ergonomics.
 
@@ -340,7 +464,8 @@ the answer is recorded as an event.
 
 ## Note
 
-Everything above remains outside the implemented 0.11 surface. The implementation and its tests
+Everything above remains outside the implemented 0.12 surface. The implementation and its tests
 are described in `README.md`, `contracts/`, and `docs/milestones/0.2.md` through
-`docs/milestones/0.11.md`. 0.11 resolved provider-native state (R-10..R-13), then merged the
-0.10 review into this ledger and deleted `FEATURE-REVIEW-0.10.md`.
+`docs/milestones/0.12.md`. 0.12 resolved provider session continuity (P0-14 and R-19), then
+recorded the hazards it deferred as RF-01 through RF-08. 0.11 resolved provider-native state
+(R-10..R-13) and merged the 0.10 review into this ledger.

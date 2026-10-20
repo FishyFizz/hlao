@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.12.0 — unreleased
+
+### Added
+
+- Provider session resume. `spawn --resume <providerSessionId>` reattaches to the provider's
+  durable session through ACP `session/load` and replays its history into the new HLAO
+  session. This is the recovery path the architecture already assumed: the spawner keeps the
+  provider id from the spawn result in its own durable context, and after a supervisor restart
+  it pulls the interrupted agent back up. The interrupted turn is not replayed; re-issue the
+  prompt, as a human would after resuming.
+- The provider session id is now a first-class handle. `SpawnResult.session.agentSessionId`
+  is returned on every spawn and printed by human `spawn`; `get` shows it. It is the id a
+  human uses with `claude --resume`, not a diagnostic. The HLAO session id remains a
+  supervisor-lifetime alias.
+- Resuming a provider session that a live HLAO session already holds returns that session
+  (`duplicate: true`) instead of starting a second adapter against the same transcript.
+- Provider session fork. `spawn --fork <providerSessionId>` creates a new provider session
+  from an ACP `session/fork` copy of the given one. The source keeps running untouched. When
+  the backend also supports `session/load`, HLAO replays the copied history into the new
+  event log, so the fork shows what a human forking the session would see. A backend without
+  `session/fork` is refused with `spawn_failed`.
+- `SessionView.forkedFrom` records the source provider id; `session.forked` records the copy
+  with `historyLoaded` and the replayed seq range.
+- `session.resumed` records the provider id and the replayed seq range.
+- `EventView.replay` marks events reconstructed by `session/load`, so consumers do not count
+  restored history as new activity.
+- Protocol 2.7 (additive): capabilities `spawn.resume` and `spawn.fork`; new
+  `SpawnParams.resumeSessionId`/`forkSessionId`, `SpawnResult.resumed`/`forked`,
+  `SessionView.forkedFrom`, and `EventView.replay`; new event types `session.resumed` and
+  `session.forked`.
+
+### Changed
+
+- `agentSessionId` is documented and rendered as the durable provider handle. It was
+  previously described as "diagnostics only" and omitted from human output, which left a
+  resumed agent with no durable handle to hold in context.
+- Spawn help, README, and the protocol contract note that a faithful resume passes the
+  original `cwd`, because the adapter creates the resumed query in the cwd it is given.
+- Human `read` marks restored history with a boundary (`— history restored from the
+  provider —` / `— live —`) and renders `session.resumed`/`session.forked` with the provider
+  id and replay count. Human `spawn` prints the provider handle; `get` prints it with a
+  ready-to-run resume command.
+
+### Notes
+
+- The live event log is still bounded and in-memory by design (ADR 0002). Resume is how
+  earlier history is recovered; the log remains a projection of the provider, not a store.
+  A backend that does not advertise `loadSession` is refused with `spawn_failed` rather than
+  silently started with an empty conversation under the same id. Fork and resume cannot be
+  combined.
+
 ## 0.11.0 — unreleased
 
 ### Added

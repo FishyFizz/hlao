@@ -113,10 +113,13 @@ handling should be exercised against a slow/stalled consumer before it is truste
    do not build a second semantic protocol. The network transport policy (TLS, credentials,
    WebSocket) is not shipped; local IPC is the supported dashboard transport today.
 8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
-   `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`, and the 2.5
-   provider-state capabilities (`session.compaction`, `session.notices`, `session.plan`,
-   `session.title`, `session.agent`, `session.messages`). A missing capability means "render
-   the old view", not "fail the dashboard".
+   `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`,
+   `spawn.resume`, `spawn.fork`, and the 2.5 provider-state capabilities
+   (`session.compaction`,
+   `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`).
+   A missing capability means "render the old view", not "fail the dashboard". A dashboard
+   without `spawn.resume` must keep reporting evicted history as unrecoverable; one with it
+   can offer "open the provider transcript" instead.
 
 ## Known gaps and how to handle them now
 
