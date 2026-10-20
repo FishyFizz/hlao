@@ -21,13 +21,14 @@
  */
 import {
   closeQuietly,
+  configureExample,
   hlao,
   lastAgentText,
-  parseExampleArgs,
+  readAllEvents,
   requireOk,
 } from "./lib.mjs";
 
-const { options, positionals } = parseExampleArgs(process.argv.slice(2));
+const { options, positionals } = configureExample(process.argv.slice(2));
 const backend = options.backend ?? "claude";
 const goal =
   options.goal ?? (positionals.length > 0 ? positionals.join(" ") : "ship the feature");
@@ -39,31 +40,36 @@ console.log(`workflow · goal: ${goal}`);
 const scoutPrompt = `Assess whether this task is possible before anyone commits to it:
 ${goal}
 Reply with exactly "VERDICT: possible" or "VERDICT: impossible" and one reason.`;
-const scout = requireOk(
-  await hlao(["spawn", backend, scoutPrompt, "--wait", ...envArgs]),
-  "spawn scout",
-);
-const scoutId = scout.session.id;
-console.log(`scout ${scoutId}: ${scout.firstTurn?.text ?? "(no text)"}`);
 
-const verdict = scout.firstTurn?.text ?? "";
-if (/VERDICT:\s*impossible/i.test(verdict)) {
-  console.log("finding returned to the orchestrator: the plan stops here.");
-  await closeQuietly(scoutId);
-  process.exit(0);
-}
+let scoutId = null;
+let workerId = null;
+try {
+  const scout = requireOk(
+    await hlao(["spawn", backend, scoutPrompt, "--wait", ...envArgs]),
+    "spawn scout",
+  );
+  scoutId = scout.session.id;
+  console.log(`scout ${scoutId}: ${scout.firstTurn?.text ?? "(no text)"}`);
 
-const workerPrompt = `The task has been judged possible. Do it:
+  const verdict = scout.firstTurn?.text ?? "";
+  if (/VERDICT:\s*impossible/i.test(verdict)) {
+    console.log("finding returned to the orchestrator: the plan stops here.");
+  } else {
+    const workerPrompt = `The task has been judged possible. Do it:
 ${goal}
 Reply with a single line starting "RESULT:".`;
-const worker = requireOk(
-  await hlao(["spawn", backend, workerPrompt, "--wait", ...envArgs]),
-  "spawn worker",
-);
-const workerId = worker.session.id;
-const read = requireOk(await hlao(["read", workerId, "--since", "0"]), "read worker");
-console.log(`worker ${workerId}: ${lastAgentText(read)}`);
-
-await closeQuietly(workerId);
-await closeQuietly(scoutId);
-console.log("workflow complete");
+    const worker = requireOk(
+      await hlao(["spawn", backend, workerPrompt, "--wait", ...envArgs]),
+      "spawn worker",
+    );
+    workerId = worker.session.id;
+    const result =
+      (worker.firstTurn?.text ?? "").trim() ||
+      lastAgentText(await readAllEvents(workerId));
+    console.log(`worker ${workerId}: ${result}`);
+    console.log("workflow complete");
+  }
+} finally {
+  if (workerId !== null) await closeQuietly(workerId);
+  if (scoutId !== null) await closeQuietly(scoutId);
+}

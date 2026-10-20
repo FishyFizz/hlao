@@ -253,7 +253,7 @@ test("human list marks the caller and reports the instance", async (t) => {
     env: { HLAO_SESSION_ID: id },
   });
   assert.equal(listed.code, 0);
-  assert.match(listed.stdout, /instance · \d+ sessions?/);
+  assert.match(listed.stdout, /instance · \d+ live · \d+ retained/);
   assert.match(listed.stdout, /SELF/);
   const selfLine = listed.stdout
     .split("\n")
@@ -262,7 +262,7 @@ test("human list marks the caller and reports the instance", async (t) => {
   assert.match(selfLine, /listed/);
 
   const operator = await harness.run(["list"], { json: false });
-  assert.match(operator.stdout, /instance · \d+ sessions?/);
+  assert.match(operator.stdout, /instance · \d+ live · \d+ retained/);
   assert.doesNotMatch(operator.stdout, /SELF/);
 });
 

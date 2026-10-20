@@ -21,7 +21,7 @@ import {
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
-import { formatTokens, renderSessionTable } from "../render.js";
+import { renderSessionTable } from "../render.js";
 
 interface ListFilters {
   statuses?: string[];
@@ -84,11 +84,15 @@ export async function cmdList(args: string[]): Promise<number> {
     usage: booleanOption(parsed, "usage") === true,
     sort: sortOption ?? (ctx.json ? "created" : "activity"),
   };
+  const showClosed =
+    booleanOption(parsed, "all") === true ||
+    render.tree ||
+    (statuses?.includes("closed") ?? false);
   const cwd = resolveOptional(stringOption(parsed, "cwd"));
+  // Always fetch the full table so counts and --root resolution see retained
+  // sessions. What is displayed is decided locally.
   const params = {
-    includeClosed:
-      (booleanOption(parsed, "all") ?? false) ||
-      (statuses?.includes("closed") ?? false),
+    includeClosed: true,
     ...(cwd !== undefined ? { cwd } : {}),
   };
 
@@ -101,21 +105,39 @@ export async function cmdList(args: string[]): Promise<number> {
     if (interval < 250) {
       throw usageError("--interval must be at least 250ms");
     }
-    return await watchList(conn, ctx, params, filters, render, interval);
+    return await watchList(
+      conn,
+      ctx,
+      params,
+      filters,
+      render,
+      showClosed,
+      interval,
+    );
   }
 
   const result = await conn.request<ListResult>("sessions.list", params);
   const sessions = sortSessions(
-    filterSessions(result.sessions, filters),
+    applyDisplayFilter(filterSessions(result.sessions, filters), showClosed),
     render.sort,
     render.tree,
   );
+  const counts = instanceCounts(result.sessions);
   if (ctx.json) {
-    writeJson({ sessions });
+    writeJson({ sessions, counts });
     return 0;
   }
   if (sessions.length === 0) {
     printEmptyList(ctx, filters);
+    out(
+      listFooter(
+        result.sessions,
+        sessions,
+        ctx,
+        render.usage,
+        hasFilters(filters),
+      ),
+    );
     return 0;
   }
   out(
@@ -125,7 +147,15 @@ export async function cmdList(args: string[]): Promise<number> {
       usage: render.usage,
     }),
   );
-  out(listFooter(result, sessions.length, ctx, render.usage));
+  out(
+    listFooter(
+      result.sessions,
+      sessions,
+      ctx,
+      render.usage,
+      hasFilters(filters),
+    ),
+  );
   return 0;
 }
 
@@ -135,18 +165,21 @@ async function watchList(
   params: { includeClosed: boolean; cwd?: string },
   filters: ListFilters,
   render: ListRender,
+  showClosed: boolean,
   interval: number,
 ): Promise<number> {
   let first = true;
   for (;;) {
     const result = await conn.request<ListResult>("sessions.list", params);
     const sessions = sortSessions(
-      filterSessions(result.sessions, filters),
+      applyDisplayFilter(filterSessions(result.sessions, filters), showClosed),
       render.sort,
       render.tree,
     );
     if (ctx.json) {
-      process.stdout.write(`${JSON.stringify({ sessions })}\n`);
+      process.stdout.write(
+        `${JSON.stringify({ sessions, counts: instanceCounts(result.sessions) })}\n`,
+      );
     } else {
       if (!first) {
         if (process.stdout.isTTY === true) {
@@ -167,7 +200,15 @@ async function watchList(
           usage: render.usage,
         }),
       );
-      out(listFooter(result, sessions.length, ctx, render.usage));
+      out(
+        listFooter(
+          result.sessions,
+          sessions,
+          ctx,
+          render.usage,
+          hasFilters(filters),
+        ),
+      );
     }
     first = false;
     await sleepMs(interval);
@@ -311,37 +352,105 @@ function sortSessions(
   return sorted;
 }
 
+function isTerminal(session: SessionView): boolean {
+  return session.status === "closed" || session.status === "failed";
+}
+
+function displayStatus(session: SessionView): string {
+  return session.status === "idle" && session.queued > 0
+    ? "busy"
+    : session.status;
+}
+
+function applyDisplayFilter(
+  sessions: SessionView[],
+  showClosed: boolean,
+): SessionView[] {
+  return showClosed
+    ? sessions
+    : sessions.filter((session) => session.status !== "closed");
+}
+
+function hasFilters(filters: ListFilters): boolean {
+  return (
+    filters.statuses !== undefined ||
+    filters.backend !== undefined ||
+    filters.root !== undefined ||
+    filters.name !== undefined ||
+    filters.pending === true ||
+    filters.cwdPrefix !== undefined
+  );
+}
+
+function instanceCounts(sessions: SessionView[]): {
+  live: number;
+  retained: number;
+  total: number;
+} {
+  const live = sessions.filter((session) => !isTerminal(session)).length;
+  return { live, retained: sessions.length - live, total: sessions.length };
+}
+
+function statusSummary(sessions: SessionView[]): string {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    const status = displayStatus(session);
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  const order = [
+    "busy",
+    "waiting_permission",
+    "idle",
+    "starting",
+    "failed",
+    "closed",
+  ];
+  return order
+    .filter((status) => (counts.get(status) ?? 0) > 0)
+    .map((status) => `${counts.get(status)} ${status}`)
+    .join(" · ");
+}
+
 function listFooter(
-  result: ListResult,
-  visible: number,
+  all: SessionView[],
+  visible: SessionView[],
   ctx: CommandContext,
   usage: boolean,
+  filtered: boolean,
 ): string {
-  const instance = `instance · ${visible} session${visible === 1 ? "" : "s"}`;
-  const usageLine = usage ? usageSummary(result.sessions) : null;
-  return ctx.style.dim(usageLine ? `${instance} · ${usageLine}` : instance);
+  const counts = instanceCounts(all);
+  const parts = [
+    "instance",
+    `${counts.live} live`,
+    `${counts.retained} retained`,
+  ];
+  if (filtered) parts.push(`showing ${visible.length}`);
+  const summary = statusSummary(visible);
+  if (summary.length > 0) parts.push(summary);
+  const usageLine = usage ? usageSummary(all) : null;
+  if (usageLine !== null) parts.push(usageLine);
+  return ctx.style.dim(parts.join(" · "));
 }
 
 function usageSummary(sessions: SessionView[]): string {
   const reported = sessions.filter((session) => session.usage !== null);
-  if (reported.length === 0) return "usage: none reported";
-  let used = 0;
-  let size = 0;
+  if (reported.length === 0) return "cost: none reported";
   const costs = new Map<string, number>();
   for (const session of reported) {
-    used += session.usage!.used;
-    size += session.usage!.size;
     const cost = session.usage!.cost;
-    if (cost) costs.set(cost.currency, (costs.get(cost.currency) ?? 0) + cost.amount);
+    if (cost) {
+      costs.set(cost.currency, (costs.get(cost.currency) ?? 0) + cost.amount);
+    }
   }
+  // Tokens are per-session context-window snapshots, not additive usage.
   const costText =
     costs.size === 0
-      ? ""
-      : ` · ${[...costs.entries()]
+      ? "none reported"
+      : [...costs.entries()]
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([currency, amount]) => `${(amount / 100).toFixed(2)} ${currency}`)
-          .join(" + ")}`;
-  return `usage: ${formatTokens(used)}/${formatTokens(size)} tokens${costText}`;
+          .join(" + ");
+  return `cost: ${costText} · context: latest per session`;
 }
 
 function printEmptyList(

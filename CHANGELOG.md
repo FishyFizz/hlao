@@ -14,6 +14,23 @@
 - `down --dry-run` lists the sessions that would be closed or discarded; `down` warns about
   live and retained terminal sessions and reports both counts.
 
+- Changing `policy` now answers a parked request when the new policy implies an answer
+  (`allow`/`deny`); `ask` leaves it parked and the CLI prints the `permit` hint.
+- `wait --fail-if-failed` and `read --follow --fail-on-error` make adapter failure visible to
+  scripts.
+- `list` always reports live/retained counts, resolves `--root` against the full table,
+  implies `--all` for `--tree`, normalizes Windows cwd case, adds CREATED/EVENT and per-status
+  summary columns, and labels per-session context instead of summing non-additive tokens.
+- `read` prints an `older` cursor hint, says "no matching events" when filters are empty, and
+  `--jsonl-page` adds per-page cursor/truncation metadata.
+- Adapter-derived strings (stderr events, logs, error details, option names) are sanitized at
+  the render boundary, including C1 and bidi controls; tables use display width for CJK/emoji.
+- Help and contracts describe universal addressing; the stale "sees itself and its
+  descendants" and "a parent may" text is gone, project config errors name their file, and a
+  help test guards the wording.
+- The acceptance examples isolate `HLAO_HOME`, clean up in `finally`, use the turn result
+  instead of one read page, and use a local sleep instead of `wait --until change` as a timer.
+
 ### Fixed
 
 - `close --tree --dry-run` no longer closes the tree.

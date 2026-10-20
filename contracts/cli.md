@@ -14,9 +14,12 @@ hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR]
 hlao read [<id>] [--self] [--since N | --before N] [--limit N]
                 [--type TYPE]... [--turn N] [--grep TEXT]
-                [--raw] [--verbose] [--timestamps] [--jsonl] [--follow] [--out FILE]
+                [--raw] [--verbose] [--timestamps] [--jsonl] [--jsonl-page]
+                [--follow] [--fail-on-error] [--out FILE]
+hlao export [<id>] [--self] [--since N] [--raw] [--jsonl] [--out FILE]
 hlao wait [<id>...] [--self] [--any | --all]
-                [--until idle|permission|exit|change] [--since N] [--timeout DUR]
+                [--until idle|settled|permission|exit|change] [--since N]
+                [--type TYPE]... [--grep TEXT] [--timeout DUR] [--fail-if-failed]
 hlao list [--all] [--cwd DIR] [--cwd-prefix DIR] [--status S] [--backend NAME]
                 [--root SESSION] [--name TEXT] [--pending] [--wide] [--tree] [--usage]
                 [--sort created|activity] [--watch] [--interval DUR]
@@ -41,7 +44,7 @@ hlao config show|path|validate
 hlao reload
 hlao doctor [--start]
 hlao whoami
-hlao down [--force]
+hlao down [--force] [--dry-run]
 hlao help [command]
 hlao version
 hlao --version
@@ -52,11 +55,11 @@ option parsing; everything after it is positional.
 
 Sessions are resolved by exact id first, then unique name, then unique id prefix, all within
 this HLAO instance. Every session in the instance is addressable by every caller. Duplicate
-names and ambiguous prefixes are `ambiguous_id` with `details.candidates`. `send`, `mode`, and
-`rename` require `--self` to target the caller because their first positional is a message,
-mode, or new name. `read`, `wait`, `cancel`, `close`, and `permit` default to
-`HLAO_SESSION_ID` when it is set and no id is given. A target supplied both positionally and
-with `--self` is `bad_request`.
+names and ambiguous prefixes are `ambiguous_id` with `details.candidates`. Commands whose
+first positional is not an id (`send`, `mode`, `rename`) require `--self` to target the
+caller. Read-only forms of `read`, `wait`, `cancel`, `close`, `permit`, `policy`, `option`,
+and `queue` default to `HLAO_SESSION_ID` when it is set and no id is given; their setting
+forms use `--self`. A target supplied both positionally and with `--self` is `bad_request`.
 
 `--tree` on `close` is a CLI assembly: list the target's subtree (including retained closed
 sessions, so lineage is not broken by an intermediate that already closed), then close each
@@ -72,7 +75,9 @@ permission mode; an unknown mode is `bad_option`, and a backend with no modes is
 
 `rename` sets an operator label or clears it. A name is stored on the live session and in the
 event log (`session.renamed`); it is injected into the adapter environment as `HLAO_NAME` at
-spawn. Renaming does not change identity or addressing.
+spawn. Renaming does not change the handle or `HLAO_SESSION_ID`. The live name is part of
+addressing (a unique name resolves), so a rename can change which token addresses the
+session.
 
 `policy` reads a live session's HLAO permission policy or sets it without a pending request.
 Inside a session, `policy` with no id reads self and `policy --self <policy>` sets it. Any
@@ -111,21 +116,39 @@ that still has retained descendants is an error, so forget descendants first.
 data JSON; private payloads require `--raw`). `--before N` pages backward and is mutually
 exclusive with `--since`. A tail page reports `nextBefore`; pass it to `--before` for the next
 older page. `--jsonl` writes one event object per line instead of one page object; it cannot be
-combined with `--json` or `--out`. With `--follow`, `--jsonl` streams events and re-arms a
-one-shot `wait --until change`.
+combined with `--json` or `--out`. `--jsonl-page` adds a leading `{"page":{...}}` line per
+page, so a stdout-only consumer can see cursors and eviction. With `--follow`, `--jsonl`
+streams events and re-arms a one-shot `wait --until change`; `--fail-on-error` makes a failed
+session exit 3. An empty page with filters says "no matching events".
+
+`export [<id>]` pages forward until `hasMore` is false and returns `{session, events,
+earliestRetainedSeq, lastSeq, count, truncated}`. `--out FILE` writes that object (or one
+event per line with `--jsonl`); without `--out` the JSON object goes to stdout. It is the
+supported recovery path before `down`; `read --out` remains one bounded page by design.
 
 `wait` accepts one id or a list. For several ids, `--any` (the default) resolves on the first
 target that satisfies and `--all` when every target does. The JSON result always includes
 `results` in request order, each with the target's view, `satisfied`, and `reason`; a target
 that does not currently satisfy when the aggregate resolves is `pending`. `--since` is only
-valid with one id.
-The aggregate exit code follows the same rule as a single wait: `2` for timeout, `3` when a
-target ended before the condition, `0` otherwise.
+valid with one id. `--type`/`--grep` filter the event that satisfies `--until change`.
 
-`list --usage` adds USAGE (latest `used/size`) and COST columns and a footer that sums the
-latest snapshots across listed sessions. Costs are totalled per currency and never mixed;
-`used/size` is a snapshot sum, not an additive token counter. The JSON session view always
-carries `usage`, whether or not `--usage` is passed.
+`--until idle` means no active turn **and** no queued prompt; the CLI maps it to the wire's
+`settled` condition. `--until settled` is the explicit form and treats a terminal session as a
+valid completion. For the historical `idle` form, a session that ended first is still
+unsatisfied and exits 3. `--fail-if-failed` makes any waited session that ended `failed` exit 3.
+The aggregate exit code is `2` for timeout, `3` when a target ended before the condition (or
+`--fail-if-failed` saw a failure), and `0` otherwise.
+
+`list --usage` adds CONTEXT (each session's latest `used/size`) and COST columns. The footer
+totals cost per currency and says "context: latest per session"; token snapshots are not
+additive and are not summed. The JSON session view always carries `usage`, whether or not
+`--usage` is passed.
+
+`list` always fetches the full table and reports `{sessions, counts: {live, retained, total}}`
+in JSON. Human output hides `closed` by default; `--all`, `--tree`, or `--status closed` show
+it, and terminal rows are still counted in the footer. `--root` resolves against the full
+table, so a closed root still selects its live descendants. The footer reports live and
+retained counts, the number shown when filters are active, and a per-status summary.
 
 There is no per-session scope. Any session in the instance may address any other by id, name,
 or prefix; `parentId` is lineage, not permission. If two groups need isolation, run two HLAO

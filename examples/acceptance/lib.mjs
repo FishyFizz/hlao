@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Invoke the same CLI a human uses. HLAO_CLI points at the built entry point
@@ -18,10 +21,13 @@ export function hlao(args, options = {}) {
     });
     let stdout = "";
     let stderr = "";
+    const timeoutMs =
+      options.timeoutMs ??
+      Number(process.env.HLAO_EXAMPLE_TIMEOUT_MS ?? 120_000);
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`hlao ${args.join(" ")} timed out`));
-    }, options.timeoutMs ?? 120_000);
+      reject(new Error(`hlao ${args.join(" ")} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -57,6 +63,24 @@ export function requireOk(result, label) {
     throw new Error(`${label}: ${message}`);
   }
   return result.value;
+}
+
+/**
+ * Parse the example's flags and choose an isolated runtime home. A direct run
+ * must not mix demo sessions into the operator's real HLAO_HOME; pass --home
+ * to reuse one, or set HLAO_HOME. The acceptance harness already sets it.
+ */
+export function configureExample(argv) {
+  const parsed = parseExampleArgs(argv);
+  const explicit =
+    parsed.options.home !== undefined || process.env.HLAO_HOME !== undefined;
+  const home =
+    parsed.options.home ??
+    process.env.HLAO_HOME ??
+    mkdtempSync(join(tmpdir(), "hlao-example-"));
+  process.env.HLAO_HOME = home;
+  console.log(`HLAO_HOME ${home}${explicit ? "" : " (temporary)"}`);
+  return { ...parsed, home };
 }
 
 export function parseExampleArgs(argv) {
@@ -99,14 +123,36 @@ export function envRecord(pairs) {
   return env;
 }
 
-export function lastAgentText(readResult) {
+export function lastAgentText(readResultOrEvents) {
+  const events = Array.isArray(readResultOrEvents)
+    ? readResultOrEvents
+    : readResultOrEvents.events ?? [];
   let text = "";
-  for (const event of readResult.events) {
+  for (const event of events) {
     if (event.type === "agent.message" && typeof event.data.text === "string") {
       text += event.data.text;
     }
   }
   return text.trim();
+}
+
+/** The full retained transcript, not one bounded page. */
+export async function readAllEvents(sessionId) {
+  const result = requireOk(await hlao(["export", sessionId]), "export session");
+  return result.events ?? [];
+}
+
+export function parseDurationMs(value) {
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(String(value).trim());
+  if (match === null) throw new Error(`bad duration "${value}"`);
+  const amount = Number(match[1]);
+  const unit = match[2] ?? "ms";
+  const factor = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[unit];
+  return Math.round(amount * factor);
+}
+
+export function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function closeQuietly(sessionId) {

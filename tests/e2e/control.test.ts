@@ -476,3 +476,51 @@ test("close --tree --dry-run reports without closing anything", async (t) => {
   assert.equal(byId.get(parent.id), "idle");
   assert.equal(byId.get(childId), "idle");
 });
+
+test("changing policy answers a parked permission", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "ask first",
+    "--permission",
+    "ask",
+    "--env",
+    "FAKE_MODE=permission",
+  ]);
+  assert.equal(spawned.code, 0);
+  const id = spawned.value.session.id;
+
+  const waiting = await harness.json<WaitValue>([
+    "wait",
+    id,
+    "--until",
+    "permission",
+    "--timeout",
+    "15s",
+  ]);
+  assert.equal(waiting.code, 0);
+  assert.ok(waiting.value.session.pendingPermission);
+
+  const allowed = await harness.json<{
+    session: {
+      status: string;
+      permissionPolicy: string;
+      pendingPermission: unknown;
+    };
+  }>(["policy", id, "allow"]);
+  assert.equal(allowed.code, 0);
+  assert.equal(allowed.value.session.permissionPolicy, "allow");
+  assert.equal(allowed.value.session.pendingPermission, null);
+  assert.notEqual(allowed.value.session.status, "waiting_permission");
+
+  const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
+  const resolved = read.value.events.find(
+    (event) => event.type === "permission.resolved",
+  );
+  assert.ok(resolved);
+  assert.equal(resolved.data.by, "operator");
+  assert.equal(typeof resolved.data.optionId, "string");
+});

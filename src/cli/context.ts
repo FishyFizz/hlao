@@ -198,7 +198,7 @@ export function styleHint(ctx: CommandContext, text: string): string {
 }
 
 export function renderError(error: HlaoError): string {
-  let text = `hlao: ${error.message}\n`;
+  let text = `hlao: ${sanitize(error.message)}\n`;
   const details =
     typeof error.details === "object" && error.details !== null
       ? (error.details as Record<string, unknown>)
@@ -209,7 +209,7 @@ export function renderError(error: HlaoError): string {
       | { id: string; name: string | null; status: string }[]
       | undefined;
     for (const candidate of candidates ?? []) {
-      text += `  ${candidate.id}  ${candidate.status}${candidate.name ? `  ${candidate.name}` : ""}\n`;
+      text += `  ${sanitize(candidate.id)}  ${sanitize(candidate.status)}${candidate.name ? `  ${sanitize(candidate.name)}` : ""}\n`;
     }
   }
 
@@ -223,7 +223,8 @@ export function renderError(error: HlaoError): string {
     if (lines.length > 0) {
       text += "  adapter stderr:\n";
       for (const line of lines) {
-        text += `    ${line.length > 300 ? `${line.slice(0, 300)}…` : line}\n`;
+        const bounded = line.length > 300 ? `${line.slice(0, 300)}…` : line;
+        text += `    ${sanitize(bounded)}\n`;
       }
     }
   }
@@ -247,8 +248,10 @@ export function renderError(error: HlaoError): string {
     }[];
     const rendered = options
       .map((option) => {
-        const id = String(option.optionId ?? option.id ?? option.name ?? "?");
-        const label =
+        const id = sanitize(
+          String(option.optionId ?? option.id ?? option.name ?? "?"),
+        );
+        const rawLabel =
           option.name !== undefined
             ? String(option.name)
             : option.kind !== undefined
@@ -256,7 +259,8 @@ export function renderError(error: HlaoError): string {
               : option.description !== undefined
                 ? String(option.description)
                 : undefined;
-        return label && label !== id ? `${id} (${label})` : id;
+        const label = rawLabel === undefined ? undefined : sanitize(rawLabel);
+        return label !== undefined && label !== id ? `${id} (${label})` : id;
       })
       .join(", ");
     if (rendered.length > 0) text += `  options: ${rendered}\n`;

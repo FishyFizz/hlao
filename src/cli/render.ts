@@ -43,6 +43,8 @@ export function colorsEnabled(json: boolean): boolean {
 export interface RenderOptions {
   verbose?: boolean;
   fullTimestamps?: boolean;
+  /** The caller supplied type/turn/grep filters, so an empty page is "no match". */
+  filtered?: boolean;
 }
 
 export interface SessionTableOptions {
@@ -79,7 +81,12 @@ export function renderSessionTable(
       formatAge(session.lastActivityAt),
     ];
     if (options.wide) {
+      const lastEvent = session.lastEvent
+        ? `${session.lastEvent.type}${session.lastEvent.title ? ` · ${session.lastEvent.title}` : ""}`
+        : "—";
       base.push(
+        formatCreated(session.createdAt),
+        truncateRight(oneLine(lastEvent), 40),
         busyFor(session),
         session.permissionPolicy,
         session.modes?.currentModeId ?? "—",
@@ -111,9 +118,11 @@ export function renderSessionTable(
       "STATUS",
       "TURN",
       "QUEUED",
-      "AGE",
-      ...(options.wide ? ["BUSY", "POLICY", "MODE", "PENDING", "EXIT"] : []),
-      ...(options.usage ? ["USAGE", "COST"] : []),
+      "ACTIVITY",
+      ...(options.wide
+        ? ["CREATED", "EVENT", "BUSY", "POLICY", "MODE", "PENDING", "EXIT"]
+        : []),
+      ...(options.usage ? ["CONTEXT", "COST"] : []),
       "CWD",
     ],
     rows,
@@ -126,6 +135,13 @@ export function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
   return String(Math.round(value));
+}
+
+function formatCreated(iso: string): string {
+  const date = new Date(iso);
+  return Number.isFinite(date.getTime())
+    ? date.toISOString().slice(0, 16).replace("T", " ")
+    : "—";
 }
 
 function busyFor(session: SessionView): string {  if (
@@ -206,7 +222,13 @@ export function renderReadResult(
 
   if (result.events.length === 0) {
     lines.push("");
-    lines.push(style.dim(`no events (last seq ${result.lastSeq})`));
+    lines.push(
+      style.dim(
+        options.filtered
+          ? `no matching events (last seq ${result.lastSeq})`
+          : `no events (last seq ${result.lastSeq})`,
+      ),
+    );
   } else {
     lines.push("");
     lines.push(
@@ -219,6 +241,14 @@ export function renderReadResult(
     lines.push(
       style.yellow(
         `history starts at #${result.earliestRetainedSeq} — ${result.earliestRetainedSeq - 1} earlier events were evicted`,
+      ),
+    );
+  }
+  if (result.nextBefore !== null) {
+    lines.push("");
+    lines.push(
+      style.dim(
+        `older: ${commandPrefix} read ${result.session.id} --before ${result.nextBefore}`,
       ),
     );
   }
@@ -441,7 +471,7 @@ export function renderEvents(
       case "stderr": {
         flush();
         if (verbose) {
-          lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`stderr › ${String(data.text ?? "")}`)}`);
+          lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`stderr › ${oneLine(data.text)}`)}`);
         } else {
           hiddenStderr += 1;
           if (firstHiddenStderr === null) {
@@ -673,14 +703,17 @@ function formatTimestamp(at: string, full: boolean): string {
 
 const ANSI_ESCAPE =
   /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/g;
-const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+// U+061C, U+200E/F, U+202A-E, U+2066-9: bidi overrides can reorder a terminal.
+const BIDI_CHARS = /[؜‎‏‪-‮⁦-⁩]/g;
 
 /** Agent-derived text is untrusted: never let it inject terminal control sequences. */
 export function sanitize(value: string): string {
   return value
     .replace(ANSI_ESCAPE, "")
     .replace(/\r\n?/g, "\n")
-    .replace(CONTROL_CHARS, "");
+    .replace(CONTROL_CHARS, "")
+    .replace(BIDI_CHARS, "");
 }
 
 function oneLine(value: unknown): string {
@@ -715,21 +748,21 @@ function renderPayload(value: unknown, style: Style): string[] {
 }
 
 function truncateLeft(value: string, max: number): string {
-  if (value.length <= max) return value;
-  return `…${value.slice(value.length - max + 1)}`;
+  if (displayWidth(value) <= max) return value;
+  return `…${takeWidth(value, Math.max(0, max - 1), true)}`;
 }
 
 function truncateRight(value: string, max: number): string {
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 1)}…`;
+  if (displayWidth(value) <= max) return value;
+  return `${takeWidth(value, Math.max(0, max - 1))}…`;
 }
 
 function truncateMiddle(value: string, max: number): string {
-  if (value.length <= max) return value;
-  const keep = max - 1;
+  if (displayWidth(value) <= max) return value;
+  const keep = Math.max(0, max - 1);
   const head = Math.ceil(keep / 2);
   const tail = Math.floor(keep / 2);
-  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
+  return `${takeWidth(value, head)}…${takeWidth(value, tail, true)}`;
 }
 
 function pad(value: string, width: number): string {
@@ -739,6 +772,59 @@ function pad(value: string, width: number): string {
 
 const ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
 
+/** Columns occupied in a terminal: CJK and emoji are two, combining marks zero. */
+export function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of value.replace(ANSI_PATTERN, "")) {
+    width += charWidth(char.codePointAt(0)!);
+  }
+  return width;
+}
+
 function visibleLength(value: string): number {
-  return value.replace(ANSI_PATTERN, "").length;
+  return displayWidth(value);
+}
+
+function takeWidth(value: string, max: number, fromEnd = false): string {
+  let out = "";
+  let width = 0;
+  const chars = [...value];
+  if (fromEnd) chars.reverse();
+  for (const char of chars) {
+    const charColumns = charWidth(char.codePointAt(0)!);
+    if (width + charColumns > max) break;
+    out = fromEnd ? char + out : out + char;
+    width += charColumns;
+  }
+  return out;
+}
+
+function charWidth(codePoint: number): number {
+  // Combining marks and zero-width characters occupy no column.
+  if (
+    (codePoint >= 0x0300 && codePoint <= 0x036f) ||
+    (codePoint >= 0x1ab0 && codePoint <= 0x1aff) ||
+    (codePoint >= 0x1dc0 && codePoint <= 0x1dff) ||
+    (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
+    (codePoint >= 0xfe20 && codePoint <= 0xfe2f) ||
+    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    codePoint === 0xfeff
+  ) {
+    return 0;
+  }
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
 }

@@ -27,12 +27,12 @@ import {
 import { dirname, resolve } from "node:path";
 import {
   closeQuietly,
+  configureExample,
   hlao,
-  parseExampleArgs,
   requireOk,
 } from "./lib.mjs";
 
-const { options } = parseExampleArgs(process.argv.slice(2));
+const { options } = configureExample(process.argv.slice(2));
 const backend = options.backend ?? "claude";
 const ledger = resolve(options.ledger ?? "board.md");
 const tasks = (options.tasks ?? "audit the build,summarize the failure")
@@ -53,32 +53,36 @@ for (const task of tasks) {
   const prompt = `You are the worker for the card: ${task}
 The shared ledger is at ${ledger}. Read it if you can; it is the shared fact.
 Do the card and reply with a single line starting "RESULT:".`;
-  const spawned = requireOk(
-    await hlao(["spawn", backend, prompt, "--wait", ...envArgs]),
-    "spawn worker",
-  );
-  const id = spawned.session.id;
+  let id = null;
+  try {
+    const spawned = requireOk(
+      await hlao(["spawn", backend, prompt, "--wait", ...envArgs]),
+      "spawn worker",
+    );
+    id = spawned.session.id;
 
-  // The board's columns are session status. Read them the same way a person
-  // glances at the board; this is also the assembly's `list` step.
-  const board = requireOk(await hlao(["list"]), "list");
-  const card = board.sessions.find((session) => session.id === id);
-  console.log(`worker ${id} · column ${card?.status ?? "unknown"}`);
+    // The board's columns are session status. Read them the same way a person
+    // glances at the board; this is also the assembly's `list` step.
+    const board = requireOk(await hlao(["list"]), "list");
+    const card = board.sessions.find((session) => session.id === id);
+    console.log(`worker ${id} · column ${card?.status ?? "unknown"}`);
 
-  // Moving the card is a message, not a board mutation.
-  const moved = requireOk(
-    await hlao([
-      "send",
-      id,
-      `The card is in progress. Finish it and reply with a single line starting "RESULT:".`,
-      "--wait",
-    ]),
-    "move card",
-  );
-  const result = (moved.text ?? "").trim();
-  appendFileSync(ledger, `- [${task}] worker ${id}: ${result}\n`);
-  await closeQuietly(id);
-  console.log(`card done: ${task} (${id})`);
+    // Moving the card is a message, not a board mutation.
+    const moved = requireOk(
+      await hlao([
+        "send",
+        id,
+        `The card is in progress. Finish it and reply with a single line starting "RESULT:".`,
+        "--wait",
+      ]),
+      "move card",
+    );
+    const result = (moved.text ?? "").trim();
+    appendFileSync(ledger, `- [${task}] worker ${id}: ${result}\n`);
+    console.log(`card done: ${task} (${id})`);
+  } finally {
+    if (id !== null) await closeQuietly(id);
+  }
 }
 
 console.log("\n--- board ---");

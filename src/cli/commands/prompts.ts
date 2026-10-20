@@ -393,7 +393,9 @@ export async function cmdRead(args: string[]): Promise<number> {
     { name: "verbose", type: "boolean" },
     { name: "timestamps", type: "boolean" },
     { name: "follow", type: "boolean" },
+    { name: "fail-on-error", type: "boolean" },
     { name: "jsonl", type: "boolean" },
+    { name: "jsonl-page", type: "boolean" },
     { name: "out", type: "path", valueName: "FILE" },
   ]);
   if (helpRequested(parsed, "read")) return 0;
@@ -405,7 +407,15 @@ export async function cmdRead(args: string[]): Promise<number> {
   const raw = booleanOption(parsed, "raw") === true || verbose;
   const timestamps = booleanOption(parsed, "timestamps") === true;
   const follow = booleanOption(parsed, "follow") === true;
+  const failOnError = booleanOption(parsed, "fail-on-error") === true;
+  if (failOnError && !follow) {
+    throw usageError("--fail-on-error requires --follow");
+  }
   const jsonl = booleanOption(parsed, "jsonl") === true;
+  const jsonlPage = booleanOption(parsed, "jsonl-page") === true;
+  if (jsonlPage && !jsonl) {
+    throw usageError("--jsonl-page requires --jsonl");
+  }
   const outFile = stringOption(parsed, "out");
   if (follow && outFile !== undefined) {
     throw usageError("--out cannot be combined with --follow");
@@ -460,6 +470,10 @@ export async function cmdRead(args: string[]): Promise<number> {
       verbose: verbose || raw,
       timestamps,
       jsonl,
+      jsonlPage,
+      failOnError,
+      filtered:
+        types !== undefined || turn !== undefined || grep !== undefined,
     });
   }
 
@@ -500,6 +514,7 @@ export async function cmdRead(args: string[]): Promise<number> {
     renderReadResult(result, ctx.style, "hlao", {
       verbose: verbose || raw,
       fullTimestamps: timestamps,
+      filtered: types !== undefined || turn !== undefined || grep !== undefined,
     }),
   );
   if (outFile !== undefined) {
@@ -518,6 +533,9 @@ interface FollowOptions {
   verbose: boolean;
   timestamps: boolean;
   jsonl: boolean;
+  jsonlPage: boolean;
+  failOnError: boolean;
+  filtered: boolean;
 }
 
 /**
@@ -544,6 +562,21 @@ async function followRead(
     });
 
     if (options.jsonl) {
+      if (options.jsonlPage) {
+        process.stdout.write(
+          `${JSON.stringify({
+            page: {
+              sessionId: result.session.id,
+              earliestRetainedSeq: result.earliestRetainedSeq,
+              lastSeq: result.lastSeq,
+              nextSeq: result.nextSeq,
+              nextBefore: result.nextBefore,
+              hasMore: result.hasMore,
+              truncated: result.truncated,
+            },
+          })}\n`,
+        );
+      }
       for (const event of result.events) {
         process.stdout.write(`${JSON.stringify(event)}\n`);
       }
@@ -558,6 +591,7 @@ async function followRead(
         renderReadResult(result, ctx.style, "hlao", {
           verbose: options.verbose,
           fullTimestamps: options.timestamps,
+          filtered: options.filtered,
         }),
       );
     } else {
@@ -585,7 +619,7 @@ async function followRead(
 
     if (result.hasMore) continue;
     if (result.session.status === "closed" || result.session.status === "failed") {
-      return 0;
+      return options.failOnError && result.session.status === "failed" ? 3 : 0;
     }
 
     await withProgress(
@@ -613,6 +647,7 @@ export async function cmdWait(args: string[]): Promise<number> {
     { name: "type", type: "string", valueName: "TYPE", multiple: true },
     { name: "grep", type: "string", valueName: "TEXT" },
     { name: "timeout", type: "duration", valueName: "DUR" },
+    { name: "fail-if-failed", type: "boolean" },
     { name: "any", type: "boolean" },
     { name: "all", type: "boolean" },
   ]);
@@ -725,8 +760,18 @@ export async function cmdWait(args: string[]): Promise<number> {
   const sawExit =
     result.reason === "exit" ||
     result.results.some((entry) => entry.reason === "exit");
+  const failIfFailed = booleanOption(parsed, "fail-if-failed") === true;
+  const sawFailed = result.results.some(
+    (entry) => entry.session.status === "failed",
+  );
   const code =
-    result.reason === "timeout" ? 2 : !result.satisfied && sawExit ? 3 : 0;
+    failIfFailed && sawFailed
+      ? 3
+      : result.reason === "timeout"
+        ? 2
+        : !result.satisfied && sawExit
+          ? 3
+          : 0;
 
   if (ctx.json) {
     writeJson(result);

@@ -46,3 +46,57 @@ test("an adapter crash fails the session, the prompt, and wait", async (t) => {
   const again = await harness.json<JsonError>(["send", id, "again"]);
   assert.equal(again.value.error.code, "session_closed");
 });
+
+test("failure gates are opt-in for waits and follow", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "--env",
+    "FAKE_MODE=crash",
+  ]);
+  assert.equal(spawned.code, 0);
+  const id = spawned.value.session.id;
+  // Trigger the crash and wait for the session to settle as failed.
+  await harness.json<JsonError>([
+    "send",
+    id,
+    "go",
+    "--wait",
+    "--timeout",
+    "10s",
+  ]);
+
+  const plain = await harness.json<WaitValue>([
+    "wait",
+    id,
+    "--until",
+    "exit",
+    "--timeout",
+    "10s",
+  ]);
+  assert.equal(plain.code, 0);
+
+  const gated = await harness.json<WaitValue>([
+    "wait",
+    id,
+    "--until",
+    "exit",
+    "--fail-if-failed",
+    "--timeout",
+    "10s",
+  ]);
+  assert.equal(gated.code, 3);
+
+  const follow = await harness.run(["read", id, "--follow", "--fail-on-error"], {
+    json: false,
+  });
+  assert.equal(follow.code, 3);
+
+  const followPlain = await harness.run(["read", id, "--follow"], {
+    json: false,
+  });
+  assert.equal(followPlain.code, 0);
+});

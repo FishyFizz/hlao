@@ -68,9 +68,10 @@ Addressing:
   their first positional is a message, mode, or new name.
 
 Identity:
-  An operator shell has no HLAO_SESSION_ID and sees every session. A spawned
-  agent inherits HLAO_SESSION_ID, HLAO_NAME, and its lineage, and sees itself
-  and its descendants only. hlao whoami reports what this shell is.
+  An operator shell has no HLAO_SESSION_ID. A spawned agent inherits
+  HLAO_SESSION_ID, HLAO_NAME, and its lineage. Every session in this HLAO
+  instance is addressable by every caller, so lineage is context, not a scope.
+  hlao whoami reports what this shell is.
 
 Durations: 500ms, 30s, 5m, 2h, 1d, or a bare millisecond count. 0 disables.
 
@@ -135,7 +136,7 @@ Options:
   --mode ID              provider permission mode (see "hlao mode <id>")
   --model VALUE          select the model category of provider config options
   --config KEY=VALUE     set a provider config option (repeatable)
-  --parent SESSION       spawn under another visible session
+  --parent SESSION       spawn under another session in this instance
   --permission POLICY    allow (default), ask, or deny
   --env K=V              extra environment for the adapter (repeatable)
 
@@ -169,6 +170,7 @@ Options:
   --type TYPE            keep only this event type; repeatable
   --turn N               keep only this turn
   --grep TEXT            case-insensitive literal over type and data JSON
+  --fail-on-error        with --follow, exit 3 when the session failed
   --verbose              human mode: include bounded tool input/output
   --raw                  with --json, include original ACP payloads; in human
                          mode, reveal adapter stderr and command updates
@@ -176,6 +178,7 @@ Options:
   --follow               keep reading, then one-shot wait, until the session
                          ends or you press Ctrl-C; --json emits one page per line
   --jsonl                emit one event object per line (not with --json/--out)
+  --jsonl-page           with --jsonl, emit a page metadata line first
   --out FILE             also write this page's JSON result to FILE
 
 The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
@@ -211,6 +214,7 @@ Options:
   --type TYPE            with "change": wake only on this event type; repeatable
   --grep TEXT            with "change": wake only on a matching event
   --timeout DUR          bound; default from config (30m), 0 = no bound
+  --fail-if-failed       exit 3 when a waited session ended failed
 
 "idle" means no active turn and no queued prompt. The wire's turn boundary is
 also called idle; this CLI uses the completion condition. "settled" is the
@@ -278,7 +282,9 @@ Inside a session, omit <id> to read your own; use --self <modeId> to set it.
 Read a session's live HLAO permission policy, or set it without needing a
 pending request. allow answers provider requests automatically, ask parks them,
 and deny rejects them. Inside a session, omit <id> to read your own policy or
-use --self <policy> to set it; a parent may set a descendant's policy.
+use --self <policy> to set it; any caller in the instance may set any
+session's policy. Changing the policy also answers a parked request when the
+new policy implies an answer.
 
 permit --always is equivalent to answering the current request and setting the
 policy to allow.`,
@@ -315,11 +321,12 @@ Probe the supervisor without starting one and report pid, version, uptime, live
 sessions, wire protocol version, capability count, config errors, and whether
 the config on disk is fresher. Exits 1 when nothing is running. --start
 autostarts the supervisor first.`,
-    logs: `hlao logs [--lines N] [--follow]
+    logs: `hlao logs [--lines N] [--follow] [--raw]
 
 Read the supervisor's diagnostic log directly; no supervisor is needed. The
 default is the last 50 lines; --lines 0 prints the whole file. --follow polls
-for appended lines until Ctrl-C. With --json, a plain read returns
+for appended lines until Ctrl-C. Human output strips ANSI, C1, and bidi
+controls; --raw prints the line untouched. With --json, a plain read returns
 {"path","lines"}; --follow emits one {"path","line"} object per line.`,
     config: `hlao config show|path|validate
 

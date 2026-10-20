@@ -100,9 +100,10 @@ Injected at spawn:
 | `HLAO_HOME` | runtime home, for endpoint discovery |
 | `HLAO_CLI` | absolute path to the CLI entry point |
 
-The parent's knowledge of its children is the handles it holds. The supervisor derives
-visibility from the live parent links it saw at spawn; it never writes a tree to disk and
-never reconstructs one after a restart.
+The parent's knowledge of its children is the handles it holds, but that is lineage context,
+not a visibility scope: every session in an instance is addressable by every caller (ADR 0008).
+The supervisor keeps the live parent links for lineage and `--tree`; it never writes a tree to
+disk and never reconstructs one after a restart.
 
 ## Read projection
 

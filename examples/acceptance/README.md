@@ -13,6 +13,18 @@ export HLAO_CLI="$PWD/dist/cli.js"   # PowerShell: $env:HLAO_CLI="$PWD\dist\cli.
 The examples accept `--env K=V` to pass environment to the spawned session; the automated
 tests use that to drive the scripted ACP agent in `tests/fixtures/`.
 
+## Running them safely
+
+A direct run uses a fresh temporary `HLAO_HOME`, so demo sessions never mix into real work.
+Pass `--home DIR` or set `HLAO_HOME` to reuse an instance. `HLAO_EXAMPLE_TIMEOUT_MS` overrides
+the per-command bound (default 120s). Every script closes what it spawned in a `finally`; if
+it fails, the supervisor may still hold a session, so `hlao list` and `hlao down` remain the
+recovery path.
+
+Results use what the turn actually returned. `spawn --wait` carries the turn text, so a
+worker whose transcript exceeds one read page is not truncated; scripts fall back to
+`hlao export` (full history) when the turn result is unavailable.
+
 ## 1. cron — recurring timed work
 
 ```bash
@@ -22,13 +34,14 @@ node examples/acceptance/cron.mjs --backend claude --interval 30s --max-checks 1
 **Human terms.** A person checks a build log every minute until it says the build finished.
 They know when to stop because they can read the log.
 
-**Assembly.** Recurrence is the loop. The timer is `hlao wait --timeout 30s` — a one-shot
-await that expires. The judgement is the monitor session's reply. Termination is
-`STATUS: DONE`, read by the loop. Stopping is `hlao close`.
+**Assembly.** Recurrence is the loop. The timer is the script's own sleep between checks —
+not `wait --until change`, which any agent chunk or usage update can satisfy. The judgement is
+the monitor session's reply. Termination is `STATUS: DONE`, read by the loop. Stopping is
+`hlao close` in a `finally`.
 
 **Why no new primitive.** A recurring timer would make the supervisor the authority on a
 world condition it cannot read. Here the loop reads the world through an agent and chooses
-to issue another wait. If the loop dies, monitoring stops, which is the right failure.
+when to check again. If the loop dies, monitoring stops, which is the right failure.
 
 ## 2. kanban — shared work state across sessions
 
@@ -58,8 +71,9 @@ node examples/acceptance/delegation.mjs --backend claude --task "summarize the R
 **Human terms.** Hand a bounded task to a colleague, remember which pane they are in, wait,
 read the result, integrate it.
 
-**Assembly.** `hlao spawn` (the handle), the spawn prompt (the joining facts), `hlao wait`,
-`hlao read` (transfer), `hlao close`.
+**Assembly.** `hlao spawn --wait` (the handle and the turn result), the spawn prompt (the
+joining facts), `hlao export` as the fallback for the full transcript, `hlao close` in a
+`finally`.
 
 **Why no new primitive.** The child is a session the parent holds a handle to. The parent's
 knowledge of its children is naming, the same way a person remembers panes. No subagent

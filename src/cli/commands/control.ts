@@ -623,6 +623,13 @@ export async function cmdPolicy(args: string[]): Promise<number> {
       result.session.permissionPolicy,
     )}`,
   );
+  if (result.session.pendingPermission) {
+    out(
+      ctx.style.dim(
+        `still pending; run "hlao permit ${result.session.id} --allow" to answer it`,
+      ),
+    );
+  }
   return 0;
 }
 

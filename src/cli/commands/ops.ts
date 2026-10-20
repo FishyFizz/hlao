@@ -147,6 +147,7 @@ export async function cmdLogs(args: string[]): Promise<number> {
     ...COMMON,
     { name: "lines", short: "n", type: "number", valueName: "N" },
     { name: "follow", short: "f", type: "boolean" },
+    { name: "raw", type: "boolean" },
   ]);
   if (helpRequested(parsed, "logs")) return 0;
   expectPositionals(parsed, "logs", 0, 0);
@@ -157,6 +158,7 @@ export async function cmdLogs(args: string[]): Promise<number> {
     throw usageError("--lines must be zero or greater");
   }
   const follow = booleanOption(parsed, "follow") === true;
+  const raw = booleanOption(parsed, "raw") === true;
   const limit = requested ?? 50;
 
   let exists = existsSync(file);
@@ -176,7 +178,7 @@ export async function cmdLogs(args: string[]): Promise<number> {
   if (ctx.json && !follow) {
     writeJson({ path: file, lines: initial });
   } else {
-    emitLogLines(ctx, initial, file, exists);
+    emitLogLines(ctx, initial, file, exists, raw);
   }
   if (!follow) return 0;
 
@@ -212,7 +214,7 @@ export async function cmdLogs(args: string[]): Promise<number> {
       continue;
     }
     offset = size;
-    emitLogLines(ctx, splitLines(chunk), file, true);
+    emitLogLines(ctx, splitLines(chunk), file, true, raw);
   }
 }
 
@@ -231,6 +233,7 @@ function emitLogLines(
   lines: string[],
   file: string,
   exists: boolean,
+  raw: boolean,
 ): void {
   if (ctx.json) {
     for (const line of lines) {
@@ -242,7 +245,8 @@ function emitLogLines(
     if (!exists) out(ctx.style.dim(`no supervisor log at ${file}`));
     return;
   }
-  for (const line of lines) out(line);
+  // Adapter text can reach the log; strip terminal controls unless --raw.
+  for (const line of lines) out(raw ? line : sanitize(line));
 }
 
 export async function cmdConfig(args: string[]): Promise<number> {

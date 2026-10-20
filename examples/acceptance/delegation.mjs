@@ -17,13 +17,14 @@
  */
 import {
   closeQuietly,
+  configureExample,
   hlao,
   lastAgentText,
-  parseExampleArgs,
+  readAllEvents,
   requireOk,
 } from "./lib.mjs";
 
-const { options, positionals } = parseExampleArgs(process.argv.slice(2));
+const { options, positionals } = configureExample(process.argv.slice(2));
 const backend = options.backend ?? "claude";
 const task =
   options.task ?? (positionals.length > 0 ? positionals.join(" ") : "Summarize the README");
@@ -38,16 +39,24 @@ The parent's picture is partial: it gave you only this task and this directory.
 If you need a fact that is not here, say what is missing rather than guessing.`;
 
 console.log(`delegating to ${backend}: ${task}`);
-const spawned = requireOk(
-  await hlao(["spawn", backend, joining, "--wait", ...envArgs]),
-  "spawn worker",
-);
-const id = spawned.session.id;
-console.log(`worker ${id} · parent ${spawned.session.parentId ?? "(operator root)"}`);
+let id = null;
+try {
+  const spawned = requireOk(
+    await hlao(["spawn", backend, joining, "--wait", ...envArgs]),
+    "spawn worker",
+  );
+  id = spawned.session.id;
+  console.log(
+    `worker ${id} · parent ${spawned.session.parentId ?? "(operator root)"}`,
+  );
 
-const read = requireOk(await hlao(["read", id, "--since", "0"]), "read worker");
-const result = lastAgentText(read);
-console.log(`integrated result: ${result || "(the worker returned no text)"}`);
-
-await closeQuietly(id);
+  // spawn --wait already carries the turn's text. Only page the transcript if
+  // the turn timed out, so a long worker cannot be mistaken for a short one.
+  const result =
+    (spawned.firstTurn?.text ?? "").trim() ||
+    lastAgentText(await readAllEvents(id));
+  console.log(`integrated result: ${result || "(the worker returned no text)"}`);
+} finally {
+  if (id !== null) await closeQuietly(id);
+}
 console.log(`closed ${id}`);

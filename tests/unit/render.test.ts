@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createStyle,
+  displayWidth,
   renderEvents,
   renderReadResult,
   renderSessionTable,
@@ -244,6 +245,30 @@ test("agent text, titles, and names cannot inject terminal escapes", () => {
   );
   assert.ok(!table.includes("\u001b"));
   assert.match(table, /evil/);
+});
+
+test("C1, bidi, and stderr controls are stripped; CJK aligns", () => {
+  const hostile = "\u009b31m‮red";
+  const output = renderEvents(
+    [event(1, "stderr", { text: `${hostile}\u001b[2J` })],
+    style,
+    "abc123",
+    "hlao",
+    { verbose: true },
+  ).join("\n");
+  assert.ok(!/[\u009b‮\u001b]/.test(output));
+  assert.match(output, /red/);
+
+  const table = renderSessionTable(
+    [
+      session({ id: "abc123", name: "构建中" }),
+      session({ id: "abc124", name: "plain" }),
+    ],
+    style,
+  );
+  const lines = table.split("\n");
+  assert.equal(lines.length, 3);
+  assert.equal(displayWidth(lines[1]!), displayWidth(lines[2]!));
 });
 
 test("long plans are truncated with an explicit marker", () => {

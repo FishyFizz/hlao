@@ -267,9 +267,9 @@ test("list --usage reports the latest snapshot and an aggregate", async (t) => {
 
   const human = await harness.run(["list", "--usage"], { json: false });
   assert.equal(human.code, 0);
-  assert.match(human.stdout, /USAGE\s+COST/);
+  assert.match(human.stdout, /CONTEXT\s+COST/);
   assert.match(human.stdout, /42\/200\.0k/);
-  assert.match(human.stdout, /usage: 42\/200\.0k tokens/);
+  assert.match(human.stdout, /cost: none reported · context: latest per session/);
 });
 
 async function waitForStatus(

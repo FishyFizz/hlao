@@ -120,3 +120,48 @@ test("a visible pending permission is summarized once in the header", async (t) 
   assert.equal(occurrences(read.stdout, "pending permission:"), 1);
   assert.match(read.stdout, /Run the build/);
 });
+
+test("read hints at older history, names filtered-empty, and can emit page metadata", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>(
+    [
+      "spawn",
+      "fake",
+      "flood",
+      "--env",
+      "FAKE_MODE=flood",
+      "--env",
+      "FAKE_CHUNKS=140",
+      "--wait",
+    ],
+    { timeoutMs: 120_000 },
+  );
+  assert.equal(spawned.code, 0);
+  const id = spawned.value.session.id;
+
+  const tail = await harness.run(["read", id], { json: false });
+  assert.equal(tail.code, 0);
+  assert.match(tail.stdout, /older: hlao read \S+ --before \d+/);
+
+  const filtered = await harness.run(["read", id, "--type", "plan"], {
+    json: false,
+  });
+  assert.equal(filtered.code, 0);
+  assert.match(filtered.stdout, /no matching events/);
+
+  // A terminal session lets --follow return immediately after the first page.
+  await harness.json(["close", id]);
+  const jsonl = await harness.run(
+    ["read", id, "--follow", "--jsonl", "--jsonl-page"],
+    { json: false },
+  );
+  assert.equal(jsonl.code, 0);
+  const first = JSON.parse(jsonl.stdout.split("\n")[0]!) as {
+    page: { sessionId: string; nextBefore: number | null; truncated: boolean };
+  };
+  assert.equal(first.page.sessionId, id);
+  assert.equal(typeof first.page.nextBefore, "number");
+  assert.equal(typeof first.page.truncated, "boolean");
+});

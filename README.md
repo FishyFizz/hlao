@@ -118,10 +118,11 @@ start with a dash. Durations are `500ms`, `30s`, `5m`, `2h`, `1d`, or a bare mil
 Exit codes: `0` ok, `1` error, `2` a bounded wait expired (the work continues), `3` a `wait`
 that could not be satisfied because the session ended.
 
-A session is addressable by exact id, then unique name, then unique id prefix. `send`, `mode`,
-and `rename` need `--self` to target the caller, because their first positional means
-something else. `read`, `wait`, `cancel`, `close`, and `permit` default to the caller's session
-inside a session, so `hlao read` is enough.
+A session is addressable by exact id, then unique name, then unique id prefix. Commands whose
+first positional is not an id (`send`, `mode`, `rename`) need `--self` to target the caller;
+read-only commands (`read`, `wait`, `cancel`, `close`, `permit`, `policy`, `option`, `queue`)
+default to the caller's session when no id is given, and the setting forms use `--self`.
+Inside a session, `hlao read` is enough.
 
 Human reads show `HH:MM:SS` cursors (`--timestamps` switches to ISO), coalesce a streamed
 message into one block and start a new block when the adapter's message id changes, and strip
@@ -390,7 +391,7 @@ current version.
   judgement error reportable, recoverable, and not self-perpetuating.
 - Not a security boundary between cooperating agents. Visibility is a coordination rule.
   Any process with the runtime home and lock token can act as the operator.
-- Not a PTY fallback. v0.1 speaks ACP v1 only; a tool with no ACP adapter is out of scope
+- Not a PTY fallback. v0.7 speaks ACP v1 only; a tool with no ACP adapter is out of scope
   until the optional PTY path from `STACK.md` is built.
 
 ## Development

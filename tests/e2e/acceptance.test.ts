@@ -110,6 +110,27 @@ test("acceptance: delegation spawns, waits, reads, integrates, closes", async (t
   assert.ok(sessions.value.sessions.every((session) => session.status !== "busy"));
 });
 
+test("acceptance: delegation integrates a turn larger than one read page", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const result = await runExample(harness, "delegation.mjs", [
+    "--backend",
+    "fake",
+    "--env",
+    "FAKE_MODE=flood",
+    "--env",
+    "FAKE_CHUNKS=140",
+    "--task",
+    "produce a large transcript",
+  ]);
+
+  assert.equal(result.code, 0, result.stderr);
+  // The worker's turn text is used directly, so the last chunk cannot fall
+  // outside a 100-event page.
+  assert.match(result.stdout, /chunk-139/);
+});
+
 test("acceptance: kanban is a ledger file plus messages, not an object", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());

@@ -140,10 +140,22 @@ export function loadConfig(home: string): ConfigLoadResult {
 export function loadProjectBackends(cwd: string): Record<string, BackendManifest> {
   const file = projectBackendsPath(cwd);
   if (!existsSync(file)) return {};
-  const object = asObject(readJson(file), "project config");
-  checkKeys(object, PROJECT_KEYS, "project config");
-  if (object.backends === undefined) return {};
-  return parseBackendMap(object.backends, "project", file);
+  try {
+    const object = asObject(readJson(file), "project config");
+    checkKeys(object, PROJECT_KEYS, "project config");
+    if (object.backends === undefined) return {};
+    return parseBackendMap(object.backends, "project", file);
+  } catch (error) {
+    const converted =
+      error instanceof HlaoError
+        ? error
+        : new HlaoError("config_invalid", describeError(error));
+    throw new HlaoError(
+      "config_invalid",
+      `${file}: ${converted.message}`,
+      converted.details,
+    );
+  }
 }
 
 export function mergeBackends(

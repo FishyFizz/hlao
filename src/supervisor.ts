@@ -91,6 +91,12 @@ function actor(caller: string | null): string {
   return caller ?? "operator";
 }
 
+/** Windows paths are case-insensitive; `--cwd` must agree with `--cwd-prefix`. */
+function pathKey(value: string): string {
+  const normalized = resolve(value);
+  return isWindows() ? normalized.toLowerCase() : normalized;
+}
+
 /** A persistent connection may have this many requests in flight. */
 const MAX_INFLIGHT_REQUESTS = 64;
 /** Events delivered per session per notification flush. */
@@ -746,7 +752,10 @@ export class SupervisorServer {
       sessions = sessions.filter((session) => session.view().status !== "closed");
     }
     if (params.cwd !== undefined) {
-      sessions = sessions.filter((session) => resolve(session.cwd) === resolve(params.cwd!));
+      const target = pathKey(params.cwd);
+      sessions = sessions.filter(
+        (session) => pathKey(session.cwd) === target,
+      );
     }
     sessions.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     return {

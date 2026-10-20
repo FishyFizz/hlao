@@ -18,13 +18,15 @@
  */
 import {
   closeQuietly,
+  configureExample,
   envRecord,
   hlao,
-  parseExampleArgs,
+  parseDurationMs,
   requireOk,
+  sleepMs,
 } from "./lib.mjs";
 
-const { options, positionals } = parseExampleArgs(process.argv.slice(2));
+const { options, positionals } = configureExample(process.argv.slice(2));
 const backend = options.backend ?? positionals[0] ?? "claude";
 const interval = options.interval ?? "30s";
 const maxChecks = Number(options["max-checks"] ?? 100);
@@ -42,39 +44,45 @@ console.log(
   `cron assembly · backend ${backend} · interval ${interval} · max ${maxChecks} checks`,
 );
 
-const spawned = requireOk(
-  await hlao(["spawn", backend, prompt, "--wait", ...envArgs]),
-  "spawn monitor",
-);
-const id = spawned.session.id;
-if (spawned.firstTurn?.timedOut) {
-  throw new Error("the first check did not finish in time");
-}
-console.log(`monitor ${id}`);
+let id = null;
+let failed = false;
+try {
+  const spawned = requireOk(
+    await hlao(["spawn", backend, prompt, "--wait", ...envArgs]),
+    "spawn monitor",
+  );
+  id = spawned.session.id;
+  if (spawned.firstTurn?.timedOut) {
+    throw new Error("the first check did not finish in time");
+  }
+  console.log(`monitor ${id}`);
 
-let checks = 0;
-let text = spawned.firstTurn?.text ?? "";
-for (;;) {
-  checks += 1;
-  console.log(`check ${checks}: ${text || "(no text)"}`);
-  if (isDone(text)) break;
-  if (checks >= maxChecks) {
-    console.error(`gave up after ${checks} checks; closing ${id}`);
-    await closeQuietly(id);
-    process.exit(1);
+  let checks = 0;
+  let text = spawned.firstTurn?.text ?? "";
+  for (;;) {
+    checks += 1;
+    console.log(`check ${checks}: ${text || "(no text)"}`);
+    if (isDone(text)) break;
+    if (checks >= maxChecks) {
+      console.error(`gave up after ${checks} checks`);
+      failed = true;
+      break;
+    }
+
+    // The timer is this client's own sleep. Using `wait --until change` as a
+    // timer is a lie: any agent chunk, usage update, or stderr line wakes it.
+    await sleepMs(parseDurationMs(interval));
+
+    const sent = requireOk(await hlao(["send", id, prompt, "--wait"]), "check");
+    text = sent.text ?? "";
   }
 
-  // The timer: one bounded wait. Exit code 2 is the expected path.
-  const slept = await hlao(["wait", id, "--until", "change", "--timeout", interval]);
-  if (slept.code !== 0 && slept.code !== 2) {
-    throw new Error(
-      `wait failed: ${slept.value?.error?.message ?? slept.stderr.trim()}`,
+  if (!failed) {
+    console.log(
+      `done after ${checks} check${checks === 1 ? "" : "s"}`,
     );
   }
-
-  const sent = requireOk(await hlao(["send", id, prompt, "--wait"]), "check");
-  text = sent.text ?? "";
+} finally {
+  if (id !== null) await closeQuietly(id);
 }
-
-console.log(`done after ${checks} check${checks === 1 ? "" : "s"}; closing ${id}`);
-await closeQuietly(id);
+if (failed) process.exitCode = 1;

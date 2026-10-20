@@ -775,12 +775,20 @@ export class Session {
       }
     }
 
+    if (always) {
+      this.#changePolicy("allow", by);
+    }
+    this.#resolvePending(chosen, by);
+    return { requestId: pending.requestId, optionId: chosen.optionId };
+  }
+
+  /** Answer the parked request and wake the turn. */
+  #resolvePending(chosen: PermissionOption, by: string): void {
+    const pending = this.#pending;
+    if (!pending) return;
     this.#pending = null;
     if (!this.isTerminal) {
       this.#status = this.#active ? "busy" : "idle";
-    }
-    if (always) {
-      this.#changePolicy("allow", by);
     }
     this.#emit("permission.resolved", {
       requestId: pending.requestId,
@@ -790,7 +798,6 @@ export class Session {
     });
     pending.resolve(selectedResponse(chosen.optionId));
     this.#changed();
-    return { requestId: pending.requestId, optionId: chosen.optionId };
   }
 
   /** Changes the operator-facing label. The id and env identity do not change. */
@@ -812,6 +819,21 @@ export class Session {
       throw new HlaoError("session_closed", `session ${this.id} is closing`);
     }
     this.#changePolicy(policy, by);
+
+    // A policy change is also the answer to an existing request. `ask` leaves
+    // it parked; `allow`/`deny` answer it when the provider offered a matching
+    // option.
+    const pending = this.#pending;
+    if (!pending || policy === "ask") return;
+    if (policy === "allow") {
+      const allow = pickAllowOption(pending.request.options);
+      if (allow) this.#resolvePending(allow, by);
+      return;
+    }
+    const reject =
+      pending.request.options.find((option) => option.kind === "reject_once") ??
+      pending.request.options.find((option) => option.kind === "reject_always");
+    if (reject) this.#resolvePending(reject, by);
   }
 
   #changePolicy(policy: PermissionPolicy, by: string): void {
