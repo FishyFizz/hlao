@@ -1,11 +1,10 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-20 after milestones 0.2, 0.3, and 0.4.
+**Updated:** 2026-10-20 after milestones 0.2 through 0.7.
 **Scope:** unresolved findings only. Resolved items were removed; the original review is in git
-history, and the shipped fixes are described in `docs/milestones/0.2.md`,
-`docs/milestones/0.3.md`, `docs/milestones/0.4.md`, ADR 0005 (amendment), ADR 0006, and
-ADR 0007.
+history, and the shipped fixes are described in `docs/milestones/0.2.md` through
+`docs/milestones/0.7.md`, ADR 0005 (amendment), ADR 0006, ADR 0007, ADR 0009, and ADR 0010.
 
 The substrate is unchanged: five primitives, a per-user supervisor, a bounded cursor-addressed
 event log, identity at spawn, and one-shot waits. The gaps below are affordances around those
@@ -61,9 +60,7 @@ table still owns identity.
 | Feature | Why expected | Current | Suggested shape |
 |---|---|---|---|
 | Interrupt-and-send | Replace a running turn with a new instruction | Manual `cancel` + `send` | `send --interrupt` assembly |
-| `cancel --wait` | Confirm the active turn actually stopped | Fire-and-return | Wait for `idle`/turn end, bounded |
 | Per-turn timeout | Stop a hung turn | `--timeout` bounds the wait, not the turn | Documented cancel assembly, or `--turn-timeout` with product sign-off |
-| Cross-session permission | Operator with many gated workers | One request at a time | `permit --all-pending` client assembly over `list` + `permit` |
 | Resume | Recover a crashed session | None (see P0-14) | ACP load/resume, warm-host only |
 
 ### Operations and configuration
@@ -111,9 +108,6 @@ Original numbering is preserved for traceability.
 - **P2-23 — No pager or wrapping.** A large read page or long tool title floods the terminal.
 - **P2-33 — `agents` does not show configured environment keys.** `AgentView.envKeys` exists;
   the human table omits it. Add an `ENV` column or `--show-env` (never values).
-- **P2-35 — `down` warns but does not list affected sessions.** It reports the count and the
-  history loss; `close` has `--dry-run`, `down` does not. Print the live session list or add
-  `--dry-run`.
 - **P2-36 — `whoami` does not validate a stale `HLAO_SESSION_ID`.** It reports the environment
   as-is. Add a live check or a `live: false` field.
 - **P2-50 — Package metadata lacks `repository`, `homepage`, and `bugs`.** Minor distribution
@@ -126,6 +120,6 @@ Original numbering is preserved for traceability.
 
 ## Note
 
-Everything above is outside the shipped 0.5.0 surface. The implementation and its tests
-(54 unit, 80 end-to-end) are described in `README.md`, `contracts/`, and
-`docs/milestones/0.5.md`.
+Everything above remains outside the implemented 0.7 surface. The implementation and its tests
+(166 across unit, end-to-end, and acceptance) are described in `README.md`, `contracts/`, and
+`docs/milestones/0.7.md`.
