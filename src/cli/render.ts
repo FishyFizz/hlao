@@ -68,7 +68,12 @@ export function renderSessionTable(
       `${indent}${session.id}`,
       oneLine(session.name ?? "—"),
       session.backend,
-      styleStatus(session.status, style),
+      styleStatus(
+        session.status === "idle" && session.queued > 0
+          ? "busy"
+          : session.status,
+        style,
+      ),
       String(session.turn),
       session.queued > 0 ? String(session.queued) : "—",
       formatAge(session.lastActivityAt),

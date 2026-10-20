@@ -183,7 +183,9 @@ export interface SessionValue {
   turn: number;
   turnStartedAt: string | null;
   queued: number;
+  settled: boolean;
   lastSeq: number;
+  lastEvent: { type: string; title: string | null; at: string } | null;
   endedAt: string | null;
   pendingPermission: {
     requestId: string;

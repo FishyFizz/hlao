@@ -89,7 +89,8 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. `--name` gives it a label. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
-| `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `permission`, `exit`, or `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3. |
+| `hlao export <id> [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. |
+| `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `settled`, `permission`, `exit`, or a filtered `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3 (for `settled`, termination is a valid completion). |
 | `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
@@ -363,9 +364,9 @@ options; `hlao permit <id> --option <id>` answers exactly, `--deny` rejects, and
 <id>` abandons the turn.
 
 **History has gaps.** The event log is bounded by count and bytes; `read` reports `truncated`
-and the first retained sequence. Export anything you need with `hlao read <id> --since 0 --out
-history.json` (or `--json > file`) before `hlao down`, which ends every session and discards
-in-memory history.
+and the first retained sequence. Export anything you need with `hlao export <id> --out
+history.json` before `hlao down`, which ends every session and discards live and retained
+in-memory history. `export` pages the full history; `read --out` saves one bounded page.
 
 **An agent cannot find a session.** It may be in another HLAO instance (a different
 `HLAO_HOME`), already forgotten, or misspelled. Run `hlao list` in the intended instance;

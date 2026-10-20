@@ -166,6 +166,7 @@ export class Session {
   #ready = false;
   #waiters = new Set<() => void>();
   #changeListeners = new Set<() => void>();
+  #lastEvent: SessionView["lastEvent"] = null;
   #stderrTail: string[] = [];
   #config: SessionConfig;
   #backendManifest: BackendManifest;
@@ -241,7 +242,9 @@ export class Session {
       turn: this.#turn,
       turnStartedAt: this.#turnStartedAt,
       queued: this.#queue.length,
+      settled: this.#status === "idle" && this.#queue.length === 0,
       lastSeq: this.#log.lastSeq,
+      lastEvent: this.#lastEvent ? { ...this.#lastEvent } : null,
       pendingPermission: pending
         ? toPermissionView(pending.requestId, pending.requestedAt, pending.request)
         : null,
@@ -508,9 +511,11 @@ export class Session {
     since: number | undefined,
     timeoutMs: number,
     signal?: AbortSignal,
+    types?: EventType[],
+    grep?: string,
   ): Promise<WaitResult> {
     const startedAt = Date.now();
-    const changeSince = until === "change" ? (since ?? this.#log.lastSeq) : (since ?? 0);
+    let changeCursor = until === "change" ? (since ?? this.#log.lastSeq) : (since ?? 0);
 
     return new Promise<WaitResult>((resolve) => {
       let finished = false;
@@ -531,6 +536,16 @@ export class Session {
             if (this.#status === "idle") finish(true, "idle");
             else if (this.isTerminal) finish(false, "exit");
             return;
+          case "settled":
+            // Completion: a terminal session is done, a pending permission is
+            // an actionable stop, and idle alone is not enough while the queue
+            // still has work.
+            if (this.isTerminal) finish(true, "exit");
+            else if (this.#pending) finish(true, "permission");
+            else if (this.#status === "idle" && this.#queue.length === 0) {
+              finish(true, "idle");
+            }
+            return;
           case "permission":
             if (this.#pending) finish(true, "permission");
             else if (this.isTerminal) finish(false, "exit");
@@ -538,10 +553,24 @@ export class Session {
           case "exit":
             if (this.isTerminal) finish(true, "exit");
             return;
-          case "change":
-            if (this.#log.lastSeq > changeSince) finish(true, "change");
-            else if (this.isTerminal) finish(false, "exit");
+          case "change": {
+            const page = this.#log.read({
+              since: changeCursor,
+              limit: 1,
+              raw: false,
+              types,
+              grep,
+            });
+            if (page.events.length > 0) {
+              finish(true, "change");
+              return;
+            }
+            // Advance past scanned non-matching events; the corrected cursor
+            // is the last scanned seq, so a filtered waiter does not rescan.
+            changeCursor = page.nextSeq;
+            if (this.isTerminal) finish(false, "exit");
             return;
+          }
         }
       };
 
@@ -1416,6 +1445,11 @@ export class Session {
   #emit(type: EventType, data: Record<string, unknown>, turn?: number | null): EventView {
     this.#lastActivityAt = nowIso();
     const event = this.#log.append({ type, turn: turn ?? this.#active?.turn ?? null, data });
+    this.#lastEvent = {
+      type,
+      title: eventTitle(type, event.data),
+      at: event.at,
+    };
     if (type === "usage") {
       const rawCost = data.cost;
       let cost: SessionUsageView["cost"] = null;
@@ -1596,6 +1630,66 @@ function previewText(text: string): string {
   return oneLine.length > TEXT_PREVIEW_CHARS
     ? `${oneLine.slice(0, TEXT_PREVIEW_CHARS)}…`
     : oneLine;
+}
+
+const EVENT_TITLE_CHARS = 120;
+
+/**
+ * A bounded, one-line projection of an event for fleet views. It is not
+ * sanitized here: the wire carries text, and every renderer sanitizes it.
+ */
+function eventTitle(
+  type: EventType,
+  data: Record<string, unknown>,
+): string | null {
+  const text = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    const oneLine = value.replace(/\s+/g, " ").trim();
+    if (oneLine.length === 0) return null;
+    return oneLine.length > EVENT_TITLE_CHARS
+      ? `${oneLine.slice(0, EVENT_TITLE_CHARS)}…`
+      : oneLine;
+  };
+
+  switch (type) {
+    case "agent.message":
+    case "user.message":
+    case "prompt.sent":
+    case "prompt.queued":
+      return text(data.text);
+    case "tool.call":
+    case "tool.update":
+      return text(data.title) ?? text(data.name);
+    case "permission.requested":
+      return text(data.title);
+    case "turn.ended":
+      return text(data.stopReason);
+    case "session.created":
+      return text(data.backend) ?? "session created";
+    case "session.closed":
+    case "session.failed":
+      return text(data.reason) ?? text(data.message);
+    case "error":
+      return text(data.message);
+    case "notice":
+      return text(data.title) ?? text(data.severity);
+    case "plan":
+    case "plan.update": {
+      const entries = data.entries;
+      return Array.isArray(entries)
+        ? `${entries.length} plan entr${entries.length === 1 ? "y" : "ies"}`
+        : "plan updated";
+    }
+    case "usage": {
+      const used = data.used;
+      const size = data.size;
+      return typeof used === "number" && typeof size === "number"
+        ? `${used}/${size} tokens`
+        : "usage updated";
+    }
+    default:
+      return null;
+  }
 }
 
 function queueItemView(item: QueueItem, position: number | null): QueueItemView {

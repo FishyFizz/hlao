@@ -153,6 +153,40 @@ export async function cmdClose(args: string[]): Promise<number> {
       (session) => session.status !== "closed" && session.status !== "failed",
     );
     live.sort((left, right) => right.depth - left.depth);
+
+    // A dry run must report before any close. This branch used to sit before
+    // the dry-run check and closed the tree for real.
+    if (dryRun) {
+      const skipped = subtree.length - live.length;
+      if (ctx.json) {
+        writeJson({
+          dryRun: true,
+          count: live.length,
+          skipped,
+          sessions: subtree,
+        });
+        return 0;
+      }
+      out(ctx.style.dim("dry run; no session was changed"));
+      out(
+        renderTable(
+          ["ID", "NAME", "STATUS", "ACTION"],
+          live.map((session) => [
+            session.id,
+            sanitize(session.name ?? "—"),
+            styleStatus(session.status, ctx.style),
+            "close",
+          ]),
+          ctx.style,
+        ),
+      );
+      out(
+        `would close ${live.length} session${live.length === 1 ? "" : "s"}` +
+          (skipped > 0 ? ctx.style.dim(` (${skipped} already terminal)`) : ""),
+      );
+      return 0;
+    }
+
     const closed: SessionView[] = [];
     for (const session of live) {
       const result = await conn.request<CloseResult>("sessions.close", {
@@ -249,12 +283,20 @@ async function closeBulk(
     targets = targets.filter((session) => session.rootId === root.rootId);
   }
   if (options.statuses.size > 0) {
-    targets = targets.filter((session) => options.statuses.has(session.status));
+    // `status: idle` with a queued prompt is still work; surface it as busy so
+    // a bulk cleanup cannot discard the queue.
+    targets = targets.filter((session) =>
+      options.statuses.has(
+        session.status === "idle" && session.queued > 0
+          ? "busy"
+          : session.status,
+      ),
+    );
   }
   if (options.idle !== undefined) {
     const now = Date.now();
     targets = targets.filter((session) => {
-      if (session.status !== "idle") return false;
+      if (!session.settled) return false;
       const last = Date.parse(session.lastActivityAt);
       return Number.isFinite(last) && now - last >= options.idle!;
     });

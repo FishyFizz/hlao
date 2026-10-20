@@ -111,7 +111,8 @@ The token is the instance boundary.
   before relying on an addition.
 - `capabilities` lists additive features this supervisor implements. Unknown capabilities must
   be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
-  `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`.
+  `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`, `wait.settled`,
+  `wait.filters`, `session.settled`, `session.lastEvent`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -119,6 +120,9 @@ The token is the instance boundary.
 - **2.1** adds persistent connections, `stream.subscribe`, and resume. The 2.0 one-request
   lifecycle, envelope, errors, and frame limits are unchanged; a 2.0 client sees only new
   capabilities it may ignore.
+- **2.2** adds `wait --until settled`, `change` filters, `SessionView.settled` and
+  `lastEvent`, `shutdown.retainedDiscarded`, and corrects `nextSeq` to be a real cursor. All
+  additions are optional; `idle` keeps its existing "no active turn" meaning.
 
 ## Methods
 
@@ -325,17 +329,20 @@ Result:
   events: EventView[];            // ascending seq in both directions
   earliestRetainedSeq: number;
   lastSeq: number;
-  nextSeq: number;                // forward cursor: pass as since
+  nextSeq: number;                // last scanned seq: pass as since
   nextBefore: number | null;      // backward cursor: pass as before; null = no older page
   hasMore: boolean;               // more events in the scan direction
   truncated: boolean;             // history before the page was evicted
 }
 ```
 
-For a tail read (no cursor), `nextSeq` is `lastSeq + 1` and `hasMore` is false; use
-`nextBefore` to page backward. For a `since` read, `truncated` is true when
-`since + 1 < earliestRetainedSeq`. For a `before` read, it is true when the scan reached the
-oldest retained event and earlier history was evicted.
+`nextSeq` is the last seq the page scanned, so passing it back as `since` returns the next
+event without skipping or rescanning. For a forward page it is the last returned or scanned
+event; for a tail or backward page it is `lastSeq`; for a reader ahead of the log it is the
+caller's `since`. For a tail read (no cursor), `hasMore` is false; use `nextBefore` to page
+backward. For a `since` read, `truncated` is true when `since + 1 < earliestRetainedSeq`. For
+a `before` read, it is true when the scan reached the oldest retained event and earlier
+history was evicted.
 
 ### `sessions.wait`
 
@@ -346,8 +353,10 @@ Params:
   sessionId?: string;            // exactly one of sessionId or sessionIds
   sessionIds?: string[];         // 1..100; no duplicate ids
   mode?: "any" | "all";          // default "any"; ignored for one id
-  until: "idle" | "permission" | "exit" | "change";
+  until: "idle" | "settled" | "permission" | "exit" | "change";
   since?: number;                // only for "change" with a single id
+  types?: EventType[];           // only for "change": match these event types
+  grep?: string;                 // only for "change": case-insensitive literal
   timeoutMs?: number;            // defaults to config.waitTimeoutMs; 0 = no timeout
 }
 ```
@@ -357,12 +366,12 @@ Result:
 ```ts
 {
   satisfied: boolean;            // aggregate
-  reason: "idle" | "permission" | "exit" | "change" | "timeout";
+  reason: "idle" | "settled" | "permission" | "exit" | "change" | "timeout";
   waitedMs: number;
   results: {
     session: SessionView;
     satisfied: boolean;
-    reason: "idle" | "permission" | "exit" | "change" | "timeout" | "pending";
+    reason: "idle" | "settled" | "permission" | "exit" | "change" | "timeout" | "pending";
   }[];
   session?: SessionView;         // present only for a single-id request
 }
@@ -371,13 +380,21 @@ Result:
 The wait is one-shot: it resolves at the first matching condition and never re-arms. A
 timeout never changes a session.
 
+**`idle` vs `settled`.** `idle` means no active turn. A session can be idle with queued
+prompts between turns, so `idle` is not a completion signal. `settled` means no active turn
+**and** an empty queue; it is also satisfied by `waiting_permission` and by a terminal session.
+With `until: "settled"`, the per-target `reason` names the condition that matched (`idle`,
+`permission`, or `exit`). For a multi-id `all` wait, the aggregate `reason` is `exit` if any
+target ended, otherwise `settled`; an `any` wait reports the first satisfied target's reason.
+
 With several ids, `any` resolves on the first target that satisfies and `all` when every target
-does. A target that ends before satisfying `idle`, `permission`, or `change` is unsatisfied
-with reason `exit`; for `all`, that resolves the whole wait immediately. A target that is not
+does. For `idle`, `permission`, and `change`, a target that ends first is unsatisfied with
+reason `exit`; for `all`, that resolves the whole wait immediately. A target that is not
 settled when the aggregate resolves is evaluated at that moment: it is reported as satisfied
 if it already meets the condition, otherwise as `pending`. `change` uses each target's `lastSeq`
-at call time as its baseline; `since` is rejected with more than one id. All ids are resolved
-in this instance before waiting; one unknown or ambiguous id fails the request.
+at call time as its baseline; `since` is rejected with more than one id. `types` and `grep`
+filter the event that satisfies `change` and are rejected with any other condition. All ids
+are resolved in this instance before waiting; one unknown or ambiguous id fails the request.
 
 ### `sessions.cancel`
 
@@ -552,8 +569,9 @@ always reports the last successfully read (or attempted) file.
 
 Params: `{ force?: boolean }`. Operator only.
 
-Result: `{ sessionsClosed: number }`. The supervisor replies, then exits. `force` skips
-graceful ACP closes.
+Result: `{ sessionsClosed: number; retainedDiscarded: number }`. The supervisor replies, then
+exits. `force` skips graceful ACP closes. `retainedDiscarded` counts terminal sessions that
+were still in the live table; their event logs are lost with the supervisor.
 
 ## Event view
 
@@ -611,7 +629,13 @@ type SessionView = {
   turn: number;
   turnStartedAt: string | null;  // set while busy or waiting_permission
   queued: number;
+  settled: boolean;              // status idle && queued === 0 (2.2)
   lastSeq: number;
+  lastEvent: {                   // most recent event, for fleet views (2.2)
+    type: EventType;
+    title: string | null;        // bounded; renderers sanitize it
+    at: string;
+  } | null;
   pendingPermission: PermissionView | null;
   lastStopReason: StopReason | null;
   agentSessionId: string | null; // exposed for diagnostics only

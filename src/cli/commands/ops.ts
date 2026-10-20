@@ -22,6 +22,7 @@ import {
   normalizeProtocolVersion,
   WIRE_PROTOCOL_MAJOR,
   type HelloResult,
+  type ListResult,
   type ReloadResult,
   type SpawnResult,
 } from "../../protocol.js";
@@ -582,11 +583,16 @@ export async function cmdWhoami(args: string[]): Promise<number> {
 }
 
 export async function cmdDown(args: string[]): Promise<number> {
-  const parsed = parseArgs(args, [...COMMON, { name: "force", type: "boolean" }]);
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "force", type: "boolean" },
+    { name: "dry-run", type: "boolean" },
+  ]);
   if (helpRequested(parsed, "down")) return 0;
   expectPositionals(parsed, "down", 0, 0);
   const ctx = contextFrom(parsed);
   const force = booleanOption(parsed, "force") ?? false;
+  const dryRun = booleanOption(parsed, "dry-run") === true;
   const lock = readLock(ctx.home);
 
   if (!lock) {
@@ -601,6 +607,7 @@ export async function cmdDown(args: string[]): Promise<number> {
     return 0;
   }
 
+  let retained = 0;
   try {
     const conn = await connectSupervisor({
       home: ctx.home,
@@ -610,18 +617,64 @@ export async function cmdDown(args: string[]): Promise<number> {
       // `down` must be able to stop a pre-2.0 supervisor during an upgrade.
       allowLegacyProtocol: true,
     });
-    if (!ctx.json && ctx.callerSessionId === null) {
-      const hello = await conn.request<HelloResult>("hello", {});
-      if (hello.sessions > 0) {
-        process.stderr.write(
-          `hlao: stopping closes ${hello.sessions} live session${hello.sessions === 1 ? "" : "s"} and discards their in-memory history\n`,
+
+    // Retained terminal sessions hold the evidence a user needs after a crash.
+    // Count both kinds before stopping so the warning and the result agree.
+    const list = await conn.request<ListResult>("sessions.list", {
+      includeClosed: true,
+    });
+    const live = list.sessions.filter(
+      (session) => session.status !== "closed" && session.status !== "failed",
+    );
+    const retainedSessions = list.sessions.filter(
+      (session) => session.status === "closed" || session.status === "failed",
+    );
+    retained = retainedSessions.length;
+
+    if (dryRun) {
+      if (ctx.json) {
+        writeJson({
+          dryRun: true,
+          live: live.length,
+          retained,
+          sessions: list.sessions,
+        });
+        return 0;
+      }
+      out(
+        ctx.style.dim(
+          `dry run; ${live.length} live · ${retained} retained`,
+        ),
+      );
+      for (const session of list.sessions) {
+        const action =
+          session.status === "closed" || session.status === "failed"
+            ? "discard history"
+            : "close";
+        out(`would ${action}: ${session.id}${session.name ? ` (${sanitize(session.name)})` : ""}`);
+      }
+      return 0;
+    }
+
+    if (!ctx.json && (live.length > 0 || retained > 0)) {
+      const parts: string[] = [];
+      if (live.length > 0) {
+        parts.push(
+          `closes ${live.length} live session${live.length === 1 ? "" : "s"} and discards their in-memory history`,
         );
       }
+      if (retained > 0) {
+        parts.push(
+          `discards ${retained} retained session histor${retained === 1 ? "y" : "ies"}`,
+        );
+      }
+      process.stderr.write(`hlao: stopping ${parts.join(" and ")}\n`);
     }
-    const result = await conn.request<{ sessionsClosed: number }>(
-      "supervisor.shutdown",
-      { force },
-    );
+
+    const result = await conn.request<{
+      sessionsClosed: number;
+      retainedDiscarded: number;
+    }>("supervisor.shutdown", { force });
     if (!(await waitForLockRemoval(ctx.home, 10_000))) {
       throw new HlaoError(
         "timeout",
@@ -629,10 +682,15 @@ export async function cmdDown(args: string[]): Promise<number> {
       );
     }
     if (ctx.json) writeJson({ stopped: true, ...result });
-    else
+    else {
       out(
-        `supervisor stopped (${result.sessionsClosed} session${result.sessionsClosed === 1 ? "" : "s"} closed)`,
+        `supervisor stopped (${result.sessionsClosed} session${result.sessionsClosed === 1 ? "" : "s"} closed` +
+          (result.retainedDiscarded > 0
+            ? `, ${result.retainedDiscarded} retained histor${result.retainedDiscarded === 1 ? "y" : "ies"} discarded`
+            : "") +
+          ")",
       );
+    }
     return 0;
   } catch (error) {
     if (!force) throw error;
@@ -676,8 +734,21 @@ export async function cmdDown(args: string[]): Promise<number> {
       );
     }
     removeLock(ctx.home, lock.token);
-    if (ctx.json) writeJson({ stopped: true, forced: true, sessionsClosed: 0 });
-    else out("supervisor killed; lock removed");
+    if (ctx.json) {
+      writeJson({
+        stopped: true,
+        forced: true,
+        sessionsClosed: 0,
+        retainedDiscarded: retained,
+      });
+    } else {
+      out(
+        "supervisor killed; lock removed" +
+          (retained > 0
+            ? ` (${retained} retained histor${retained === 1 ? "y" : "ies"} discarded)`
+            : ""),
+      );
+    }
     return 0;
   }
 }

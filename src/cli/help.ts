@@ -27,8 +27,9 @@ Usage:
   hlao read [<id>] [--since N | --before N] [--type T] [--grep TEXT]
                                              read orchestration state + events
   hlao read [<id>] --follow [--jsonl] [--out FILE]
-                                             watch new events / export a page
-  hlao wait [<id>...] [--any|--all] [--until idle|permission|exit|change]
+                                             watch new events / save one page
+  hlao export [<id>] [--out FILE] [--jsonl]  full retained history
+  hlao wait [<id>...] [--any|--all] [--until idle|settled|permission|exit|change]
                                              one-shot await, one or many sessions
   hlao list [--all] [--cwd DIR]                sessions in this instance
   hlao list [--wide] [--usage] [--tree] [--watch]
@@ -95,6 +96,7 @@ const COMMAND_HELP_NAMES = new Set([
   "spawn",
   "send",
   "read",
+  "export",
   "wait",
   "list",
   "cancel",
@@ -180,6 +182,22 @@ The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
 hasMore, and truncated. Filters are applied before the page limit, and cursors
 advance past non-matching events. Tool payloads are omitted unless
 --raw/--verbose; --grep does not search private payloads without --raw.`,
+    export: `hlao export [<id>] [options]
+
+Export the session's full retained history, paging until no events remain.
+This is the supported recovery path before "hlao down"; "read --out" saves one
+bounded page by design.
+
+Options:
+  --self                 target this shell's own session
+  --since N              start after this seq (default 0: all retained events)
+  --raw                  include original ACP payloads
+  --jsonl                one event object per line (not with --json)
+  --out FILE             write to FILE instead of stdout
+
+Without --out the JSON result is written to stdout, so redirecting it is safe.
+The result reports count and whether history was already truncated; human
+output names the file and the event count.`,
     wait: `hlao wait [<id>...] [options]
 
 One-shot await on orchestration state. It never re-arms.
@@ -188,9 +206,15 @@ Options:
   --self                 target this shell's own session
   --any                  with several ids, resolve on the first to satisfy
   --all                  with several ids, resolve when every one satisfies
-  --until idle|permission|exit|change   default idle
+  --until idle|settled|permission|exit|change   default idle
   --since N              baseline for "change" (single id only; default: now)
+  --type TYPE            with "change": wake only on this event type; repeatable
+  --grep TEXT            with "change": wake only on a matching event
   --timeout DUR          bound; default from config (30m), 0 = no bound
+
+"idle" means no active turn and no queued prompt. The wire's turn boundary is
+also called idle; this CLI uses the completion condition. "settled" is the
+same condition expressed explicitly.
 
 With several ids, the JSON result includes per-target results in request order;
 a target still waiting when the wait resolves is reported as "pending". A
@@ -325,9 +349,9 @@ HLAO_* environment. An operator shell has no session id.`,
     down: `hlao down [--force]
 
 Ask the supervisor to close all sessions and exit. This ends every live session
-and loses its in-memory history; export anything you need first with
-"hlao read <id> --since 0 --json". --force kills the process and removes the
-lock when the normal path is not available.`,
+and loses the in-memory history of live and retained sessions; export anything
+you need first with "hlao export <id> --out FILE". --force kills the process
+and removes the lock when the normal path is not available.`,
   };
   return help[command] ?? fullHelp();
 }

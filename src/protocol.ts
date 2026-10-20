@@ -12,7 +12,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 1 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 2 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -56,6 +56,10 @@ export const PROTOCOL_CAPABILITIES = [
   "stream.persistent",
   "stream.subscribe",
   "stream.resume",
+  "wait.settled",
+  "wait.filters",
+  "session.settled",
+  "session.lastEvent",
 ] as const;
 
 export type ProtocolCapability = (typeof PROTOCOL_CAPABILITIES)[number];
@@ -79,7 +83,7 @@ export type SessionStatus =
   | "waiting_permission"
   | "closed"
   | "failed";
-export type WaitUntil = "idle" | "permission" | "exit" | "change";
+export type WaitUntil = "idle" | "settled" | "permission" | "exit" | "change";
 
 export const EVENT_TYPES = [
   "session.created",
@@ -178,7 +182,18 @@ export interface SessionView {
   turn: number;
   turnStartedAt: string | null;
   queued: number;
+  /**
+   * True only when there is no active turn and no queued prompt. This is the
+   * completion signal; `status: "idle"` alone can still have queued work.
+   */
+  settled: boolean;
   lastSeq: number;
+  /** The most recent event, projected for fleet views and dashboards. */
+  lastEvent: {
+    type: EventType;
+    title: string | null;
+    at: string;
+  } | null;
   pendingPermission: PermissionView | null;
   lastStopReason: StopReason | null;
   agentSessionId: string | null;
@@ -430,6 +445,10 @@ export interface WaitParams {
   until: WaitUntil;
   /** Only valid with a single id and `until: "change"`. */
   since?: number;
+  /** Only valid with `until: "change"`; filters the event that satisfies it. */
+  types?: EventType[];
+  /** Only valid with `until: "change"`; case-insensitive literal over type + data. */
+  grep?: string;
   timeoutMs?: number;
 }
 export interface WaitTargetResult {
@@ -440,6 +459,11 @@ export interface WaitTargetResult {
 }
 export interface WaitResult {
   satisfied: boolean;
+  /**
+   * The matched condition. `settled` is reported only as a multi-id `all`
+   * aggregate, where targets may have matched different conditions; per-target
+   * reasons name the actual one.
+   */
   reason: WaitUntil | "timeout";
   waitedMs: number;
   results: WaitTargetResult[];
@@ -541,6 +565,8 @@ export interface ShutdownParams {
 }
 export interface ShutdownResult {
   sessionsClosed: number;
+  /** Retained terminal sessions whose event logs are lost with the supervisor. */
+  retainedDiscarded: number;
 }
 export interface ReloadParams {}
 export interface ReloadResult {
@@ -1055,7 +1081,16 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       const object = asObject(raw, what);
       checkKeys(
         object,
-        ["sessionId", "sessionIds", "mode", "until", "since", "timeoutMs"],
+        [
+          "sessionId",
+          "sessionIds",
+          "mode",
+          "until",
+          "since",
+          "types",
+          "grep",
+          "timeoutMs",
+        ],
         what,
       );
       const sessionId = optString(object, "sessionId", what, 64);
@@ -1079,14 +1114,30 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           `${what}.since is only valid with a single session id`,
         );
       }
+      const until =
+        optEnum(object, "until", what, [
+          "idle",
+          "settled",
+          "permission",
+          "exit",
+          "change",
+        ] as const) ?? "idle";
+      const types = eventTypeArray(object, "types", what);
+      const grep = optString(object, "grep", what, 500);
+      if ((types !== undefined || grep !== undefined) && until !== "change") {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.types and ${what}.grep require until: "change"`,
+        );
+      }
       return {
         sessionId,
         sessionIds,
         mode: optEnum(object, "mode", what, ["any", "all"] as const),
-        until:
-          optEnum(object, "until", what, ["idle", "permission", "exit", "change"] as const) ??
-          "idle",
+        until,
         since,
+        types,
+        grep,
         timeoutMs: optInt(object, "timeoutMs", what, 0, MAX_TIMEOUT_MS),
       } as ParamsByMethod[M];
     }

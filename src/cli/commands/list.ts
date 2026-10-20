@@ -212,7 +212,13 @@ function filterSessions(
   let result = [...sessions];
   if (filters.statuses) {
     const allowed = new Set(filters.statuses);
-    result = result.filter((session) => allowed.has(session.status));
+    result = result.filter((session) =>
+      allowed.has(
+        session.status === "idle" && session.queued > 0
+          ? "busy"
+          : session.status,
+      ),
+    );
   }
   if (filters.backend !== undefined) {
     const backend = filters.backend.toLowerCase();

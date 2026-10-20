@@ -62,3 +62,34 @@ test("down --force from a session is refused", async (t) => {
   assert.equal(listed.code, 0);
   assert.ok(listed.value.sessions.some((session) => session.id === id));
 });
+
+test("down reports retained history and supports --dry-run", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>(["spawn", "fake", "--wait"]);
+  assert.equal(spawned.code, 0);
+  const id = spawned.value.session.id;
+  const closed = await harness.json(["close", id]);
+  assert.equal(closed.code, 0);
+
+  const dry = await harness.json<{
+    dryRun: boolean;
+    live: number;
+    retained: number;
+  }>(["down", "--dry-run"]);
+  assert.equal(dry.code, 0);
+  assert.equal(dry.value.dryRun, true);
+  assert.equal(dry.value.live, 0);
+  assert.equal(dry.value.retained, 1);
+
+  // A dry run must not stop the supervisor or discard the retained log.
+  const listed = await harness.json<ListValue>(["list", "--all"]);
+  assert.equal(listed.code, 0);
+  assert.ok(listed.value.sessions.some((session) => session.id === id));
+
+  const human = await harness.run(["down"], { json: false });
+  assert.equal(human.code, 0);
+  assert.match(human.stderr, /retained session history/);
+  assert.match(human.stdout, /1 retained history discarded/);
+});

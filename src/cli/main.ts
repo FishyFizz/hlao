@@ -21,6 +21,7 @@ import {
 } from "./commands/control.js";
 import { cmdList } from "./commands/list.js";
 import {
+  cmdExport,
   cmdRead,
   cmdSend,
   cmdSpawn,
@@ -94,6 +95,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdSend(args);
       case "read":
         return await cmdRead(args);
+      case "export":
+        return await cmdExport(args);
       case "wait":
         return await cmdWait(args);
       case "list":

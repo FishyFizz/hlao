@@ -441,3 +441,38 @@ test("provider config options can be selected at spawn and changed live", async 
   }>(["option", noOptions.value.session.id]);
   assert.equal(plain.value.session.configOptions, null);
 });
+
+test("close --tree --dry-run reports without closing anything", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const parent = await spawnParent(harness, "tree-dry-parent");
+  const child = await harness.json<SpawnValue>(
+    ["spawn", "fake", "child", "--wait"],
+    { env: parent.env },
+  );
+  assert.equal(child.code, 0);
+  const childId = child.value.session.id;
+
+  const dry = await harness.json<{
+    dryRun: boolean;
+    count: number;
+    sessions: { id: string; status: string }[];
+  }>(["close", parent.id, "--tree", "--dry-run"]);
+  assert.equal(dry.code, 0);
+  assert.equal(dry.value.dryRun, true);
+  assert.equal(dry.value.count, 2);
+  assert.deepEqual(
+    new Set(dry.value.sessions.map((session) => session.id)),
+    new Set([parent.id, childId]),
+  );
+
+  const after = await harness.json<{
+    sessions: { id: string; status: string }[];
+  }>(["list", "--all"]);
+  const byId = new Map(
+    after.value.sessions.map((session) => [session.id, session.status]),
+  );
+  assert.equal(byId.get(parent.id), "idle");
+  assert.equal(byId.get(childId), "idle");
+});

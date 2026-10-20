@@ -4,9 +4,11 @@ import type { SupervisorConnection } from "../../client.js";
 import { HlaoError } from "../../errors.js";
 import type {
   EventType,
+  EventView,
   PermissionPolicy,
   ReadResult,
   SendResult,
+  SessionView,
   SpawnResult,
   WaitResult,
 } from "../../protocol.js";
@@ -272,6 +274,111 @@ export async function cmdSend(args: string[]): Promise<number> {
   return 0;
 }
 
+const EXPORT_PAGE_SIZE = 1_000;
+
+/**
+ * Export the full retained history, not one bounded page. History is lost on
+ * `down`, so this is the supported recovery path; it reports truncation when
+ * the log had already evicted events.
+ */
+export async function cmdExport(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+    { name: "since", type: "number", valueName: "SEQ" },
+    { name: "raw", type: "boolean" },
+    { name: "jsonl", type: "boolean" },
+    { name: "out", type: "path", valueName: "FILE" },
+  ]);
+  if (helpRequested(parsed, "export")) return 0;
+  expectPositionals(parsed, "export", 0, 1);
+
+  const ctx = contextFrom(parsed);
+  if (ctx.json && booleanOption(parsed, "jsonl") === true) {
+    throw usageError("choose --json or --jsonl");
+  }
+  const sessionId = resolveTarget(parsed, "export", "selfDefault");
+  const raw = booleanOption(parsed, "raw") === true;
+  const jsonl = booleanOption(parsed, "jsonl") === true;
+  const outFile = stringOption(parsed, "out");
+  let since = numberOption(parsed, "since") ?? 0;
+  const conn = await connect(ctx);
+
+  const events: EventView[] = [];
+  let session: SessionView | null = null;
+  let earliestRetainedSeq = 0;
+  let lastSeq = 0;
+  let truncated = false;
+
+  for (;;) {
+    const page = await conn.request<ReadResult>("sessions.read", {
+      sessionId,
+      since,
+      limit: EXPORT_PAGE_SIZE,
+      raw,
+    });
+    session = page.session;
+    earliestRetainedSeq = page.earliestRetainedSeq;
+    lastSeq = page.lastSeq;
+    truncated = truncated || page.truncated;
+    events.push(...page.events);
+    if (!page.hasMore) break;
+    const next = page.nextSeq;
+    if (next <= since) {
+      throw new HlaoError("internal", "export cursor did not advance");
+    }
+    since = next;
+  }
+
+  if (session === null) {
+    throw new HlaoError("internal", "export returned no session");
+  }
+
+  if (jsonl) {
+    const body = events.map((event) => JSON.stringify(event)).join("\n");
+    const text = body.length > 0 ? `${body}\n` : "";
+    if (outFile !== undefined) {
+      writeFileSync(resolve(outFile), text);
+      if (!ctx.json) {
+        out(
+          `exported ${events.length} event${events.length === 1 ? "" : "s"} to ${outFile}`,
+        );
+      }
+    } else {
+      process.stdout.write(text);
+    }
+    return 0;
+  }
+
+  const payload = {
+    session,
+    events,
+    earliestRetainedSeq,
+    lastSeq,
+    count: events.length,
+    truncated,
+  };
+
+  if (outFile !== undefined) {
+    writeFileSync(resolve(outFile), `${JSON.stringify(payload, null, 2)}\n`);
+    if (ctx.json) {
+      writeJson(payload);
+    } else {
+      out(
+        `exported ${events.length} event${events.length === 1 ? "" : "s"} to ${outFile}` +
+          (truncated
+            ? ctx.style.dim(` · history begins at seq ${earliestRetainedSeq}`)
+            : ""),
+      );
+    }
+    return 0;
+  }
+
+  // Without a file, JSON on stdout keeps `hlao export <id> > history.json` safe.
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+  return 0;
+}
+
 export async function cmdRead(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
@@ -503,6 +610,8 @@ export async function cmdWait(args: string[]): Promise<number> {
     { name: "self", type: "boolean" },
     { name: "until", type: "string", valueName: "STATE" },
     { name: "since", type: "number", valueName: "SEQ" },
+    { name: "type", type: "string", valueName: "TYPE", multiple: true },
+    { name: "grep", type: "string", valueName: "TEXT" },
     { name: "timeout", type: "duration", valueName: "DUR" },
     { name: "any", type: "boolean" },
     { name: "all", type: "boolean" },
@@ -533,8 +642,26 @@ export async function cmdWait(args: string[]): Promise<number> {
   }
 
   const until = stringOption(parsed, "until") ?? "idle";
-  if (!["idle", "permission", "exit", "change"].includes(until)) {
-    throw usageError("--until must be idle, permission, exit, or change");
+  if (!["idle", "settled", "permission", "exit", "change"].includes(until)) {
+    throw usageError(
+      "--until must be idle, settled, permission, exit, or change",
+    );
+  }
+  // The CLI's idle is the completion signal: no active turn and no queue.
+  // The wire keeps `idle` precise and exposes completion as `settled`.
+  const wireUntil = until === "idle" ? "settled" : until;
+  const rawTypes = multipleOption(parsed, "type");
+  for (const type of rawTypes) {
+    if (!(EVENT_TYPES as readonly string[]).includes(type)) {
+      throw usageError(
+        `unknown event type "${type}" — known types: ${EVENT_TYPES.join(", ")}`,
+      );
+    }
+  }
+  const types = rawTypes.length > 0 ? rawTypes : undefined;
+  const grep = stringOption(parsed, "grep");
+  if ((types !== undefined || grep !== undefined) && until !== "change") {
+    throw usageError("--type and --grep require --until change");
   }
   const since = numberOption(parsed, "since");
   if (since !== undefined && ids.length > 1) {
@@ -555,8 +682,10 @@ export async function cmdWait(args: string[]): Promise<number> {
       ...(ids.length === 1
         ? { sessionId: ids[0] }
         : { sessionIds: ids, mode: all ? "all" : "any" }),
-      until,
+      until: wireUntil,
       since,
+      ...(types !== undefined ? { types } : {}),
+      ...(grep !== undefined ? { grep } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     },
     { timeoutMs: 0 },
@@ -580,8 +709,24 @@ export async function cmdWait(args: string[]): Promise<number> {
       : [];
   const result: WaitResult = { ...raw, results };
 
+  // The CLI's `idle` is satisfied by `settled`, where a terminal session counts
+  // as completion. Keep the historical `--until idle` contract: a session that
+  // ended before reaching idle is unsatisfied and exits 3. `--until settled`
+  // deliberately treats termination as a valid completion (exit 0).
+  if (until === "idle") {
+    for (const entry of result.results) {
+      if (entry.reason === "exit") entry.satisfied = false;
+    }
+    result.satisfied = all
+      ? result.results.every((entry) => entry.satisfied)
+      : result.results.some((entry) => entry.satisfied);
+  }
+
+  const sawExit =
+    result.reason === "exit" ||
+    result.results.some((entry) => entry.reason === "exit");
   const code =
-    result.reason === "timeout" ? 2 : result.reason === "exit" && until !== "exit" ? 3 : 0;
+    result.reason === "timeout" ? 2 : !result.satisfied && sawExit ? 3 : 0;
 
   if (ctx.json) {
     writeJson(result);

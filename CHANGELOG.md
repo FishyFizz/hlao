@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 — unreleased
+
+### Added
+
+- Protocol `2.2` (additive): `wait --until settled` (no active turn and no queued prompts;
+  also satisfied by a pending permission or a terminal session), `change` filters
+  (`types`/`grep`), `SessionView.settled`, `SessionView.lastEvent`, and
+  `shutdown.retainedDiscarded`. New capabilities: `wait.settled`, `wait.filters`,
+  `session.settled`, `session.lastEvent`.
+- `hlao export <id> [--out FILE] [--jsonl]` pages the full retained history. `read --out`
+  remains a single bounded page; export is the supported recovery path before `down`.
+- `down --dry-run` lists the sessions that would be closed or discarded; `down` warns about
+  live and retained terminal sessions and reports both counts.
+
+### Fixed
+
+- `close --tree --dry-run` no longer closes the tree.
+- `wait --until idle` no longer resolves between queued turns; an idle session with a queue is
+  reported as busy by `list`, `close --status idle`, and `close --idle`.
+- `nextSeq` is now the last scanned seq, so a client that pages with it never skips an event
+  (`read --follow` included).
+- `down` no longer discards retained failed/closed histories without reporting them.
+
 ## 0.6.0 — unreleased
 
 ### Added

@@ -144,7 +144,9 @@ export class EventLog {
       events: page.map((event) => toView(event, raw)),
       earliestRetainedSeq: earliest,
       lastSeq: this.#lastSeq,
-      nextSeq: this.#lastSeq + 1,
+      // The cursor to pass back as `since`: the largest seq the caller has now
+      // seen. For a tail read that is the last seq in the log.
+      nextSeq: this.#lastSeq,
       nextBefore,
       hasMore: false,
       truncated: earliest > 1,
@@ -163,7 +165,6 @@ export class EventLog {
     const page: StoredEvent[] = [];
     let bytes = 0;
     let scanEnd = start;
-    let blocked = false;
 
     for (let index = start; index < this.#events.length; index += 1) {
       const event = this.#events[index]!;
@@ -173,7 +174,6 @@ export class EventLog {
       }
       if (page.length > 0 && bytes + event.bytes > this.#maxPageBytes) {
         // Leave the oversized event for the next page.
-        blocked = true;
         scanEnd = index;
         break;
       }
@@ -183,11 +183,11 @@ export class EventLog {
       if (page.length >= limit) break;
     }
 
-    const nextSeq = blocked
-      ? this.#events[scanEnd]!.seq
-      : scanEnd < this.#events.length
-        ? this.#events[scanEnd]!.seq
-        : Math.max(since, this.#lastSeq + 1);
+    // `since` is exclusive, so the next cursor is the last scanned seq, not the
+    // first unscanned one. `scanEnd` is the index after the last scanned event,
+    // and a blocked event was deliberately left unscanned.
+    const nextSeq =
+      scanEnd > start ? this.#events[scanEnd - 1]!.seq : since;
 
     return {
       events: page.map((event) => toView(event, raw)),
@@ -234,7 +234,7 @@ export class EventLog {
           events: page.map((entry) => toView(entry, raw)),
           earliestRetainedSeq: earliest,
           lastSeq: this.#lastSeq,
-          nextSeq: this.#lastSeq + 1,
+          nextSeq: this.#lastSeq,
           nextBefore: index > 0 ? this.#events[index]!.seq : null,
           hasMore: index > 0,
           truncated: index === 0 && earliest > 1,
@@ -253,7 +253,7 @@ export class EventLog {
       events: page.map((event) => toView(event, raw)),
       earliestRetainedSeq: earliest,
       lastSeq: this.#lastSeq,
-      nextSeq: this.#lastSeq + 1,
+      nextSeq: this.#lastSeq,
       nextBefore,
       hasMore: blockedAt !== null,
       truncated: oldestScanned === 0 && earliest > 1,

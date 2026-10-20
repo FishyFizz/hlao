@@ -30,7 +30,7 @@ test("append assigns monotonic sequences and reports the tail", () => {
     tail.events.map((event) => event.seq),
     [2, 3],
   );
-  assert.equal(tail.nextSeq, 4);
+  assert.equal(tail.nextSeq, 3);
   assert.equal(tail.hasMore, false);
   assert.equal(tail.truncated, false);
 });
@@ -45,13 +45,13 @@ test("since reads page forward and report more", () => {
     first.events.map((event) => event.seq),
     [2, 3],
   );
-  assert.equal(first.nextSeq, 4);
+  assert.equal(first.nextSeq, 3);
   assert.equal(first.hasMore, true);
 
   const second = events.read({ since: first.nextSeq, limit: 10, raw: false });
   assert.deepEqual(
     second.events.map((event) => event.seq),
-    [5],
+    [4, 5],
   );
   assert.equal(second.hasMore, false);
 });
@@ -149,7 +149,7 @@ test("type, turn, and grep filters apply before the page limit", () => {
     types: ["notice"],
   });
   assert.deepEqual(notices.events.map((event) => event.seq), [1, 3]);
-  assert.equal(notices.nextSeq, 5);
+  assert.equal(notices.nextSeq, 4);
   assert.equal(notices.hasMore, false);
 
   const secondTurn = events.read({ since: 0, limit: 10, raw: false, turn: 2 });
@@ -178,7 +178,7 @@ test("a filtered forward read advances past non-matching events", () => {
   }
   const first = events.read({ since: 0, limit: 1, raw: false, types: ["notice"] });
   assert.deepEqual(first.events.map((event) => event.seq), [9]);
-  assert.equal(first.nextSeq, 10);
+  assert.equal(first.nextSeq, 9);
   assert.equal(first.hasMore, true);
 
   const rest = events.read({
@@ -188,7 +188,8 @@ test("a filtered forward read advances past non-matching events", () => {
     types: ["notice"],
   });
   assert.equal(rest.events.length, 0);
-  assert.equal(rest.nextSeq, 11);
+  // The cursor advances past scanned non-matching events.
+  assert.equal(rest.nextSeq, 10);
   assert.equal(rest.hasMore, false);
 });
 

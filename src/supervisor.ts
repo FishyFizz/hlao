@@ -830,7 +830,14 @@ export class SupervisorServer {
 
     if (targets.length === 1) {
       const session = targets[0]!;
-      const waited = await session.waitFor(params.until, params.since, timeoutMs, signal);
+      const waited = await session.waitFor(
+        params.until,
+        params.since,
+        timeoutMs,
+        signal,
+        params.types,
+        params.grep,
+      );
       const view = session.view();
       return {
         ...waited,
@@ -861,6 +868,16 @@ export class SupervisorServer {
             return view.status === "idle"
               ? { session: view, satisfied: true, reason: "idle" }
               : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
+          case "settled":
+            if (terminal) {
+              return { session: view, satisfied: true, reason: "exit" };
+            }
+            if (view.pendingPermission !== null) {
+              return { session: view, satisfied: true, reason: "permission" };
+            }
+            return view.settled
+              ? { session: view, satisfied: true, reason: "idle" }
+              : { session: view, satisfied: false, reason: "pending" };
           case "permission":
             return view.pendingPermission !== null
               ? { session: view, satisfied: true, reason: "permission" }
@@ -871,10 +888,18 @@ export class SupervisorServer {
               satisfied: terminal,
               reason: terminal ? "exit" : "pending",
             };
-          case "change":
-            return view.lastSeq > (baselines[index] ?? 0)
+          case "change": {
+            const page = target.read({
+              since: baselines[index] ?? 0,
+              limit: 1,
+              raw: false,
+              types: params.types,
+              grep: params.grep,
+            });
+            return page.events.length > 0
               ? { session: view, satisfied: true, reason: "change" }
               : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
+          }
         }
       };
 
@@ -903,7 +928,14 @@ export class SupervisorServer {
       targets.forEach((target, index) => {
         const since = params.until === "change" ? baselines[index] : params.since;
         void target
-          .waitFor(params.until, since, timeoutMs, controller.signal)
+          .waitFor(
+            params.until,
+            since,
+            timeoutMs,
+            controller.signal,
+            params.types,
+            params.grep,
+          )
           .then(
             (waited) => {
               settled.set(index, {
@@ -920,8 +952,20 @@ export class SupervisorServer {
                 return;
               }
               if (settled.size === targets.length) {
-                if (mode === "all") finish(true, params.until);
-                else settleAll();
+                if (mode === "all") {
+                  const reasons = [...settled.values()].map(
+                    (entry) => entry.reason,
+                  );
+                  // If any target ended, report that as the aggregate reason:
+                  // an ended session is the fact a caller must not miss, even
+                  // when another target reached the condition.
+                  finish(
+                    true,
+                    reasons.includes("exit") ? "exit" : params.until,
+                  );
+                } else {
+                  settleAll();
+                }
               }
             },
             () => {
@@ -1068,8 +1112,11 @@ export class SupervisorServer {
     const sessionsClosed = [...this.#sessions.values()].filter(
       (session) => !session.isTerminal,
     ).length;
+    const retainedDiscarded = [...this.#sessions.values()].filter(
+      (session) => session.isTerminal,
+    ).length;
     this.#shutdownAfterResponse = { force: params.force ?? false };
-    return { sessionsClosed };
+    return { sessionsClosed, retainedDiscarded };
   }
 
   // -------------------------------------------------------------------------

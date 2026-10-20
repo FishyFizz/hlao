@@ -312,6 +312,18 @@ const app = agent({ name: "fake-acp" })
       return { stopReason: "end_turn" };
     }
 
+    if (mode === "flood") {
+      const count = Number(process.env.FAKE_CHUNKS ?? 150);
+      for (let index = 0; index < count; index += 1) {
+        await send({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `chunk-${index} ` },
+          messageId: `flood-${Math.floor(index / 10)}`,
+        });
+      }
+      return { stopReason: "end_turn" };
+    }
+
     // echo / chunks
     await send({
       sessionUpdate: "agent_thought_chunk",
