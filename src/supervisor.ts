@@ -158,6 +158,13 @@ class SupervisorServer {
   /** The lock owner replaced by this start, when it did not stop cleanly. */
   #lastCrash: LastCrash | null = null;
   #sessions = new Map<string, Session>();
+  /**
+   * Blocking cross-session waits held by in-flight requests:
+   * caller -> target -> reference count. A cycle is a turn-level deadlock:
+   * the target's queued message cannot run until the caller's turn ends, and
+   * the caller's turn cannot end until the target's turn does.
+   */
+  #waitEdges = new Map<string, Map<string, number>>();
   #server: WireStreamServer | null = null;
   #streams = new Set<WireStream>();
   #changeObservers = new Set<() => void>();
@@ -587,7 +594,7 @@ class SupervisorServer {
       case "sessions.read":
         return this.#read(params as ReadParams);
       case "sessions.wait":
-        return this.#wait(params as WaitParams, signal);
+        return this.#wait(params as WaitParams, signal, caller);
       case "sessions.cancel":
         return this.#cancel(params as CancelParams, caller);
       case "sessions.close":
@@ -899,33 +906,144 @@ class SupervisorServer {
     };
   }
 
+  /** A caller inside a turn can be blocked by its own in-flight wait request. */
+  #callerInTurn(caller: string): boolean {
+    const session = this.#sessions.get(caller);
+    if (session === undefined || session.isTerminal) return false;
+    const status = session.view().status;
+    return status === "busy" || status === "waiting_permission";
+  }
+
+  /** Path over blocking wait edges from `start` to `goal`, inclusive, or null. */
+  #waitPath(start: string, goal: string): string[] | null {
+    const seen = new Set<string>();
+    const visit = (node: string, path: string[]): string[] | null => {
+      if (node === goal) return path;
+      if (seen.has(node)) return null;
+      seen.add(node);
+      const targets = this.#waitEdges.get(node);
+      if (targets === undefined) return null;
+      for (const target of targets.keys()) {
+        const found = visit(target, [...path, target]);
+        if (found !== null) return found;
+      }
+      return null;
+    };
+    return visit(start, [start]);
+  }
+
+  /** Hold wait edges for one request; the returned release is idempotent. */
+  #holdWaitEdges(caller: string, targets: readonly string[]): () => void {
+    for (const target of targets) {
+      let edges = this.#waitEdges.get(caller);
+      if (edges === undefined) {
+        edges = new Map();
+        this.#waitEdges.set(caller, edges);
+      }
+      edges.set(target, (edges.get(target) ?? 0) + 1);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const edges = this.#waitEdges.get(caller);
+      if (edges === undefined) return;
+      for (const target of targets) {
+        const count = edges.get(target);
+        if (count === undefined) continue;
+        if (count <= 1) edges.delete(target);
+        else edges.set(target, count - 1);
+      }
+      if (edges.size === 0) this.#waitEdges.delete(caller);
+    };
+  }
+
+  /** A wait that already holds does not block, so it cannot close a cycle. */
+  #waitSatisfiedNow(session: Session, until: WaitParams["until"]): boolean {
+    if (until === "change") return false;
+    const view = session.view();
+    const awaitingInput =
+      view.pendingPermission !== null || view.pendingElicitation !== null;
+    switch (until) {
+      case "idle":
+        return view.status === "idle";
+      case "settled":
+        return (
+          isTerminalStatus(view.status) || view.settled || awaitingInput
+        );
+      case "permission":
+        return awaitingInput;
+      case "exit":
+        return isTerminalStatus(view.status);
+    }
+  }
+
+  /**
+   * A self change-wait filtered only to events emitted when a turn ends
+   * cannot resolve during that same turn.
+   */
+  #selfChangeDeadlock(types: WaitParams["types"]): boolean {
+    if (types === undefined || types.length === 0) return false;
+    const afterTurn = new Set(["prompt.sent", "turn.started", "turn.ended"]);
+    return types.every((type) => afterTurn.has(type));
+  }
+
+  #waitCycleError(kind: "send" | "wait", chain: string[]): HlaoError {
+    const advice =
+      kind === "send"
+        ? "Send without --wait so the message runs after the current turn."
+        : "End the turn so the queued prompt can run; a reply cannot arrive in the middle of the turn that is waiting for it.";
+    return new HlaoError(
+      "bad_request",
+      `wait cycle: ${chain.join(" -> ")}. A message queued behind that cycle cannot start a turn. ${advice}`,
+    );
+  }
+
   async #send(params: SendParams, caller: string | null): Promise<SendResult> {
     const session = this.#resolve(params.sessionId);
-    const sent = await session.send(
-      params.text,
-      params.wait ?? false,
-      params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
-      actor(caller),
-      {
-        ...(params.messageId !== undefined ? { messageId: params.messageId } : {}),
-        ...(params.idempotencyKey !== undefined
-          ? { idempotencyKey: params.idempotencyKey }
-          : {}),
-      },
-    );
-    return {
-      session: session.view(),
-      messageId: sent.messageId,
-      queued: sent.queued,
-      ...(sent.pending !== undefined ? { pending: sent.pending } : {}),
-      turn: sent.turn,
-      completed: sent.completed,
-      timedOut: sent.timedOut,
-      stopReason: sent.stopReason,
-      text: sent.text,
-      ...(sent.outcome !== undefined ? { outcome: sent.outcome } : {}),
-      ...(sent.duplicate !== undefined ? { duplicate: sent.duplicate } : {}),
-    };
+    // A session inside a turn that waits for another session can deadlock when
+    // the target tries to wait for a reply queued behind the caller's turn.
+    // The self-send case is already rejected by Session.send.
+    const blocking =
+      params.wait === true &&
+      caller !== null &&
+      caller !== session.id &&
+      this.#callerInTurn(caller);
+    let release: (() => void) | undefined;
+    if (blocking) {
+      const path = this.#waitPath(session.id, caller);
+      if (path !== null) throw this.#waitCycleError("send", [caller, ...path]);
+      release = this.#holdWaitEdges(caller, [session.id]);
+    }
+    try {
+      const sent = await session.send(
+        params.text,
+        params.wait ?? false,
+        params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
+        actor(caller),
+        {
+          ...(params.messageId !== undefined ? { messageId: params.messageId } : {}),
+          ...(params.idempotencyKey !== undefined
+            ? { idempotencyKey: params.idempotencyKey }
+            : {}),
+        },
+      );
+      return {
+        session: session.view(),
+        messageId: sent.messageId,
+        queued: sent.queued,
+        ...(sent.pending !== undefined ? { pending: sent.pending } : {}),
+        turn: sent.turn,
+        completed: sent.completed,
+        timedOut: sent.timedOut,
+        stopReason: sent.stopReason,
+        text: sent.text,
+        ...(sent.outcome !== undefined ? { outcome: sent.outcome } : {}),
+        ...(sent.duplicate !== undefined ? { duplicate: sent.duplicate } : {}),
+      };
+    } finally {
+      release?.();
+    }
   }
 
   #read(params: ReadParams): ReadResult {
@@ -954,10 +1072,63 @@ class SupervisorServer {
   async #wait(
     params: WaitParams,
     signal: AbortSignal,
+    caller: string | null,
   ): Promise<WaitResult> {
     const ids =
       params.sessionIds ?? (params.sessionId !== undefined ? [params.sessionId] : []);
     const targets = ids.map((id) => this.#resolve(id));
+    const release = this.#beginWait(params, targets, caller);
+    try {
+      return await this.#awaitTargets(params, signal, targets);
+    } finally {
+      release?.();
+    }
+  }
+
+  /**
+   * Register a blocking wait edge, or reject a cycle. A `change` wait on
+   * another session is still an edge (it cannot resolve while that session is
+   * blocked on this one); a `change` wait on yourself is safe because a
+   * queued prompt emits its event during the current turn.
+   */
+  #beginWait(
+    params: WaitParams,
+    targets: readonly Session[],
+    caller: string | null,
+  ): (() => void) | undefined {
+    if (caller === null || !this.#callerInTurn(caller)) return undefined;
+    const stateWait = params.until !== "change";
+    const blocked = targets.filter((target) =>
+      target.id === caller
+        ? stateWait
+          ? !this.#waitSatisfiedNow(target, params.until)
+          : this.#selfChangeDeadlock(params.types)
+        : this.#waitPath(target.id, caller) !== null,
+    );
+    const mode = params.mode ?? "any";
+    const deadlocks =
+      targets.length === 1
+        ? blocked.length === 1
+        : mode === "all"
+          ? blocked.length > 0
+          : blocked.length === targets.length;
+    if (deadlocks) {
+      const first = blocked[0]!;
+      const path =
+        first.id === caller
+          ? [caller, caller]
+          : [caller, ...this.#waitPath(first.id, caller)!];
+      throw this.#waitCycleError("wait", path);
+    }
+    const edges = targets.map((target) => target.id).filter((id) => id !== caller);
+    return this.#holdWaitEdges(caller, edges);
+  }
+
+  async #awaitTargets(
+    params: WaitParams,
+    signal: AbortSignal,
+    targets: readonly Session[],
+  ): Promise<WaitResult> {
     const timeoutMs = params.timeoutMs ?? this.#config.waitTimeoutMs;
 
     if (targets.length === 1) {

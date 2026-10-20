@@ -71,6 +71,16 @@ Do not use `hlao send --self "..." --wait` from inside a turn. The message queue
 turn you are in, so the wait cannot finish. HLAO rejects that shape with `bad_request` and
 names the deferred form.
 
+A reply is an inbound prompt: it queues until the recipient's turn ends. Do not wait inside
+your turn for a reply that will arrive as a prompt. Send the reply without `--wait`; it runs
+after the recipient's current turn. HLAO rejects a send or wait that would close a wait cycle
+(`wait cycle: A -> B -> A`) instead of letting both sessions block until an operator
+interrupts. A state wait on your own turn (`hlao wait --self --until settled`) is rejected for
+the same reason; `hlao wait --self --until change` remains valid because a queued prompt emits
+its event during the current turn. Do not filter that change wait to `prompt.sent`,
+`turn.started`, or `turn.ended`: those events only exist after the turn ends, so the wait
+would deadlock.
+
 `wait` is one-shot: it resolves once and must be re-armed. `idle` and `settled` mean no
 runnable turn: finished, parked at a permission gate, or ended. `permission` means the
 provider is waiting for an answer; `exit` means the session ended.

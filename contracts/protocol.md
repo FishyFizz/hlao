@@ -541,6 +541,12 @@ Result:
 `completed: false, timedOut: false` is only possible when `wait` is false. A queued message
 cancelled before it runs reports `completed: true`, `outcome: "cancelled"`, and a null `turn`.
 
+A `wait: true` sent by a session that is itself inside a turn is rejected with `bad_request`
+when it would close a wait cycle: the target is already blocked, directly or transitively, on
+the caller's turn, so the message would queue behind a turn that cannot end. The error names
+the chain (`wait cycle: A -> B -> A`). Send without `wait` so the message runs after the
+current turn. The self-send case is the same rule with one session.
+
 An `idempotencyKey` is remembered for one hour (256 keys, oldest evicted). A repeat returns
 the original `messageId` with `queued: false` and `duplicate: true` — this call accepted no new
 work — plus `pending`, which says whether the original message is still active or queued.
@@ -630,6 +636,15 @@ Result:
 
 The wait is one-shot: it resolves at the first matching condition and never re-arms. A
 timeout never changes a session.
+
+A wait issued by a session that is itself inside a turn participates in wait-cycle detection.
+A state wait (`idle`, `settled`, `permission`, `exit`) on your own turn is rejected with
+`bad_request` (`wait cycle: A -> A`): the condition cannot be reached while the turn is
+blocked in the wait. A `change` wait on yourself is valid because a queued prompt emits its
+event during the current turn, unless its `types` filter selects only events that follow the
+turn (`prompt.sent`, `turn.started`, `turn.ended`). Cross-session state waits and `change` waits are rejected when
+they would close a cycle with another session's in-flight wait; for a multi-id wait the
+`any`/`all` mode decides whether a blocked target is fatal.
 
 **`idle` vs `settled`.** `idle` means no active turn. A session can be idle with queued
 prompts between turns, so `idle` is not a completion signal. `settled` means no active turn

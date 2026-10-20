@@ -40,6 +40,14 @@
 
 ### Fixed
 
+- Cross-session wait cycles no longer deadlock until the operator interrupts. A session inside
+  a turn that waits on another session (`send --wait`, or `wait --until idle/settled/...`)
+  now registers a blocking wait edge; a send or wait that would close the cycle is rejected
+  with `bad_request` naming the chain (`wait cycle: A -> B -> A`). The error tells the caller
+  to send without `--wait` (the queued reply then runs after the current turn) or end the
+  turn. A state wait on your own turn (`wait --self --until settled`) is rejected the same
+  way; `wait --self --until change` remains valid because a queued prompt emits its event
+  during the turn.
 - A permission request raised outside a prompt turn — an autonomous cycle such as a
   background-task notification — is now surfaced and answered instead of cancelled.
   Cancelling it aborted the provider's tool call with

@@ -180,6 +180,12 @@ each discard.
 `send --wait` waits for the turn produced by *that* message. A timeout does not cancel the
 turn; it returns `timedOut: true` and leaves the work running.
 
+A blocking wait from inside a turn is an edge in a cross-session wait graph. The supervisor
+rejects a send or wait that would close a cycle (`wait cycle: A -> B -> A`), because the
+reply queued behind one side's turn cannot run while the other side waits for that turn to
+end. The rejection is the alternative to a deadlock that only an operator interrupt can
+break.
+
 ## Permissions
 
 Permission requests are orchestration state, not a hidden callback. The default policy
