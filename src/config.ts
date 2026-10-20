@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join } from "node:path";
 import { HlaoError, describeError } from "./errors.js";
 import { configPath, projectBackendsPath } from "./paths.js";
 import type { AgentView, PermissionPolicy } from "./protocol.js";
@@ -332,7 +332,7 @@ function parseBackend(
     description = object.description;
   }
 
-  const available = commandAvailable(command);
+  const resolution = resolveCommand(command);
   return {
     name,
     command,
@@ -341,19 +341,36 @@ function parseBackend(
     description,
     source,
     configPath: filePath,
-    available,
-    ...(available
-      ? {}
-      : { unavailableReason: `command "${command}" was not found on PATH` }),
+    available: resolution.available,
+    ...(resolution.reason !== undefined
+      ? { unavailableReason: resolution.reason }
+      : {}),
   };
 }
 
-/** Resolves a command the way the OS would, without launching it. */
-function commandAvailable(command: string): boolean {
-  if (isAbsolute(command)) return existsSync(command);
+interface CommandResolution {
+  available: boolean;
+  reason?: string;
+}
+
+/**
+ * Resolves a command the way the OS would, without launching it. A Windows
+ * `.cmd`/`.bat`/`.ps1` shim exists but cannot be spawned without a shell, so it
+ * is reported unavailable with the reason rather than failing at spawn time.
+ */
+function resolveCommand(command: string): CommandResolution {
+  const check = (candidate: string): CommandResolution =>
+    shimReason(command, candidate) ?? { available: true };
+
+  if (isAbsolute(command)) {
+    if (!existsSync(command)) {
+      return { available: false, reason: `command "${command}" was not found` };
+    }
+    return check(command);
+  }
   // A relative path is resolved by spawn against the session cwd, which is not
   // known here; do not guess and mark a usable backend unavailable.
-  if (command.includes("/") || command.includes("\\")) return true;
+  if (command.includes("/") || command.includes("\\")) return { available: true };
   const pathValue = process.env.PATH ?? "";
   const extensions =
     process.platform === "win32"
@@ -363,12 +380,31 @@ function commandAvailable(command: string): boolean {
       : [""];
   for (const directory of pathValue.split(delimiter)) {
     if (directory.length === 0) continue;
-    if (existsSync(join(directory, command))) return true;
+    const direct = join(directory, command);
+    if (existsSync(direct)) return check(direct);
     for (const extension of extensions) {
-      if (existsSync(join(directory, `${command}${extension}`))) return true;
+      const candidate = join(directory, `${command}${extension}`);
+      if (existsSync(candidate)) return check(candidate);
     }
   }
-  return false;
+  return {
+    available: false,
+    reason: `command "${command}" was not found on PATH`,
+  };
+}
+
+function shimReason(command: string, candidate: string): CommandResolution | null {
+  if (process.platform !== "win32") return null;
+  const extension = extname(candidate).toLowerCase();
+  if (extension !== ".cmd" && extension !== ".bat" && extension !== ".ps1") {
+    return null;
+  }
+  return {
+    available: false,
+    reason:
+      `command "${command}" resolves to ${basename(candidate)}, a Windows shell ` +
+      `shim that cannot be spawned directly; point the backend at the executable it wraps`,
+  };
 }
 
 // --- small validation helpers ---------------------------------------------

@@ -112,7 +112,8 @@ The token is the instance boundary.
 - `capabilities` lists additive features this supervisor implements. Unknown capabilities must
   be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
   `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`, `wait.settled`,
-  `wait.filters`, `session.settled`, `session.lastEvent`.
+  `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
+  `spawn.idempotency`, `spawn.createdBy`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -123,6 +124,10 @@ The token is the instance boundary.
 - **2.2** adds `wait --until settled`, `change` filters, `SessionView.settled` and
   `lastEvent`, `shutdown.retainedDiscarded`, and corrects `nextSeq` to be a real cursor. All
   additions are optional; `idle` keeps its existing "no active turn" meaning.
+- **2.3** adds message ids and idempotency to `sessions.send`, spawn idempotency and the
+  skill toggle to `sessions.spawn`, `QueueItemView.id` and drop-by-id, and
+  `SessionView.createdBy`. Every prompt result now carries `messageId`; a client that ignores
+  it is unaffected.
 
 ## Methods
 
@@ -217,6 +222,8 @@ Params:
   parentSessionId?: string;      // lineage; defaults to the caller's live session, else a root
   permissionPolicy?: "ask" | "allow" | "deny"; // defaults to config
   env?: Record<string, string>;  // extra environment for the adapter
+  skill?: boolean;               // include the HLAO skill pointer in the first prompt (default true)
+  idempotencyKey?: string;       // reuse the session produced by an earlier spawn (2.3)
 }
 ```
 
@@ -227,12 +234,20 @@ Result:
   session: SessionView;
   nextSeq: number;               // pass as --since to read from the beginning
   firstTurn?: { stopReason: StopReason; text: string; timedOut: boolean };
+  messageId?: string;            // the first prompt's id, when one was sent (2.3)
+  duplicate?: boolean;           // the idempotency key matched an existing session (2.3)
+  createdBy?: string;            // same value as session.createdBy (2.3)
 }
 ```
 
 The call resolves once `initialize` and `session/new` both succeed. If `prompt` is present
 and `wait` is true, it also waits for the first turn (bounded by `sendWaitTimeoutMs`). A
 timeout is reported as `firstTurn.timedOut = true`, not as an error.
+
+`skill: true` prepends a short text block pointing at `<HLAO_HOME>/skills/hlao/SKILL.md` to
+the first prompt only. `idempotencyKey` dedupes spawns for one hour (256 keys); a duplicate
+returns the existing session and its first-prompt `messageId` without spawning. If that
+session is no longer in the live table, the key is released.
 
 ### `sessions.list`
 
@@ -271,7 +286,14 @@ log for that session.
 Params:
 
 ```ts
-{ sessionId: string; text: string; wait?: boolean; timeoutMs?: number }
+{
+  sessionId: string;
+  text: string;
+  wait?: boolean;
+  timeoutMs?: number;
+  messageId?: string;            // caller-chosen; generated when omitted (2.3)
+  idempotencyKey?: string;       // retry-safe delivery (2.3)
+}
 ```
 
 `timeoutMs` defaults to `config.sendWaitTimeoutMs`; `0` means no timeout. The caller's session
@@ -282,17 +304,24 @@ Result:
 ```ts
 {
   session: SessionView;
+  messageId: string;             // msg-…, stable across retries (2.3)
   queued: boolean;               // true when the session was busy
   turn: number | null;           // null when not yet dispatched
   completed: boolean;
   timedOut: boolean;
   stopReason?: StopReason;
-  text?: string;                 // accumulated agent text for that turn
+  text?: string;                 // accumulated agent text; partial on timeout (2.3)
+  outcome?: "completed" | "cancelled" | "timed_out"; // (2.3)
+  duplicate?: boolean;           // the idempotency key matched an earlier send (2.3)
 }
 ```
 
 `timedOut: true` means the turn is still running; the caller should `read --since` later.
-`completed: false, timedOut: false` is only possible when `wait` is false.
+`completed: false, timedOut: false` is only possible when `wait` is false. A queued message
+cancelled before it runs reports `completed: true`, `outcome: "cancelled"`, and a null `turn`.
+
+An `idempotencyKey` is remembered for one hour (256 keys, oldest evicted). A repeat returns
+the original `messageId` and the item's current queued/active state without enqueuing again.
 
 ### `sessions.read`
 
@@ -466,6 +495,7 @@ type QueueItemView = {
   position: number | null;       // 1-based queue order; null for the active turn
   textPreview: string;           // at most 200 characters, whitespace collapsed
   textLength: number;            // full original length
+  id: string;                    // msg-…; also on prompt.sent/queued/discarded (2.3)
   from: string;                  // sender session id or "operator"
   queuedMs: number;
   turn: number | null;
@@ -474,12 +504,14 @@ type QueueItemView = {
 
 ### `sessions.queue_drop`
 
-Params: `{ sessionId: string; position: number }` (1..1000).
+Params: `{ sessionId: string; position?: number; messageId?: string }` — exactly one of
+`position` (1..1000) or `messageId` (2.3).
 Result: `{ session: SessionView; dropped: QueueItemView; discarded: number }`.
 
 Removes one queued prompt. The prompt is settled as cancelled before it runs and emits
-`prompt.discarded` with `reason: "dropped"`, `position`, and the actor. Out-of-range positions
-are `bad_request` and do not change the queue.
+`prompt.discarded` with `reason: "dropped"`, `messageId`, `position`, and the actor.
+Out-of-range positions and ids that are not queued are `bad_request` and do not change the
+queue.
 
 ### `stream.subscribe`
 
@@ -601,9 +633,11 @@ that depends on it is notified.
 
 Actor fields are explicit:
 
-- `prompt.sent` and `prompt.queued` carry `from`: a session id or `"operator"`.
-- `prompt.discarded` carries the original `from`, the acting `by`, `reason`, and a bounded
-  `textPreview`.
+- `prompt.sent` and `prompt.queued` carry `from`: a session id or `"operator"`, plus the
+  message id as `messageId` (2.3).
+- `prompt.discarded` carries the original `from`, the acting `by`, `reason`, a bounded
+  `textPreview`, and `messageId` (2.3).
+- `session.created` carries `createdBy`: `"operator"` or the requesting session id (2.3).
 - `permission.resolved`, `policy.changed`, `mode`, `config`, `cancel.requested`,
   `session.renamed`, and `session.closed` carry `by`: the caller session id, `"operator"`,
   `"policy:<name>"` for an automatic answer, or `"agent"` when the adapter itself changed a
@@ -617,6 +651,7 @@ Actor fields are explicit:
 type SessionView = {
   id: string;                    // 6-char handle
   name: string | null;
+  createdBy: string | null;      // "operator" or the requesting session id (2.3)
   backend: string;
   cwd: string;
   status: "starting" | "idle" | "busy" | "waiting_permission" | "closed" | "failed";

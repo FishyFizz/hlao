@@ -25,6 +25,15 @@ export function generateSessionId(exists: (id: string) => boolean = () => false)
   throw new Error("could not allocate a session id after 100 attempts");
 }
 
+/** A stable prompt identity. Generated when the caller does not supply one. */
+export function generateMessageId(): string {
+  let suffix = "";
+  for (let index = 0; index < 8; index += 1) {
+    suffix += SESSION_ID_ALPHABET[randomInt(SESSION_ID_ALPHABET.length)]!;
+  }
+  return `msg-${suffix}`;
+}
+
 /** True when `token` is a prefix of `id`, or equal to it. */
 export function isIdPrefix(token: string, id: string): boolean {
   return token.length > 0 && id.startsWith(token);

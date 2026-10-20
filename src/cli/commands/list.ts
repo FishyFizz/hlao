@@ -28,6 +28,8 @@ interface ListFilters {
   statuses?: string[];
   backend?: string;
   root?: string;
+  /** The caller's root subtree, resolved from HLAO_ROOT_ID/HLAO_SESSION_ID. */
+  mineRoot?: string;
   name?: string;
   pending?: boolean;
   cwdPrefix?: string;
@@ -49,6 +51,7 @@ export async function cmdList(args: string[]): Promise<number> {
     { name: "status", type: "string", valueName: "STATUS" },
     { name: "backend", type: "string", valueName: "NAME" },
     { name: "root", type: "string", valueName: "SESSION" },
+    { name: "mine", type: "boolean" },
     { name: "name", type: "string", valueName: "TEXT" },
     { name: "pending", type: "boolean" },
     { name: "wide", type: "boolean" },
@@ -98,6 +101,9 @@ export async function cmdList(args: string[]): Promise<number> {
   };
 
   const conn = await connect(ctx);
+  if (booleanOption(parsed, "mine") === true) {
+    filters.mineRoot = await resolveMineRoot(conn);
+  }
   if (render.usage) {
     await ensureCapability(conn, "session.usage", "list --usage");
   }
@@ -288,7 +294,29 @@ function filterSessions(
     const root = resolveInList(sessions, filters.root);
     result = result.filter((session) => session.rootId === root.rootId);
   }
+  if (filters.mineRoot !== undefined) {
+    result = result.filter((session) => session.rootId === filters.mineRoot);
+  }
   return result;
+}
+
+/**
+ * `--mine` is the caller's root subtree. HLAO_ROOT_ID is the direct answer;
+ * otherwise the caller's own session names the root. Neither is an autostart.
+ */
+async function resolveMineRoot(
+  conn: SupervisorConnection,
+): Promise<string> {
+  const root = process.env.HLAO_ROOT_ID?.trim();
+  if (root) return root;
+  const own = process.env.HLAO_SESSION_ID?.trim();
+  if (!own) {
+    throw usageError("list --mine needs HLAO_SESSION_ID or HLAO_ROOT_ID");
+  }
+  const got = await conn.request<{ session: SessionView }>("sessions.get", {
+    sessionId: own,
+  });
+  return got.session.rootId;
 }
 
 function normalizePath(value: string): string {
@@ -378,6 +406,7 @@ function hasFilters(filters: ListFilters): boolean {
     filters.statuses !== undefined ||
     filters.backend !== undefined ||
     filters.root !== undefined ||
+    filters.mineRoot !== undefined ||
     filters.name !== undefined ||
     filters.pending === true ||
     filters.cwdPrefix !== undefined
@@ -463,6 +492,7 @@ function printEmptyList(
     filters.statuses !== undefined ||
     filters.backend !== undefined ||
     filters.root !== undefined ||
+    filters.mineRoot !== undefined ||
     filters.name !== undefined ||
     filters.pending === true ||
     filters.cwdPrefix !== undefined;

@@ -71,12 +71,16 @@ export interface SpawnOptions {
   rootId: string;
   depth: number;
   name: string | null;
+  createdBy: string;             // "operator" or the requesting session id; provenance only
   requestedMode?: string;        // mode requested at spawn; recorded in session.created
   env: Record<string, string>;   // includes the HLAO_* identity variables, including HLAO_NAME
   permissionPolicy: "ask" | "allow" | "deny";
   home: string;                  // injected as HLAO_HOME
   config: SessionConfig;         // timeouts, retention
   cliPath: string;               // injected as HLAO_CLI
+  skill: boolean;                // prepend the skill pointer to the first prompt
+  skillPath: string;             // injected as HLAO_SKILL; home copy of skills/hlao/SKILL.md
+  skillVersion: string;          // injected as HLAO_SKILL_VERSION
   log: (line: string) => void;   // supervisor diagnostics only
 }
 
@@ -96,9 +100,11 @@ export class Session {
    * Queue a prompt; one turn at a time.
    * Throws session_closed / session_not_ready for a terminal or unready session.
    * Once queued, every prompt settles exactly once; a running session does not reject.
-   * `from` is recorded on prompt events.
+   * `from` is recorded on prompt events. Every prompt gets a message id; an optional
+   * idempotency key dedupes retries for one hour (256 keys) without enqueuing again.
    */
-  send(text: string, wait: boolean, timeoutMs: number, from?: string): Promise<SendResult>;
+  send(text: string, wait: boolean, timeoutMs: number, from?: string,
+       options?: { messageId?: string; idempotencyKey?: string }): Promise<SendResult>;
 
   /** Cursor-addressed or tail read. Pure: does not consume the log. A tail read reports
    *  `truncated` when any earlier event was evicted; `raw: false` strips private payloads. */
@@ -141,8 +147,8 @@ export class Session {
   /** Snapshot of the queue: the active item plus 1-based queued items. */
   queueView(): { active: QueueItemView | null; queue: QueueItemView[] };
 
-  /** Remove one queued prompt, settling it as cancelled before it runs. */
-  dropQueued(position: number, by?: string):
+  /** Remove one queued prompt by position or message id, settling it as cancelled. */
+  dropQueued(target: { position: number } | { messageId: string }, by?: string):
     { dropped: QueueItemView; discarded: number };
 
   /** Snapshot; never exposes mutable internals. */
@@ -159,7 +165,9 @@ export class Session {
 2. **The queue is visible.** `view().queued` and `prompt.queued` events describe it.
 3. **No prompt is lost silently.** Every prompt settles exactly once: completed, cancelled,
    failed, or cancelled-before-start.
-4. **Cancellation is not a kill.** `cancel()` asks ACP to stop; `close(force)` kills.
+4. **Cancellation is not a kill.** `cancel()` asks ACP to stop; `close(force)` kills. On
+   POSIX the adapter is spawned detached and its whole process group is signaled, so tools it
+   started do not outlive it; on Windows the existing `taskkill /T` path is unchanged.
 5. **Permission requests are data.** An unanswered request appears in `view()` and produces
    `permission.requested`; it blocks only that session's turn. The policy is `allow` by
    default, `ask` opt-in, and `permit(..., always)` can switch a live session to `allow`.
@@ -174,6 +182,9 @@ export class Session {
     stops only the active turn. Every discard is attributed and previewed.
 12. **No addressing policy.** This module has no visibility or scope logic; the supervisor
     resolves any session in the instance. `parentId` is lineage, not authority.
+13. **The skill is a pointer, not a payload.** When enabled, the first prompt prepends a short
+    text block naming the skill path; the prompt carries no file contents. `HLAO_SKILL` and
+    `HLAO_SKILL_VERSION` describe the same file to the adapter's environment.
 
 ## Dependencies the session expects
 

@@ -21,6 +21,7 @@ import {
 } from "./lock.js";
 import { Logger } from "./logger.js";
 import { ensureHome, isWindows, lockPath, supervisorEndpoint } from "./paths.js";
+import { SKILL_VERSION, ensureHomeSkill, homeSkillPath } from "./skill.js";
 import {
   FrameTooLargeError,
   createWireServer,
@@ -165,6 +166,13 @@ export class SupervisorServer {
   #stopping = false;
   #acceptingNew = true;
   #inflightSpawns = 0;
+  /** Retry-safe spawn identity: idempotency key -> the session it produced. */
+  #spawnIdempotency = new Map<
+    string,
+    { sessionId: string; messageId: string | null; at: number }
+  >();
+  /** In-flight spawns by idempotency key, so concurrent retries share one spawn. */
+  #pendingSpawns = new Map<string, Promise<SpawnResult>>();
   #spawnIdleResolvers: (() => void)[] = [];
   #shutdownAfterResponse: { force: boolean } | null = null;
   #stoppedPromise: Promise<void>;
@@ -195,6 +203,11 @@ export class SupervisorServer {
 
   async start(): Promise<void> {
     ensureHome(this.#home);
+    try {
+      ensureHomeSkill(this.#home);
+    } catch (error) {
+      this.#logger.warn(`skill: ${describeError(error)}`);
+    }
     await this.#acquireLock();
 
     try {
@@ -590,14 +603,64 @@ export class SupervisorServer {
     if (!this.#acceptingNew) {
       throw new HlaoError("session_closed", "the supervisor is shutting down");
     }
+
+    const key = params.idempotencyKey;
+    if (key !== undefined) {
+      this.#pruneSpawnIdempotency();
+      const existing = this.#spawnIdempotency.get(key);
+      if (existing !== undefined) {
+        const session = this.#sessions.get(existing.sessionId);
+        if (session !== undefined && !session.isTerminal) {
+          return this.#duplicateSpawn(session, existing.messageId);
+        }
+        this.#spawnIdempotency.delete(key);
+      }
+      const pending = this.#pendingSpawns.get(key);
+      if (pending !== undefined) {
+        try {
+          return { ...(await pending), duplicate: true };
+        } catch {
+          // The original attempt failed; this caller may try again.
+        }
+      }
+    }
+
     this.#inflightSpawns += 1;
+    const work = this.#spawnInner(params, caller);
+    if (key !== undefined) this.#pendingSpawns.set(key, work);
     try {
-      return await this.#spawnInner(params, caller);
+      return await work;
     } finally {
+      if (key !== undefined && this.#pendingSpawns.get(key) === work) {
+        this.#pendingSpawns.delete(key);
+      }
       this.#inflightSpawns -= 1;
       if (this.#inflightSpawns === 0) {
         for (const resolve of this.#spawnIdleResolvers.splice(0)) resolve();
       }
+    }
+  }
+
+  #duplicateSpawn(session: Session, messageId: string | null): SpawnResult {
+    const view = session.view();
+    return {
+      session: view,
+      nextSeq: 0,
+      duplicate: true,
+      ...(messageId !== null ? { messageId } : {}),
+      ...(view.createdBy !== null ? { createdBy: view.createdBy } : {}),
+    };
+  }
+
+  #pruneSpawnIdempotency(): void {
+    const cutoff = Date.now() - 60 * 60 * 1_000;
+    for (const [key, entry] of this.#spawnIdempotency) {
+      if (entry.at < cutoff) this.#spawnIdempotency.delete(key);
+    }
+    while (this.#spawnIdempotency.size > 256) {
+      const oldest = this.#spawnIdempotency.keys().next().value;
+      if (oldest === undefined) break;
+      this.#spawnIdempotency.delete(oldest);
     }
   }
 
@@ -654,6 +717,7 @@ export class SupervisorServer {
       rootId,
       depth,
       name: params.name ?? null,
+      createdBy: actor(caller),
       requestedMode: params.mode,
       env: params.env ?? {},
       permissionPolicy: policy,
@@ -665,6 +729,9 @@ export class SupervisorServer {
         maxEventBytes: this.#config.maxEventBytes,
       },
       cliPath: this.#cliPath,
+      skill: params.skill ?? true,
+      skillPath: homeSkillPath(this.#home),
+      skillVersion: SKILL_VERSION,
       log: (line) => this.#logger.info(line),
     });
 
@@ -701,6 +768,13 @@ export class SupervisorServer {
     }
 
     this.#sessions.set(id, session);
+    if (params.idempotencyKey !== undefined) {
+      this.#spawnIdempotency.set(params.idempotencyKey, {
+        sessionId: id,
+        messageId: null,
+        at: Date.now(),
+      });
+    }
     session.onChange(() => this.#emitChange());
     this.#emitChange();
     this.#logger.info(
@@ -710,6 +784,7 @@ export class SupervisorServer {
     const result: SpawnResult = {
       session: session.view(),
       nextSeq: 0,
+      createdBy: actor(caller),
     };
 
     if (params.prompt !== undefined) {
@@ -720,6 +795,11 @@ export class SupervisorServer {
           params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
           actor(caller),
         );
+        result.messageId = sent.messageId;
+        if (params.idempotencyKey !== undefined) {
+          const entry = this.#spawnIdempotency.get(params.idempotencyKey);
+          if (entry !== undefined) entry.messageId = sent.messageId;
+        }
         if (params.wait) {
           result.firstTurn = {
             stopReason: sent.stopReason,
@@ -793,15 +873,24 @@ export class SupervisorServer {
       params.wait ?? false,
       params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
       actor(caller),
+      {
+        ...(params.messageId !== undefined ? { messageId: params.messageId } : {}),
+        ...(params.idempotencyKey !== undefined
+          ? { idempotencyKey: params.idempotencyKey }
+          : {}),
+      },
     );
     return {
       session: session.view(),
+      messageId: sent.messageId,
       queued: sent.queued,
       turn: sent.turn,
       completed: sent.completed,
       timedOut: sent.timedOut,
       stopReason: sent.stopReason,
       text: sent.text,
+      ...(sent.outcome !== undefined ? { outcome: sent.outcome } : {}),
+      ...(sent.duplicate !== undefined ? { duplicate: sent.duplicate } : {}),
     };
   }
 
@@ -1057,7 +1146,9 @@ export class SupervisorServer {
   #queueDrop(params: QueueDropParams, caller: string | null): QueueDropResult {
     const session = this.#resolve(params.sessionId);
     const { dropped, discarded } = session.dropQueued(
-      params.position,
+      params.messageId !== undefined
+        ? { messageId: params.messageId }
+        : { position: params.position! },
       actor(caller),
     );
     return { session: session.view(), dropped, discarded };

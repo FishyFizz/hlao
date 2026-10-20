@@ -10,8 +10,9 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--stdin] [--wait] [--timeout DUR] [--mode ID] [--model VALUE]
                 [--config KEY=VALUE]... [--parent SESSION]
                 [--permission allow|ask|deny] [--env K=V]...
+                [--no-skill] [--idempotency-key KEY]
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
-                [--wait] [--timeout DUR]
+                [--wait] [--timeout DUR] [--idempotency-key KEY]
 hlao read [<id>] [--self] [--since N | --before N] [--limit N]
                 [--type TYPE]... [--turn N] [--grep TEXT]
                 [--raw] [--verbose] [--timestamps] [--jsonl] [--jsonl-page]
@@ -23,8 +24,8 @@ hlao wait [<id>...] [--self] [--any | --all]
                 [--until idle|settled|permission|exit|change] [--since N]
                 [--type TYPE]... [--grep TEXT] [--timeout DUR] [--fail-if-failed]
 hlao list [--all] [--cwd DIR] [--cwd-prefix DIR] [--status S] [--backend NAME]
-                [--root SESSION] [--name TEXT] [--pending] [--wide] [--tree] [--usage]
-                [--sort created|activity] [--watch] [--interval DUR]
+                [--root SESSION] [--mine] [--name TEXT] [--pending] [--wide] [--tree]
+                [--usage] [--sort created|activity] [--watch] [--interval DUR]
 hlao cancel [<id>] [--self] [--keep-queue]
 hlao close [<id>] [--self] [--force] [--tree] [--forget]
 hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run]
@@ -35,6 +36,7 @@ hlao policy [<id>] [allow|ask|deny] [--self]
 hlao option [<id>] [key value] [--self]
 hlao queue [<id>] [--self]
 hlao queue drop [<id>] <position> [--self]
+hlao queue drop <id> --id <message> [--self]
 hlao rename <id> <name>
 hlao rename <id> --clear
 hlao rename --self <name>
@@ -46,6 +48,7 @@ hlao config show|path|validate
 hlao reload
 hlao doctor [--start]
 hlao whoami
+hlao skill [--path] [--json]
 hlao down [--force] [--dry-run]
 hlao help [command]
 hlao version
@@ -90,13 +93,15 @@ the caller). Boolean options accept `true`/`false`; select values must match an 
 value id. `spawn --model VALUE` selects the option whose category is `model`;
 `spawn --config KEY=VALUE` applies any option before the first prompt.
 
-`queue` lists the active turn and every queued prompt with sender, age, and a bounded preview;
-`queue drop <position>` removes one (1 is next) and settles its caller as cancelled.
+`queue` lists the active turn and every queued prompt with sender, age, message id, and a
+bounded preview. `queue drop <position>` removes one (1 is next); `queue drop <id> --id
+<message>` removes one by message id. Either settles its caller as cancelled.
 `cancel --keep-queue` stops only the active turn, leaving the backlog to run. Plain `cancel`
 still discards the queue.
 
 `list` filters are a client-side projection over all sessions in the instance:
-`--status`, `--backend`, `--root` (a session token resolved inside the list), `--name`
+`--status`, `--backend`, `--root` (a session token resolved inside the list), `--mine` (the
+caller's root subtree, from `HLAO_ROOT_ID` or `HLAO_SESSION_ID`), `--name`
 (substring), `--pending`, and `--cwd-prefix`. `--wide` adds BUSY, POLICY, MODE, PENDING, and
 EXIT; `--tree` groups by root and indents by depth. Human output defaults to `--sort activity`;
 JSON preserves supervisor order unless `--sort activity` is explicit. `--watch` is a
@@ -267,6 +272,8 @@ There are no ANSI escapes when stdout is not a TTY, when `NO_COLOR` is set, or u
 | `HLAO_NAME` | the caller's session name, when one was set |
 | `HLAO_PARENT_ID`, `HLAO_ROOT_ID`, `HLAO_DEPTH`, `HLAO_BACKEND` | inherited identity, reported by `whoami` |
 | `HLAO_CLI` | absolute CLI path, set for spawned sessions |
+| `HLAO_SKILL` | absolute path to the skill file, set for spawned sessions |
+| `HLAO_SKILL_VERSION` | the HLAO version that shipped that skill file |
 | `NO_COLOR` | disables ANSI output |
 
 ## Human rendering guarantees

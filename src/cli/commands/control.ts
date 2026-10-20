@@ -1041,6 +1041,7 @@ export async function cmdQueue(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "self", type: "boolean" },
+    { name: "id", type: "string", valueName: "MESSAGE" },
   ]);
   if (helpRequested(parsed, "queue")) return 0;
   const selfUsed = booleanOption(parsed, "self") === true;
@@ -1078,40 +1079,66 @@ export async function cmdQueue(args: string[]): Promise<number> {
     return 0;
   }
 
+  const idOption = stringOption(parsed, "id");
   let sessionId: string;
   let positionRaw: string | undefined;
-  if (selfUsed) {
-    if (!caller) throw usageError("queue: --self requires HLAO_SESSION_ID");
-    if (positionals.length !== 1) {
-      throw usageError("queue drop --self expects one position");
+  let messageId: string | undefined;
+
+  if (idOption !== undefined) {
+    if (positionals.length > 1) {
+      throw usageError("queue drop --id takes at most one session id");
     }
-    sessionId = caller;
-    positionRaw = positionals[0];
-  } else if (positionals.length === 2) {
-    sessionId = positionals[0]!;
-    positionRaw = positionals[1];
-  } else if (positionals.length === 1 && caller) {
-    sessionId = caller;
-    positionRaw = positionals[0];
+    if (selfUsed) {
+      if (!caller) throw usageError("queue: --self requires HLAO_SESSION_ID");
+      if (positionals.length > 0) {
+        throw usageError("queue drop: choose --self or a session id");
+      }
+      sessionId = caller;
+    } else if (positionals.length === 1) {
+      sessionId = positionals[0]!;
+    } else if (caller) {
+      sessionId = caller;
+    } else {
+      throw usageError("queue drop --id needs a session id (or HLAO_SESSION_ID)");
+    }
+    messageId = idOption;
   } else {
-    throw usageError("queue drop needs [<id>] <position>");
+    if (selfUsed) {
+      if (!caller) throw usageError("queue: --self requires HLAO_SESSION_ID");
+      if (positionals.length !== 1) {
+        throw usageError("queue drop --self expects one position");
+      }
+      sessionId = caller;
+      positionRaw = positionals[0];
+    } else if (positionals.length === 2) {
+      sessionId = positionals[0]!;
+      positionRaw = positionals[1];
+    } else if (positionals.length === 1 && caller) {
+      sessionId = caller;
+      positionRaw = positionals[0];
+    } else {
+      throw usageError("queue drop needs [<id>] <position>, or --id <message>");
+    }
   }
 
-  const position = Number(positionRaw);
-  if (!Number.isInteger(position) || position < 1 || position > 1_000) {
-    throw usageError("queue position must be an integer from 1 to 1000");
+  let position: number | undefined;
+  if (messageId === undefined) {
+    position = Number(positionRaw);
+    if (!Number.isInteger(position) || position < 1 || position > 1_000) {
+      throw usageError("queue position must be an integer from 1 to 1000");
+    }
   }
   const result = await conn.request<QueueDropResult>("sessions.queue_drop", {
     sessionId,
-    position,
+    ...(messageId !== undefined ? { messageId } : { position }),
   });
   if (ctx.json) {
     writeJson(result);
     return 0;
   }
   out(
-    `dropped #${result.dropped.position} from ${sessionLabel(ctx, result.session)}: ` +
-      sanitize(result.dropped.textPreview),
+    `dropped ${sanitize(result.dropped.id)} (#${result.dropped.position}) from ` +
+      `${sessionLabel(ctx, result.session)}: ${sanitize(result.dropped.textPreview)}`,
   );
   return 0;
 }
@@ -1129,7 +1156,7 @@ function renderQueue(result: QueueResult, ctx: CommandContext): string {
   }
   for (const item of result.queue) {
     lines.push(
-      `  #${item.position}  ${sanitize(item.from)}  ${formatDuration(item.queuedMs)}  ` +
+      `  #${item.position}  ${sanitize(item.id)}  ${sanitize(item.from)}  ${formatDuration(item.queuedMs)}  ` +
         sanitize(item.textPreview) +
         (item.textLength > item.textPreview.length
           ? ctx.style.dim(` (${item.textLength} chars)`)

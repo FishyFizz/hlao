@@ -19,6 +19,7 @@ test("a session is spawned, read, sent to, and closed", async (t) => {
     "fake",
     "hello world",
     "--wait",
+    "--no-skill",
   ]);
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;
@@ -112,7 +113,13 @@ test("human output includes the session and a cursor hint", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
-  const spawned = await harness.json<SpawnValue>(["spawn", "fake", "human", "--wait"]);
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "human",
+    "--wait",
+    "--no-skill",
+  ]);
   const id = spawned.value.session.id;
 
   const human = await harness.run(["read", id, "--since", "0"], { json: false });

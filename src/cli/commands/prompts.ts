@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { SupervisorConnection } from "../../client.js";
-import { HlaoError } from "../../errors.js";
+import { HlaoError, toHlaoError } from "../../errors.js";
 import type {
   EventType,
   EventView,
@@ -51,6 +51,19 @@ import {
   styleStatus,
 } from "../render.js";
 
+/** A timed-out turn may have produced text; show a bounded prefix of it. */
+const PARTIAL_TEXT_LIMIT = 2_000;
+
+function printPartialText(text: string | undefined): void {
+  if (text === undefined || text.trim().length === 0) return;
+  const clean = sanitize(text).trimEnd();
+  out(
+    clean.length > PARTIAL_TEXT_LIMIT
+      ? `${clean.slice(0, PARTIAL_TEXT_LIMIT)}…`
+      : clean,
+  );
+}
+
 export async function cmdSpawn(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
@@ -67,6 +80,8 @@ export async function cmdSpawn(args: string[]): Promise<number> {
     { name: "parent", type: "string", valueName: "SESSION" },
     { name: "permission", type: "string", valueName: "POLICY" },
     { name: "env", type: "string", valueName: "K=V", multiple: true },
+    { name: "no-skill", type: "boolean" },
+    { name: "idempotency-key", type: "string", valueName: "KEY" },
   ]);
   if (helpRequested(parsed, "spawn")) return 0;
   expectPositionals(parsed, "spawn", 1, Number.POSITIVE_INFINITY);
@@ -90,9 +105,12 @@ export async function cmdSpawn(args: string[]): Promise<number> {
   warnInert(wait && !promptGiven, "--wait has no effect without a message");
 
   const conn = await connect(ctx);
+  const idempotencyKey = stringOption(parsed, "idempotency-key");
   // In human mode, wait in two phases so the handle is printed as soon as the
-  // session exists. JSON keeps the single-call shape with firstTurn.
-  const twoPhase = !ctx.json && effectiveWait;
+  // session exists. JSON keeps the single-call shape with firstTurn. An
+  // idempotency key makes the spawn and its first prompt one atomic request.
+  const twoPhase =
+    !ctx.json && effectiveWait && idempotencyKey === undefined;
   const result = await conn.request<SpawnResult>(
     "sessions.spawn",
     {
@@ -108,6 +126,8 @@ export async function cmdSpawn(args: string[]): Promise<number> {
       parentSessionId: stringOption(parsed, "parent"),
       permissionPolicy: permission as PermissionPolicy | undefined,
       env: parseEnv(multipleOption(parsed, "env")),
+      ...(booleanOption(parsed, "no-skill") === true ? { skill: false } : {}),
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     },
     { timeoutMs: 0 },
   );
@@ -120,7 +140,8 @@ export async function cmdSpawn(args: string[]): Promise<number> {
   const session = result.session;
   const configKeys = Object.keys(config ?? {});
   out(
-    `spawned ${sessionLabel(ctx, session)} (${session.backend}) in ${session.cwd}` +
+    `${result.duplicate ? "duplicate spawn, reusing" : "spawned"} ` +
+      `${sessionLabel(ctx, session)} (${session.backend}) in ${session.cwd}` +
       (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
       ctx.style.dim(`  policy ${session.permissionPolicy}`) +
       (model ? ctx.style.dim(`  model ${sanitize(model)}`) : "") +
@@ -130,22 +151,39 @@ export async function cmdSpawn(args: string[]): Promise<number> {
   );
 
   if (twoPhase) {
-    const sent = await withProgress(
-      `waiting for turn 1 of ${session.id}`,
-      conn.request<SendResult>(
-        "sessions.send",
-        {
-          sessionId: session.id,
-          text: prompt!,
-          wait: true,
-          ...(numberOption(parsed, "timeout") !== undefined
-            ? { timeoutMs: numberOption(parsed, "timeout") }
-            : {}),
-        },
-        { timeoutMs: 0 },
-      ),
-    );
+    let sent: SendResult;
+    try {
+      sent = await withProgress(
+        `waiting for turn 1 of ${session.id}`,
+        conn.request<SendResult>(
+          "sessions.send",
+          {
+            sessionId: session.id,
+            text: prompt!,
+            wait: true,
+            ...(numberOption(parsed, "timeout") !== undefined
+              ? { timeoutMs: numberOption(parsed, "timeout") }
+              : {}),
+          },
+          { timeoutMs: 0 },
+        ),
+      );
+    } catch (error) {
+      // The session exists even when its first turn failed; name it so the
+      // operator can read or close it instead of hunting through list.
+      const converted = toHlaoError(error);
+      const details =
+        typeof converted.details === "object" && converted.details !== null
+          ? (converted.details as Record<string, unknown>)
+          : undefined;
+      if (details?.sessionId !== undefined) throw converted;
+      throw new HlaoError(converted.code, converted.message, {
+        ...details,
+        sessionId: session.id,
+      });
+    }
     if (sent.timedOut) {
+      printPartialText(sent.text);
       out(ctx.style.yellow("the first turn is still running"));
       out(styleHint(ctx, `hlao read ${session.id} --since 0`));
       return 2;
@@ -163,7 +201,9 @@ export async function cmdSpawn(args: string[]): Promise<number> {
   }
 
   if (result.firstTurn) {
-    if (result.firstTurn.text.trim().length > 0) {
+    if (result.firstTurn.timedOut) {
+      printPartialText(result.firstTurn.text);
+    } else if (result.firstTurn.text.trim().length > 0) {
       out(sanitize(result.firstTurn.text).trimEnd());
     }
     if (result.firstTurn.timedOut) {
@@ -174,6 +214,12 @@ export async function cmdSpawn(args: string[]): Promise<number> {
     out(
       ctx.style.dim(
         `— turn 1 ended: ${result.firstTurn.stopReason ?? "unknown"} —`,
+      ),
+    );
+  } else if (result.duplicate === true) {
+    out(
+      ctx.style.dim(
+        `reused first message ${result.messageId ?? "(already settled)"}`,
       ),
     );
   } else if (prompt !== undefined) {
@@ -192,6 +238,7 @@ export async function cmdSend(args: string[]): Promise<number> {
     { name: "prompt-file", type: "path", valueName: "FILE" },
     { name: "wait", type: "boolean" },
     { name: "timeout", type: "duration", valueName: "DUR" },
+    { name: "idempotency-key", type: "string", valueName: "KEY" },
   ]);
   if (helpRequested(parsed, "send")) return 0;
 
@@ -217,6 +264,7 @@ export async function cmdSend(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
 
   const conn = await connect(ctx);
+  const idempotencyKey = stringOption(parsed, "idempotency-key");
   const request = conn.request<SendResult>(
     "sessions.send",
     {
@@ -224,6 +272,7 @@ export async function cmdSend(args: string[]): Promise<number> {
       text,
       wait,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     },
     { timeoutMs: wait ? 0 : 60_000 },
   );
@@ -237,7 +286,16 @@ export async function cmdSend(args: string[]): Promise<number> {
     return result.timedOut ? 2 : 0;
   }
 
+  if (result.duplicate) {
+    out(
+      `already sent ${sanitize(result.messageId)} to ${sessionLabel(ctx, result.session)}` +
+        (result.queued ? ctx.style.dim(" (still queued)") : ""),
+    );
+    return 0;
+  }
+
   if (result.timedOut) {
+    printPartialText(result.text);
     const where =
       result.turn === null
         ? `the message is still queued behind turn ${result.session.turn}`

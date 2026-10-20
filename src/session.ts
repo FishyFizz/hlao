@@ -4,6 +4,7 @@ import { client, ndJsonStream } from "@agentclientprotocol/sdk";
 import type {
   AgentCapabilities,
   ClientConnection,
+  ContentBlock,
   PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -14,6 +15,7 @@ import type {
 import type { BackendManifest } from "./config.js";
 import { HlaoError, describeError } from "./errors.js";
 import { EventLog } from "./events.js";
+import { generateMessageId } from "./ids.js";
 import { nowIso } from "./time.js";
 import { VERSION } from "./version.js";
 import type {
@@ -50,12 +52,18 @@ export interface SpawnOptions {
   rootId: string;
   depth: number;
   name: string | null;
+  /** "operator" or the requesting session id. Provenance only. */
+  createdBy: string;
   requestedMode?: string;
   env: Record<string, string>;
   permissionPolicy: PermissionPolicy;
   home: string;
   config: SessionConfig;
   cliPath: string;
+  /** Include the skill pointer in the first prompt. Default true at the boundary. */
+  skill: boolean;
+  skillPath: string;
+  skillVersion: string;
   log: (line: string) => void;
 }
 
@@ -69,12 +77,15 @@ export interface PromptCompletion {
 }
 
 export interface SendResult {
+  messageId: string;
   queued: boolean;
   turn: number | null;
   completed: boolean;
   timedOut: boolean;
   stopReason?: StopReason;
   text?: string;
+  outcome?: "completed" | "cancelled" | "timed_out";
+  duplicate?: boolean;
 }
 
 export interface ReadOptions {
@@ -104,6 +115,7 @@ export interface WaitResult {
 }
 
 interface QueueItem {
+  id: string;
   text: string;
   from: string;
   enqueuedAt: number;
@@ -174,6 +186,12 @@ export class Session {
   #env: Record<string, string>;
   #home: string;
   #cliPath: string;
+  #skillEnabled: boolean;
+  #skillPath: string;
+  #skillVersion: string;
+  #skillInjected = false;
+  #createdBy: string;
+  #idempotency = new Map<string, { messageId: string; at: number }>();
   #logLine: (line: string) => void;
   #startupError: Error | null = null;
 
@@ -194,6 +212,10 @@ export class Session {
     this.#env = options.env;
     this.#home = options.home;
     this.#cliPath = options.cliPath;
+    this.#skillEnabled = options.skill;
+    this.#skillPath = options.skillPath;
+    this.#skillVersion = options.skillVersion;
+    this.#createdBy = options.createdBy;
     this.#logLine = options.log;
     this.#log = new EventLog({
       maxEvents: options.config.maxEventsPerSession,
@@ -230,6 +252,7 @@ export class Session {
     return {
       id: this.id,
       name: this.name,
+      createdBy: this.#createdBy,
       backend: this.backend,
       cwd: this.cwd,
       status: this.#status,
@@ -283,6 +306,7 @@ export class Session {
     wait: boolean,
     timeoutMs: number,
     from = "operator",
+    options: { messageId?: string; idempotencyKey?: string } = {},
   ): Promise<SendResult> {
     if (this.isTerminal || this.#closing) {
       throw new HlaoError(
@@ -296,6 +320,28 @@ export class Session {
     if (text.length === 0 || text.length > MAX_PROMPT_CHARS) {
       throw new HlaoError("bad_request", "prompt text is empty or too long");
     }
+
+    // A retry must not be rejected by the queue its own first attempt filled.
+    this.#pruneIdempotency();
+    const key = options.idempotencyKey;
+    if (key !== undefined) {
+      const existing = this.#idempotency.get(key);
+      if (existing !== undefined) {
+        const active = this.#active?.id === existing.messageId;
+        const queued =
+          active ||
+          this.#queue.some((item) => item.id === existing.messageId);
+        return {
+          messageId: existing.messageId,
+          queued,
+          turn: active ? this.#active!.turn : null,
+          completed: false,
+          timedOut: false,
+          duplicate: true,
+        };
+      }
+    }
+
     if (this.#queue.length >= MAX_QUEUED_PROMPTS) {
       throw new HlaoError(
         "bad_request",
@@ -303,12 +349,28 @@ export class Session {
       );
     }
 
-    const item = createQueueItem(text, from);
+    const messageId = options.messageId ?? generateMessageId();
+    if (
+      this.#active?.id === messageId ||
+      this.#queue.some((item) => item.id === messageId)
+    ) {
+      throw new HlaoError(
+        "bad_request",
+        `message id "${messageId}" is already in this session`,
+      );
+    }
+
+    const item = createQueueItem(messageId, text, from);
     const queuedAhead = this.#active !== null;
     item.wasQueued = queuedAhead;
     this.#queue.push(item);
+    if (key !== undefined) {
+      this.#idempotency.set(key, { messageId, at: Date.now() });
+      this.#pruneIdempotency();
+    }
     if (queuedAhead) {
       this.#emit("prompt.queued", {
+        messageId,
         position: this.#queue.length + (this.#active ? 1 : 0),
         textPreview: previewText(text),
         textLength: text.length,
@@ -319,6 +381,7 @@ export class Session {
 
     if (!wait) {
       return {
+        messageId,
         queued: queuedAhead,
         turn: item.turn,
         completed: false,
@@ -328,11 +391,16 @@ export class Session {
 
     const raced = await raceWithTimeout(item.promise, timeoutMs);
     if (raced.timedOut) {
+      // The turn keeps running; report what it has produced so far.
+      const partial = this.#active === item ? this.#turnText : "";
       return {
+        messageId,
         queued: queuedAhead,
         turn: item.turn,
         completed: false,
         timedOut: true,
+        outcome: "timed_out",
+        ...(partial.length > 0 ? { text: partial } : {}),
       };
     }
 
@@ -344,13 +412,28 @@ export class Session {
       );
     }
     return {
+      messageId,
       queued: queuedAhead,
       turn: completion.turn,
       completed: true,
       timedOut: false,
       stopReason: completion.stopReason,
       text: completion.text,
+      outcome:
+        completion.stopReason === "cancelled" ? "cancelled" : "completed",
     };
+  }
+
+  #pruneIdempotency(): void {
+    const cutoff = Date.now() - 60 * 60 * 1_000;
+    for (const [key, entry] of this.#idempotency) {
+      if (entry.at < cutoff) this.#idempotency.delete(key);
+    }
+    while (this.#idempotency.size > 256) {
+      const oldest = this.#idempotency.keys().next().value;
+      if (oldest === undefined) break;
+      this.#idempotency.delete(oldest);
+    }
   }
 
   async #pump(): Promise<void> {
@@ -377,6 +460,7 @@ export class Session {
         this.#emit(
           "prompt.sent",
           {
+            messageId: item.id,
             text: item.text,
             from: item.from,
             wasQueued: item.wasQueued,
@@ -396,9 +480,18 @@ export class Session {
   async #runPrompt(item: QueueItem): Promise<void> {
     const turn = item.turn!;
     try {
+      const blocks: ContentBlock[] = [];
+      if (this.#skillEnabled && !this.#skillInjected) {
+        this.#skillInjected = true;
+        blocks.push({
+          type: "text",
+          text: skillPointer(this.#skillPath),
+        });
+      }
+      blocks.push({ type: "text", text: item.text });
       const response = await this.#conn!.agent.request("session/prompt", {
         sessionId: this.#agentSessionId!,
-        prompt: [{ type: "text", text: item.text }],
+        prompt: blocks,
       });
       this.#finishTurn(item, response.stopReason as StopReason);
     } catch (error) {
@@ -471,6 +564,7 @@ export class Session {
     const items = this.#queue.splice(0);
     for (const item of items) {
       this.#emit("prompt.discarded", {
+        messageId: item.id,
         text: item.text,
         textPreview: previewText(item.text),
         from: item.from,
@@ -689,19 +783,14 @@ export class Session {
           await waitForExit(child, 3_000);
         }
       } else {
-        try {
-          child.kill();
-        } catch {
-          // Already gone.
-        }
-        const exited = await waitForExit(child, 5_000);
+        // The adapter leads its process group; signal the group so tools it
+        // spawned do not outlive it.
+        if (force) killed = true;
+        signalProcessGroup(child, force ? "SIGKILL" : "SIGTERM");
+        const exited = await waitForExit(child, force ? 2_000 : 5_000);
         if (!exited) {
           killed = true;
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Already gone.
-          }
+          signalProcessGroup(child, "SIGKILL");
           await waitForExit(child, 2_000);
         }
       }
@@ -969,21 +1058,34 @@ export class Session {
   }
 
   dropQueued(
-    position: number,
+    target: { position: number } | { messageId: string },
     by = "operator",
   ): { dropped: QueueItemView; discarded: number } {
-    const index = position - 1;
-    if (index < 0 || index >= this.#queue.length) {
-      throw new HlaoError(
-        "bad_request",
-        `queue position ${position} is out of range (1..${this.#queue.length})`,
-      );
+    let index: number;
+    if ("position" in target) {
+      index = target.position - 1;
+      if (index < 0 || index >= this.#queue.length) {
+        throw new HlaoError(
+          "bad_request",
+          `queue position ${target.position} is out of range (1..${this.#queue.length})`,
+        );
+      }
+    } else {
+      index = this.#queue.findIndex((item) => item.id === target.messageId);
+      if (index < 0) {
+        throw new HlaoError(
+          "bad_request",
+          `message "${target.messageId}" is not queued in session ${this.id}`,
+        );
+      }
     }
+    const position = index + 1;
     const [item] = this.#queue.splice(index, 1);
     if (!item) {
       throw new HlaoError("bad_request", `queue position ${position} is empty`);
     }
     this.#emit("prompt.discarded", {
+      messageId: item.id,
       text: item.text,
       textPreview: previewText(item.text),
       from: item.from,
@@ -1092,6 +1194,7 @@ export class Session {
       backend: this.backend,
       cwd: this.cwd,
       name: this.name,
+      createdBy: this.#createdBy,
       mode: this.requestedMode,
       parentId: this.parentId,
       rootId: this.rootId,
@@ -1110,6 +1213,9 @@ export class Session {
       env: this.#buildEnv(),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      // On POSIX the adapter leads its own process group so tools it starts can
+      // be terminated with it. Windows already has taskkill /T.
+      detached: process.platform !== "win32",
     });
     this.#child = child;
     this.#captureStderr(child);
@@ -1378,6 +1484,7 @@ export class Session {
     }
     for (const item of this.#queue.splice(0)) {
       this.#emit("prompt.discarded", {
+        messageId: item.id,
         text: item.text,
         textPreview: previewText(item.text),
         from: item.from,
@@ -1420,6 +1527,8 @@ export class Session {
       HLAO_BACKEND: this.backend,
       HLAO_HOME: this.#home,
       HLAO_CLI: this.#cliPath,
+      HLAO_SKILL: this.#skillPath,
+      HLAO_SKILL_VERSION: this.#skillVersion,
       ...(this.name ? { HLAO_NAME: this.name } : {}),
       ...(this.parentId ? { HLAO_PARENT_ID: this.parentId } : {}),
     };
@@ -1521,12 +1630,13 @@ export class Session {
 // pure helpers
 // ---------------------------------------------------------------------------
 
-function createQueueItem(text: string, from: string): QueueItem {
+function createQueueItem(id: string, text: string, from: string): QueueItem {
   let settle!: (completion: PromptCompletion) => void;
   const promise = new Promise<PromptCompletion>((resolve) => {
     settle = resolve;
   });
   return {
+    id,
     text,
     from,
     enqueuedAt: Date.now(),
@@ -1576,8 +1686,31 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): P
 }
 
 /**
+ * Signal the adapter's process group on POSIX. The adapter is spawned detached
+ * so it leads the group; `-pid` reaches it and everything it started. Falls
+ * back to the direct child when the group is already gone.
+ */
+function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // No such group (or no permission); fall through to the direct child.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
  * Hard termination. On Windows, `ChildProcess.kill` terminates only the adapter
- * and leaves tool processes running; taskkill /T takes the tree with it.
+ * and leaves tool processes running; taskkill /T takes the tree with it. On
+ * POSIX the adapter's process group is signaled instead.
  */
 function killProcessTree(child: ChildProcess): void {
   const pid = child.pid;
@@ -1592,12 +1725,14 @@ function killProcessTree(child: ChildProcess): void {
     } catch {
       // Fall through to the direct kill.
     }
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    return;
   }
-  try {
-    child.kill("SIGKILL");
-  } catch {
-    // Already gone.
-  }
+  signalProcessGroup(child, "SIGKILL");
 }
 
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
@@ -1652,6 +1787,14 @@ function previewText(text: string): string {
   return oneLine.length > TEXT_PREVIEW_CHARS
     ? `${oneLine.slice(0, TEXT_PREVIEW_CHARS)}…`
     : oneLine;
+}
+
+function skillPointer(path: string): string {
+  return [
+    `HLAO skill: read "${path}" (or run "hlao skill") before acting.`,
+    "Context is whatever this prompt says, verbatim or by reference; do not invent it.",
+    "HLAO carries orchestration text, not file payloads; reference paths and use your own tools.",
+  ].join("\n");
 }
 
 const EVENT_TITLE_CHARS = 120;
@@ -1716,6 +1859,7 @@ function eventTitle(
 
 function queueItemView(item: QueueItem, position: number | null): QueueItemView {
   return {
+    id: item.id,
     position,
     textPreview: previewText(item.text),
     textLength: item.text.length,

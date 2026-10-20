@@ -22,6 +22,7 @@ test("a first message can come from a file or stdin", async (t) => {
     "--prompt-file",
     promptFile,
     "--wait",
+    "--no-skill",
   ]);
   assert.equal(fromFile.code, 0);
   assert.equal(fromFile.value.firstTurn?.text, "echo: from a file");

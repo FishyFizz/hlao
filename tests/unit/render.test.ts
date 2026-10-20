@@ -21,6 +21,7 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: "abc123",
     name: null,
+    createdBy: null,
     backend: "fake",
     cwd: "D:\\work",
     status: "idle",

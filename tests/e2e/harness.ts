@@ -168,12 +168,16 @@ export interface JsonError {
 export interface SpawnValue {
   session: SessionValue;
   nextSeq: number;
+  messageId?: string;
+  duplicate?: boolean;
+  createdBy?: string;
   firstTurn?: { stopReason?: string; text: string; timedOut: boolean };
 }
 
 export interface SessionValue {
   id: string;
   name: string | null;
+  createdBy: string | null;
   backend: string;
   cwd: string;
   status: string;
@@ -231,12 +235,15 @@ export interface ReadValue {
 
 export interface SendValue {
   session: SessionValue;
+  messageId: string;
   queued: boolean;
   turn: number | null;
   completed: boolean;
   timedOut: boolean;
   stopReason?: string;
   text?: string;
+  outcome?: "completed" | "cancelled" | "timed_out";
+  duplicate?: boolean;
 }
 
 export interface WaitValue {

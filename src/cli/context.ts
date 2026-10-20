@@ -268,6 +268,7 @@ export function renderError(error: HlaoError): string {
   if (typeof details?.sessionId === "string") {
     text += `  session: ${details.sessionId}\n`;
     text += `  inspect: hlao read ${details.sessionId} --json\n`;
+    text += `  recover: hlao close ${details.sessionId}\n`;
   }
 
   if (Array.isArray(details?.stderr)) {

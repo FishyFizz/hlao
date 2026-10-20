@@ -45,6 +45,7 @@ Usage:
   hlao policy [<id>] [allow|ask|deny]          read or set the live permission policy
   hlao option [<id>] [key value]               read or set provider config options
   hlao queue [<id>] | queue drop [<id>] N      inspect or drop queued prompts
+  hlao queue drop <id> --id msg-XXXXXXXX       drop one message by id
   hlao rename <id> <name> | --clear            label a session
   hlao agents [--cwd DIR]                      configured backends (local)
   hlao status [--start]                        supervisor state without starting one
@@ -53,6 +54,7 @@ Usage:
   hlao reload                                  re-read config for new spawns
   hlao doctor [--start] [--probe]                 environment and connectivity checks
   hlao whoami                                  this shell's identity and lineage
+  hlao skill [path]                            the agent-facing HLAO skill
   hlao down [--force]                          stop the supervisor
   hlao help [command]                          this help or one command
   hlao version
@@ -122,6 +124,7 @@ const COMMAND_HELP_NAMES = new Set([
   "reload",
   "doctor",
   "whoami",
+  "skill",
   "down",
 ]);
 
@@ -146,6 +149,10 @@ Options:
   --parent SESSION       spawn under another session in this instance
   --permission POLICY    allow (default), ask, or deny
   --env K=V              extra environment for the adapter (repeatable)
+  --no-skill             omit the HLAO skill pointer from the first prompt
+                         (the skill file and $HLAO_SKILL are still present)
+  --idempotency-key KEY  reuse the session produced by an earlier spawn with
+                         the same key instead of spawning again
 
 A session can be addressed by id, id prefix, or name. In human mode --wait
 prints the new handle before it starts waiting, so a long first turn is
@@ -163,8 +170,11 @@ Options:
   --prompt-file FILE     read the message from a file
   --wait                 wait for this message's turn to end
   --timeout DUR          bound the wait (0 = no bound)
+  --idempotency-key KEY  retry safely: a repeat with the same key returns the
+                         original message id and never enqueues twice
 
-A timeout exits 2 and leaves the turn running.`,
+A timeout exits 2 and leaves the turn running. Every send returns a message id
+(msg-…) that events and queue entries carry.`,
     read: `hlao read [<id>] [options]
 
 Read orchestration state plus a bounded page of typed events.
@@ -262,8 +272,9 @@ session in the instance is addressable by every caller. The footer reports the
 instance count, and a view with a known caller marks that session with *.
 --all includes sessions that have closed but are still retained for reading.
 
-Filters: --status S[,S], --backend NAME, --root SESSION, --name TEXT,
---pending, and --cwd-prefix DIR (subtree). --sort created|activity (human
+Filters: --status S[,S], --backend NAME, --root SESSION, --mine (the caller's
+own root subtree, from HLAO_ROOT_ID/HLAO_SESSION_ID), --name TEXT, --pending,
+and --cwd-prefix DIR (subtree). --sort created|activity (human
 default: activity). --wide adds BUSY, POLICY, MODE, PENDING, and EXIT;
 --usage adds USAGE/COST and a per-currency footer total; --tree groups and
 indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
@@ -342,11 +353,12 @@ With key value: request session/set_config_option. Boolean options accept
 true/false. Inside a session, use --self or --self <key> <value>.`,
     queue: `hlao queue [<id>] [--self]
 hlao queue drop [<id>] <position> [--self]
+hlao queue drop <id> --id <message>
 
-List queued prompts with sender, age, and a bounded text preview, or drop one
-position (1 is the next message to run). Dropping settles that caller as
-cancelled. Inside a session, omit <id> or pass --self. Cancel with --keep-queue
-stops only the active turn.`,
+List queued prompts with sender, age, message id, and a bounded text preview,
+or drop one position (1 is the next message to run) or one message by id.
+Dropping settles that caller as cancelled. Inside a session, omit <id> or pass
+--self. Cancel with --keep-queue stops only the active turn.`,
     rename: `hlao rename <id> <name> [--clear]
 
 Give a session an operator-facing name. A unique name can then be used anywhere
@@ -392,6 +404,14 @@ one and probes it. --probe additionally spawns every available backend, complete
 ACP initialize and session/new, and closes it; this can be slow and may exercise
 provider authentication. --probe implies --start. Exits 1 only when a required
 check fails.`,
+    skill: `hlao skill [path | --path] [--json]
+
+Print the agent-facing HLAO skill: what a spawned session is, the moves, the worker loop, and
+the rule that the prompt is the context channel (verbatim or by reference; no invented state).
+Spawned sessions get its path in $HLAO_SKILL and a one-line pointer in their first prompt.
+
+  --path     print the home copy's path instead of the text
+  --json     return {name, version, path, packagedPath, text}`,
     whoami: `hlao whoami
 
 Report this shell's role, session id, parent, root, depth, and backend from the

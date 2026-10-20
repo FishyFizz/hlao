@@ -267,6 +267,8 @@ const app = agent({ name: "fake-acp" })
           backend: process.env.HLAO_BACKEND ?? null,
           home: process.env.HLAO_HOME ?? null,
           cli: process.env.HLAO_CLI ?? null,
+          skill: process.env.HLAO_SKILL ?? null,
+          skillVersion: process.env.HLAO_SKILL_VERSION ?? null,
         })}`,
       );
       return { stopReason: "end_turn" };

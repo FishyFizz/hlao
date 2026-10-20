@@ -12,7 +12,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 2 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 3 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -60,6 +60,10 @@ export const PROTOCOL_CAPABILITIES = [
   "wait.filters",
   "session.settled",
   "session.lastEvent",
+  "send.messageId",
+  "send.idempotency",
+  "spawn.idempotency",
+  "spawn.createdBy",
 ] as const;
 
 export type ProtocolCapability = (typeof PROTOCOL_CAPABILITIES)[number];
@@ -170,6 +174,8 @@ export interface SessionUsageView {
 export interface SessionView {
   id: string;
   name: string | null;
+  /** Who requested the spawn: "operator" or a session id. Provenance only. */
+  createdBy: string | null;
   backend: string;
   cwd: string;
   status: SessionStatus;
@@ -370,6 +376,10 @@ export interface SpawnParams {
   parentSessionId?: string;
   permissionPolicy?: PermissionPolicy;
   env?: Record<string, string>;
+  /** Include the HLAO skill pointer in the first prompt. Default true. */
+  skill?: boolean;
+  /** Dedupe key for a retrying spawn (1h in the supervisor). */
+  idempotencyKey?: string;
 }
 export interface FirstTurnResult {
   stopReason?: StopReason;
@@ -380,6 +390,11 @@ export interface SpawnResult {
   session: SessionView;
   nextSeq: number;
   firstTurn?: FirstTurnResult;
+  /** The first prompt's message id, when a prompt was sent. */
+  messageId?: string;
+  /** True when the idempotency key matched an existing session. */
+  duplicate?: boolean;
+  createdBy?: string;
 }
 export interface ListParams {
   includeClosed?: boolean;
@@ -394,20 +409,30 @@ export interface GetParams {
 export interface GetResult {
   session: SessionView;
 }
+export type SendOutcome = "completed" | "cancelled" | "timed_out";
+
 export interface SendParams {
   sessionId: string;
   text: string;
   wait?: boolean;
   timeoutMs?: number;
+  /** Caller-chosen message id; generated when omitted. */
+  messageId?: string;
+  /** Dedupe key for a retrying caller (1h / 256 keys in the live session). */
+  idempotencyKey?: string;
 }
 export interface SendResult {
   session: SessionView;
+  messageId: string;
   queued: boolean;
   turn: number | null;
   completed: boolean;
   timedOut: boolean;
   stopReason?: StopReason;
   text?: string;
+  outcome?: SendOutcome;
+  /** True when the idempotency key matched an existing message. */
+  duplicate?: boolean;
 }
 export interface ReadParams {
   sessionId: string;
@@ -507,6 +532,8 @@ export interface SetPolicyResult {
   session: SessionView;
 }
 export interface QueueItemView {
+  /** Stable message id; the active turn's id is also in its prompt.sent event. */
+  id: string;
   position: number | null;
   textPreview: string;
   textLength: number;
@@ -524,7 +551,9 @@ export interface QueueResult {
 }
 export interface QueueDropParams {
   sessionId: string;
-  position: number;
+  /** Exactly one of position or messageId. */
+  position?: number;
+  messageId?: string;
 }
 export interface QueueDropResult {
   session: SessionView;
@@ -992,6 +1021,8 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           "parentSessionId",
           "permissionPolicy",
           "env",
+          "skill",
+          "idempotencyKey",
         ],
         what,
       );
@@ -1016,6 +1047,8 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           "deny",
         ] as const),
         env: stringRecord(object, "env", what),
+        skill: optBoolean(object, "skill", what),
+        idempotencyKey: optString(object, "idempotencyKey", what, 200),
       } as ParamsByMethod[M];
     }
     case "sessions.list": {
@@ -1043,12 +1076,18 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
     }
     case "sessions.send": {
       const object = asObject(raw, what);
-      checkKeys(object, ["sessionId", "text", "wait", "timeoutMs"], what);
+      checkKeys(
+        object,
+        ["sessionId", "text", "wait", "timeoutMs", "messageId", "idempotencyKey"],
+        what,
+      );
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
         text: reqString(object, "text", what, 1, MAX_PROMPT_CHARS),
         wait: optBoolean(object, "wait", what),
         timeoutMs: optInt(object, "timeoutMs", what, 0, MAX_TIMEOUT_MS),
+        messageId: optString(object, "messageId", what, 100),
+        idempotencyKey: optString(object, "idempotencyKey", what, 200),
       } as ParamsByMethod[M];
     }
     case "sessions.read": {
@@ -1210,10 +1249,19 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
     }
     case "sessions.queue_drop": {
       const object = asObject(raw, what);
-      checkKeys(object, ["sessionId", "position"], what);
+      checkKeys(object, ["sessionId", "position", "messageId"], what);
+      const position = optInt(object, "position", what, 1, 1_000);
+      const messageId = optString(object, "messageId", what, 100);
+      if ((position === undefined) === (messageId === undefined)) {
+        throw new HlaoError(
+          "bad_request",
+          `${what} requires exactly one of position or messageId`,
+        );
+      }
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
-        position: reqInt(object, "position", what, 1, 1_000),
+        position,
+        messageId,
       } as ParamsByMethod[M];
     }
     case "sessions.rename": {

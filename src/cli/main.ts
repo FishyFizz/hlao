@@ -21,6 +21,7 @@ import {
   cmdRename,
 } from "./commands/control.js";
 import { cmdFind } from "./commands/find.js";
+import { cmdSkill } from "./commands/skill.js";
 import { cmdList } from "./commands/list.js";
 import {
   cmdExport,
@@ -160,6 +161,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdDoctor(args);
       case "whoami":
         return await cmdWhoami(args);
+      case "skill":
+        return await cmdSkill(args);
       case "down":
         return await cmdDown(args);
       default:

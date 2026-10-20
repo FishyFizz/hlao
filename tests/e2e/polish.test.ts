@@ -12,6 +12,7 @@ test("verbose tool payloads are omitted by default and rendered on request", asy
     "fake",
     "verbose payload",
     "--wait",
+    "--no-skill",
   ]);
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;

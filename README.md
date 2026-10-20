@@ -86,21 +86,21 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 
 | Command | What it does |
 |---|---|
-| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity, optionally send the first message. `--name` gives it a label. |
-| `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. |
+| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn. |
+| `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
 | `hlao export <id> [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. |
 | `hlao get [<id>]` | One session's orchestration state without reading events. |
 | `hlao find TEXT` | Search events across sessions (`list` + paged `read --grep`); `--all` includes retained histories. |
 | `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `settled`, `permission`, `exit`, or a filtered `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3 (for `settled`, termination is a valid completion). |
-| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
+| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
 | `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
 | `hlao policy [<id>] [allow\|ask\|deny]` | Read or set the live HLAO permission policy. |
 | `hlao option [<id>] [key value]` | Read or set provider config options such as model and reasoning effort. |
-| `hlao queue [<id>]` / `hlao queue drop [<id>] N` | Inspect queued prompts with sender and preview, or drop one. |
+| `hlao queue [<id>]` / `hlao queue drop [<id>] N` | Inspect queued prompts with sender, message id, and preview, or drop one. `queue drop <id> --id msg-…` targets a message id. |
 | `hlao rename <id> <name>` | Label a session, or `--clear` it. Names are addressable within the instance. |
 | `hlao agents` | Configured backends, their source, config file, and whether the adapter command is present. Reads config locally so it works without a supervisor; the same view is on the wire as `backends.list`. |
 | `hlao status [--start]` | Probe the supervisor without starting one; `--start` launches it. Reports the wire protocol version and capabilities. |
@@ -108,7 +108,8 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao config show\|path\|validate` | Inspect the local config; backend env values are redacted. |
 | `hlao reload` | Re-read user config in the supervisor for new spawns only. |
 | `hlao doctor [--start] [--probe]` | Diagnose locally; opt in to starting the supervisor or probing adapters. |
-| `hlao whoami` | This shell's role, name, and lineage. |
+| `hlao whoami` | This shell's role, name, and lineage. Reads the live name when the supervisor is up; never starts one. |
+| `hlao skill [--path]` | Print the HLAO skill (also at `$HLAO_SKILL`); `--path` prints its location. |
 | `hlao down [--force]` | Close every session and stop the supervisor. `--force` kills only a process that answers as the supervisor; an unverified stale lock is removed without touching its pid. |
 | `hlao help [command]` | Full help or one command's help. |
 | `hlao version` | Print the CLI version (`--json` for an object). |
@@ -246,6 +247,12 @@ A spawned session inherits:
 | `HLAO_BACKEND` | backend manifest name |
 | `HLAO_HOME` | runtime home, for supervisor discovery |
 | `HLAO_CLI` | absolute path to the CLI entry point |
+| `HLAO_SKILL` | absolute path to the HLAO skill file |
+| `HLAO_SKILL_VERSION` | the HLAO version that shipped that skill |
+
+The first prompt carries a short pointer to the skill (unless `spawn --no-skill`). The skill
+is a usage artifact, not a context payload: it says to pass context verbatim or by reference
+and to reference files and images rather than shipping their bytes through the harness.
 
 The agent can run `hlao` from `PATH`, or `node "$HLAO_CLI"` when HLAO is not installed
 globally. A typical worker loop:
@@ -256,6 +263,9 @@ hlao read --since 42
 hlao wait --until permission --timeout 10m
 hlao send "$HLAO_PARENT_ID" "Blocked: the lock file is held by another worker."
 ```
+
+The worker can also scope a listing to its own job with `hlao list --mine`, and read the
+skill with `hlao skill` when it wants the full guidance rather than the pointer.
 
 `--json` makes every command machine-readable. Success prints the result object; failure
 prints `{"ok":false,"error":{"code","message","details?"}}` on stdout with exit 1.
