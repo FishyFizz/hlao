@@ -40,31 +40,40 @@ A client must not depend on a transport's message boundaries. The canonical fram
 byte-stream transports is NDJSON; a message-oriented adapter delivers the same JSON text.
 Empty lines are not frames.
 
-## Lifecycle (protocol 2.0)
+## Lifecycle
 
-Today, one connection carries exactly one request:
+### One-shot (default, protocol 2.0)
+
+A connection carries exactly one request:
 
 1. The client connects.
 2. The client writes one request frame.
 3. The supervisor writes one response frame.
 4. The supervisor closes the stream.
 
-The supervisor ignores frames after the first on a connection and closes after replying. A
-stream that sends no frame within 15 s is closed. This is the legacy path and remains
-supported; it is what the bundled CLI uses.
+The supervisor ignores frames after the first on such a connection and closes after replying.
+A stream that sends no frame within 15 s is closed. This is what the bundled CLI uses.
 
-Persistent multiplexed streams are **not** part of protocol 2.0. They are planned as additive
-capabilities:
+### Persistent (protocol 2.1)
 
-- `stream.persistent` — the connection stays open and carries many requests, correlated by
-  the client-chosen `id`. Responses may be out of order.
-- `stream.subscribe` — the client registers interest in fleet and per-session changes; the
-  server emits notification frames at state-append time.
-- `stream.resume` — a reconnect supplies per-session cursors so the server replays from
-  `seq > cursor`, or reports `truncated`.
+1. The client connects and writes `hello` with `stream: { persistent: true }`.
+2. The supervisor validates the token and version and replies. On success the connection
+   stays open; on failure the reply is an error and the connection closes.
+3. Every later frame is a request. Requests carry the client-chosen `id`; several may be in
+   flight, and responses may arrive out of order. At most 64 may be in flight
+   (`too_many_requests`).
+4. `stream.subscribe` registers interest. The supervisor emits notification frames (a server
+   frame with `type: "notification"`) at the same append point that wakes a waiter.
+   `stream.unsubscribe` removes one subscription.
+5. Either side may close. A reconnect supplies per-session cursors so the server replays from
+   `seq > cursor` and reports `truncated` when history was evicted.
 
-None of these changes `wait`: it remains one-shot. Push and wait are two ways to observe the
-same append point, not two authorities.
+Every request frame still carries the token. Persistence does not weaken per-frame
+authentication. The first frame gates the connection: frames that arrive before the hello
+reply are queued and then processed, so a client may pipeline safely.
+
+None of this changes `wait`: it remains one-shot. Push and wait are two ways to observe the
+same append point, not two authorities. The supervisor owns no timer in either mode.
 
 ## Adapter interface
 
@@ -79,6 +88,7 @@ interface WireStream {
   write(frame: string): void;
   close(): void;                           // flush, then FIN
   terminate(): void;                       // drop immediately
+  bufferedBytes(): number;                 // accepted but not yet flushed
   onFrame(handler: (frame: string) => void): void;
   onError(handler: (error: Error) => void): void;
   onClose(handler: () => void): void;
@@ -121,5 +131,7 @@ or browser credential.
 | Inbound frame over the limit | respond `bad_request`, close the stream | treat as `internal` ("response was too large") |
 | Transport failure before a response | abort, close | `supervisor_unavailable` |
 | Stream closed with no response | — | `supervisor_unavailable` |
+| More than 64 requests in flight | respond `too_many_requests`, keep the connection | retry later |
+| Subscriber buffer over 8 MiB | close the stream | reconnect with cursors |
 
 Framing errors are reported before any method is dispatched, so they carry `id: 0`.

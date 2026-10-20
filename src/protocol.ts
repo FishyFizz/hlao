@@ -12,7 +12,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 0 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 1 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -53,6 +53,9 @@ export const PROTOCOL_CAPABILITIES = [
   "read.filters",
   "read.before",
   "wait.multi",
+  "stream.persistent",
+  "stream.subscribe",
+  "stream.resume",
 ] as const;
 
 export type ProtocolCapability = (typeof PROTOCOL_CAPABILITIES)[number];
@@ -229,6 +232,34 @@ export type ResponseEnvelope =
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: WireError };
 
+/**
+ * A server-initiated frame on a persistent connection. Responses carry no
+ * `type`; this discriminator is how a persistent client tells them apart.
+ */
+export type NotificationFrame =
+  | {
+      type: "notification";
+      subscription: number;
+      kind: "session";
+      session: SessionView;
+    }
+  | {
+      type: "notification";
+      subscription: number;
+      kind: "session.removed";
+      sessionId: string;
+    }
+  | {
+      type: "notification";
+      subscription: number;
+      kind: "event";
+      sessionId: string;
+      events: EventView[];
+      /** The last delivered seq; pass it as `since` to resume. */
+      cursor: number;
+      truncated: boolean;
+    };
+
 export const METHODS = [
   "hello",
   "backends.list",
@@ -248,6 +279,8 @@ export const METHODS = [
   "sessions.queue_drop",
   "sessions.rename",
   "sessions.forget",
+  "stream.subscribe",
+  "stream.unsubscribe",
   "supervisor.reload",
   "supervisor.shutdown",
 ] as const;
@@ -257,6 +290,14 @@ export type Method = (typeof METHODS)[number];
 export interface HelloParams {
   /** The client's wire version. A major mismatch is `version_mismatch`. */
   protocolVersion?: ProtocolVersion;
+  /**
+   * Ask for a persistent, multiplexed connection. A supervisor without the
+   * `stream.persistent` capability rejects the unknown field; call `hello`
+   * without it first when the supervisor may be older.
+   */
+  stream?: {
+    persistent?: boolean;
+  };
 }
 export interface HelloResult {
   protocolVersion: ProtocolVersion;
@@ -267,6 +308,32 @@ export interface HelloResult {
   sessions: number;
   configHash: string;
   configError?: string;
+  /** Present when persistence was requested; `persistent` is the accepted value. */
+  stream?: { persistent: boolean };
+}
+export interface SubscribeParams {
+  /** Sessions to stream events for, and to report views for. 1..100 ids. */
+  sessionIds?: string[];
+  /** Report views for every session in the instance, including new ones. */
+  fleet?: boolean;
+  /** Per-session resume cursor: the last seq the client already has. */
+  since?: Record<string, number>;
+}
+export interface SubscribeResult {
+  subscription: number;
+  /** Current views for the subscription's view scope. */
+  sessions: SessionView[];
+  /** Per-session last delivered seq; pass as `since` on resume. */
+  cursors: Record<string, number>;
+  /** Session ids whose history was evicted before the supplied cursor. */
+  truncated: string[];
+}
+export interface UnsubscribeParams {
+  subscription: number;
+}
+export interface UnsubscribeResult {
+  subscription: number;
+  removed: true;
 }
 export interface BackendsListParams {
   /** Defaults to the caller's cwd, or the supervisor's cwd for an operator. */
@@ -500,6 +567,8 @@ type ParamsByMethod = {
   "sessions.queue_drop": QueueDropParams;
   "sessions.rename": RenameParams;
   "sessions.forget": ForgetParams;
+  "stream.subscribe": SubscribeParams;
+  "stream.unsubscribe": UnsubscribeParams;
   "supervisor.reload": ReloadParams;
   "supervisor.shutdown": ShutdownParams;
 };
@@ -636,6 +705,56 @@ function reqEnum<T extends string>(
     throw new HlaoError("bad_request", `${what}.${key} is required`);
   }
   return value;
+}
+
+function optPersistentStream(
+  object: JsonObject,
+  key: string,
+  what: string,
+): { persistent?: boolean } | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  const record = asObject(value, `${what}.${key}`);
+  checkKeys(record, ["persistent"], `${what}.${key}`);
+  return {
+    persistent: optBoolean(record, "persistent", `${what}.${key}`),
+  };
+}
+
+function optSeqRecord(
+  object: JsonObject,
+  key: string,
+  what: string,
+): Record<string, number> | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  const record = asObject(value, `${what}.${key}`);
+  const entries = Object.entries(record);
+  if (entries.length > 100) {
+    throw new HlaoError("bad_request", `${what}.${key} has too many entries`);
+  }
+  const out: Record<string, number> = {};
+  for (const [id, seq] of entries) {
+    if (id.length === 0 || id.length > 64) {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key} keys must be session ids`,
+      );
+    }
+    if (
+      typeof seq !== "number" ||
+      !Number.isInteger(seq) ||
+      seq < 0 ||
+      seq > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new HlaoError(
+        "bad_request",
+        `${what}.${key}.${id} must be a non-negative integer`,
+      );
+    }
+    out[id] = seq;
+  }
+  return out;
 }
 
 function optProtocolVersion(
@@ -817,9 +936,10 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
   switch (method) {
     case "hello": {
       const object = asObject(raw ?? {}, what);
-      checkKeys(object, ["protocolVersion"], what);
+      checkKeys(object, ["protocolVersion", "stream"], what);
       return {
         protocolVersion: optProtocolVersion(object, "protocolVersion", what),
+        stream: optPersistentStream(object, "stream", what),
       } as ParamsByMethod[M];
     }
     case "backends.list": {
@@ -1071,6 +1191,42 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       checkKeys(object, ["sessionId"], what);
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
+      } as ParamsByMethod[M];
+    }
+    case "stream.subscribe": {
+      const object = asObject(raw ?? {}, what);
+      checkKeys(object, ["sessionIds", "fleet", "since"], what);
+      const sessionIds = optStringArray(object, "sessionIds", what, 100);
+      if (
+        sessionIds !== undefined &&
+        new Set(sessionIds).size !== sessionIds.length
+      ) {
+        throw new HlaoError("bad_request", `${what}.sessionIds must not repeat an id`);
+      }
+      const fleet = optBoolean(object, "fleet", what);
+      if ((sessionIds?.length ?? 0) === 0 && fleet !== true) {
+        throw new HlaoError(
+          "bad_request",
+          `${what} requires sessionIds or fleet: true`,
+        );
+      }
+      return {
+        sessionIds,
+        fleet,
+        since: optSeqRecord(object, "since", what),
+      } as ParamsByMethod[M];
+    }
+    case "stream.unsubscribe": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["subscription"], what);
+      return {
+        subscription: reqInt(
+          object,
+          "subscription",
+          what,
+          1,
+          Number.MAX_SAFE_INTEGER,
+        ),
       } as ParamsByMethod[M];
     }
     case "supervisor.reload": {

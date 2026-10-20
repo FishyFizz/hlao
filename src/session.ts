@@ -165,6 +165,7 @@ export class Session {
   #cancelling = false;
   #ready = false;
   #waiters = new Set<() => void>();
+  #changeListeners = new Set<() => void>();
   #stderrTail: string[] = [];
   #config: SessionConfig;
   #backendManifest: BackendManifest;
@@ -204,6 +205,19 @@ export class Session {
     const session = new Session(options);
     await session.#start();
     return session;
+  }
+
+  /**
+   * Observe state changes and appended events. The listener is called after the
+   * event log or session state has changed, so a reader may immediately read
+   * from its cursor. Returns an unsubscribe function. This is the same point
+   * that wakes `waitFor`; it creates no timer.
+   */
+  onChange(listener: () => void): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
   }
 
   get isTerminal(): boolean {
@@ -1435,6 +1449,13 @@ export class Session {
         waiter();
       } catch {
         // A waiter must never break the session.
+      }
+    }
+    for (const listener of [...this.#changeListeners]) {
+      try {
+        listener();
+      } catch {
+        // An observer must never break the session.
       }
     }
   }

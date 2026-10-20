@@ -22,7 +22,10 @@ bidirectional, boundary-preserving, and bounded. On byte-stream transports the e
 NDJSON. A transport adapter maps that contract onto a channel; swapping the channel does not
 change this protocol.
 
-- Protocol 2.0: one request per connection, one response, then the connection closes.
+- A connection that does not negotiate persistence carries exactly one request, one
+  response, then closes (the protocol 2.0 behavior). `hello` with
+  `stream: { persistent: true }` keeps the connection open and multiplexes requests by
+  `id` (2.1); see *Persistent streams* below.
 - Endpoint: named pipe on Windows (`\\.\pipe\hlao-<hash of HLAO_HOME>`), Unix domain socket
   at `<HLAO_HOME>/supervisor.sock` elsewhere.
 - Authentication: every request carries the token from `<HLAO_HOME>/supervisor.json`. Any
@@ -34,10 +37,11 @@ change this protocol.
 
 - Call `hello` first. It reports the protocol version, capabilities, and supervisor health.
 - Poll `sessions.list` for a fleet view and `sessions.read` with `nextSeq`/`nextBefore` for a
-  session's log. There is no push subscription in protocol 2.x. A live client should poll at a
-  cadence it chooses; the supervisor owns no recurring timer.
+  session's log. Polling is the protocol 2.0 model and remains supported. A client that needs a
+  live view may instead negotiate a persistent stream and subscribe (2.1); the supervisor owns
+  no recurring timer either way.
 - Use `sessions.wait` when a client would otherwise poll a blocking condition. It is one-shot:
-  it resolves once and must be re-armed.
+  it resolves once and must be re-armed. A subscription does not change `wait`.
 - All timestamps are ISO-8601 strings. Durations such as "pending for" are computed by the
   client.
 - A client that wants a composite operation (`cancel` then wait, broadcast to a subtree, bulk
@@ -91,6 +95,7 @@ The token is the instance boundary.
 | `config_invalid` | user or project config is invalid; the message names the file |
 | `session_failed` | a prompt turn failed for a reason the adapter reported |
 | `timeout` | a supervisor-side bounded operation expired (connections, shutdown) |
+| `too_many_requests` | a persistent connection has more than 64 requests in flight |
 | `supervisor_unavailable` | client-side: the supervisor could not be reached or started |
 | `internal` | an unexpected supervisor error; message is safe to display |
 
@@ -106,11 +111,14 @@ The token is the instance boundary.
   before relying on an addition.
 - `capabilities` lists additive features this supervisor implements. Unknown capabilities must
   be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
-  `wait.multi`.
+  `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
   caller. There is no per-session visibility filter. Isolation is a separate instance.
+- **2.1** adds persistent connections, `stream.subscribe`, and resume. The 2.0 one-request
+  lifecycle, envelope, errors, and frame limits are unchanged; a 2.0 client sees only new
+  capabilities it may ignore.
 
 ## Methods
 
@@ -129,6 +137,7 @@ Params:
 ```ts
 {
   protocolVersion?: { major: number; minor: number }; // the client's version
+  stream?: { persistent?: boolean };                  // request a persistent connection (2.1)
 }
 ```
 
@@ -143,9 +152,17 @@ Result:
   version: string,
   sessions: number,
   configHash: string,         // sha256 of the user config file, or "missing"
-  configError?: string        // present when user config failed validation
+  configError?: string,       // present when user config failed validation
+  stream?: { persistent: boolean } // present when persistence was requested
 }
 ```
+
+`stream: { persistent: true }` is only valid on the first frame. On success the connection
+stays open and every later frame is a request; the connection closes when either side does.
+On a 2.0 supervisor the unknown `stream` field is `bad_request`, so a client that may meet an
+older supervisor calls `hello` without it first and checks `stream.persistent` in the
+capabilities.
+
 
 If `protocolVersion` is present and its major differs, the response is `version_mismatch`.
 The field was added in 1.1; a client that may meet a 1.0 supervisor should call `hello` with
@@ -446,6 +463,78 @@ Result: `{ session: SessionView; dropped: QueueItemView; discarded: number }`.
 Removes one queued prompt. The prompt is settled as cancelled before it runs and emits
 `prompt.discarded` with `reason: "dropped"`, `position`, and the actor. Out-of-range positions
 are `bad_request` and do not change the queue.
+
+### `stream.subscribe`
+
+Persistent streams only. A subscription reports session views and, for explicitly named
+sessions, streams their events. It is event-driven: notifications are emitted at the same
+append point that wakes `sessions.wait`, and the supervisor creates no timer.
+
+Params:
+
+```ts
+{
+  sessionIds?: string[];                    // 1..100; events and views for these ids
+  fleet?: boolean;                          // views for every session, including new ones
+  since?: Record<string, number>;           // per-session resume cursor: seq the client has
+}
+```
+
+At least one of `sessionIds` or `fleet: true` is required. Ids resolve by the usual rules.
+One connection may hold at most 64 subscriptions (`too_many_requests`).
+
+Result:
+
+```ts
+{
+  subscription: number,
+  sessions: SessionView[],                  // current views for the view scope
+  cursors: Record<string, number>,          // last delivered seq per session
+  truncated: string[]                       // ids whose history was evicted before `since`
+}
+```
+
+`fleet` controls the view scope. `sessionIds` controls the event scope; a fleet subscription
+with `sessionIds` does both. A subscription with only `fleet` does not stream events: polling
+`sessions.read` for an open session remains the client's choice, and a dashboard usually
+subscribes once for the fleet and once for the session it is showing.
+
+View notifications (`kind: "session"`) are sent when a session's `SessionView` changes; the
+first notification after a reconnect is a full view, so a client can replace local state.
+New sessions in a fleet scope appear automatically. A session removed from the live table
+(`forget` or retention expiry) produces `kind: "session.removed"` exactly once.
+
+Event notifications are batched per session. `cursor` is the seq of the last delivered event;
+pass it back as `since[id]` on reconnect. If events were evicted, the notification has
+`truncated: true` and starts at the earliest retained event. The server closes a consumer that
+lets more than 8 MiB sit in its outbound transport buffer; the client reconnects and resumes.
+At most 64 requests may be in flight on one connection (`too_many_requests`).
+
+### `stream.unsubscribe`
+
+Persistent streams only.
+
+Params: `{ subscription: number }`.
+Result: `{ subscription: number; removed: true }`.
+Errors: `not_found` when the connection has no such subscription.
+
+### Notifications
+
+A persistent connection carries two kinds of server frame. Responses have `id` and `ok`;
+notifications have `type: "notification"`.
+
+```ts
+type NotificationFrame =
+  | { type: "notification"; subscription: number; kind: "session"; session: SessionView }
+  | { type: "notification"; subscription: number; kind: "session.removed"; sessionId: string }
+  | { type: "notification"; subscription: number; kind: "event";
+      sessionId: string; events: EventView[]; cursor: number; truncated: boolean };
+```
+
+Notifications are never interleaved inside a frame. Per-session event order is the event
+log's sequence; across sessions, notifications follow the order in which the supervisor
+observed the changes. A client must not assume a response and a notification that describe
+the same change arrive in a particular order relative to each other.
 
 ### `supervisor.reload`
 

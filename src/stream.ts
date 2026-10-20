@@ -47,6 +47,8 @@ export interface WireStream {
   close(): void;
   /** Immediate teardown: drop buffered data and the connection. */
   terminate(): void;
+  /** Bytes accepted by the adapter but not yet flushed to the peer. */
+  bufferedBytes(): number;
   /**
    * Called for each complete frame. Frames that arrive before a handler is
    * attached are buffered, so a caller may register after connect/accept.
@@ -134,6 +136,10 @@ class NetWireStream implements WireStream {
     } catch {
       // Already gone.
     }
+  }
+
+  bufferedBytes(): number {
+    return this.#socket.writableLength;
   }
 
   onFrame(handler: (frame: string) => void): void {

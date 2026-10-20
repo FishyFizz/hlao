@@ -17,6 +17,7 @@ export const ERROR_CODES = [
   "timeout",
   "supervisor_unavailable",
   "config_invalid",
+  "too_many_requests",
   "internal",
 ] as const;
 

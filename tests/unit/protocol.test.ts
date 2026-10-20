@@ -4,7 +4,10 @@ import { HlaoError } from "../../src/errors.js";
 import {
   parseEnvelope,
   parseParams,
+  type HelloParams,
   type SpawnParams,
+  type SubscribeParams,
+  type UnsubscribeParams,
   type WaitParams,
 } from "../../src/protocol.js";
 
@@ -185,4 +188,69 @@ test("wait accepts one id or a list, never both", () => {
         error instanceof HlaoError && error.code === "bad_request",
     );
   }
+});
+
+test("hello can request a persistent stream", () => {
+  const plain = parseParams("hello", {}) as HelloParams;
+  assert.equal(plain.stream, undefined);
+
+  const persistent = parseParams("hello", {
+    stream: { persistent: true },
+  }) as HelloParams;
+  assert.deepEqual(persistent.stream, { persistent: true });
+
+  for (const bad of [
+    { stream: { persistent: "yes" } },
+    { stream: { other: true } },
+    { stream: true },
+  ]) {
+    assert.throws(
+      () => parseParams("hello", bad),
+      (error: unknown) =>
+        error instanceof HlaoError && error.code === "bad_request",
+    );
+  }
+});
+
+test("stream.subscribe requires a scope and validates cursors", () => {
+  const fleet = parseParams("stream.subscribe", {
+    fleet: true,
+  }) as SubscribeParams;
+  assert.equal(fleet.fleet, true);
+
+  const scoped = parseParams("stream.subscribe", {
+    sessionIds: ["abc"],
+    since: { abc: 4 },
+  }) as SubscribeParams;
+  assert.deepEqual(scoped.sessionIds, ["abc"]);
+  assert.deepEqual(scoped.since, { abc: 4 });
+
+  for (const bad of [
+    {},
+    { sessionIds: [] },
+    { sessionIds: ["abc", "abc"] },
+    { fleet: "yes" },
+    { sessionIds: ["abc"], since: { abc: -1 } },
+    { sessionIds: ["abc"], since: { abc: 1.5 } },
+    { sessionIds: ["abc"], since: { "": 1 } },
+  ]) {
+    assert.throws(
+      () => parseParams("stream.subscribe", bad),
+      (error: unknown) =>
+        error instanceof HlaoError && error.code === "bad_request",
+    );
+  }
+});
+
+test("stream.unsubscribe requires a subscription id", () => {
+  const params = parseParams("stream.unsubscribe", {
+    subscription: 3,
+  }) as UnsubscribeParams;
+  assert.equal(params.subscription, 3);
+
+  assert.throws(
+    () => parseParams("stream.unsubscribe", {}),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
 });

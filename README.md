@@ -174,10 +174,14 @@ agent  -> CLI / MCP        --/
 Call `hello` first: it returns `protocolVersion: { major, minor }` and a capability list.
 Major versions must match; minor versions are additive. `contracts/protocol.md` is the full
 contract, including `backends.list`, filtered and backward reads, multi-id `wait`, and the
-`usage` field on every session view. Polling `sessions.list`/`sessions.read` is the supported
-live-update model; the supervisor never runs a client's refresh loop. Client assemblies
-(`cancel` then wait, broadcast, bulk permit, `@last`) are built by looping over wire methods,
-not added to the wire.
+`usage` field on every session view.
+
+Polling `sessions.list`/`sessions.read` is the 2.0 live-update model and remains supported.
+Protocol 2.1 adds an opt-in persistent stream: `hello` with `stream.persistent`, then
+`stream.subscribe` for fleet view changes and per-session events, with per-session cursors and
+resume. Notifications are emitted when state changes, so the supervisor still runs no refresh
+loop and no timer. Client assemblies (`cancel` then wait, broadcast, bulk permit, `@last`) are
+built by looping over wire methods, not added to the wire.
 
 ## The two rules under the surface
 

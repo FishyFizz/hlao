@@ -49,6 +49,7 @@ import {
   type HelloResult,
   type ListParams,
   type ListResult,
+  type NotificationFrame,
   type PermitParams,
   type PermitResult,
   type QueueDropParams,
@@ -63,6 +64,7 @@ import {
   type ResponseEnvelope,
   type SendParams,
   type SendResult,
+  type SessionView,
   type RenameParams,
   type RenameResult,
   type SetConfigOptionParams,
@@ -75,6 +77,10 @@ import {
   type ShutdownResult,
   type SpawnParams,
   type SpawnResult,
+  type SubscribeParams,
+  type SubscribeResult,
+  type UnsubscribeParams,
+  type UnsubscribeResult,
   type WaitParams,
   type WaitResult,
   type WaitTargetResult,
@@ -83,6 +89,41 @@ import { Session } from "./session.js";
 
 function actor(caller: string | null): string {
   return caller ?? "operator";
+}
+
+/** A persistent connection may have this many requests in flight. */
+const MAX_INFLIGHT_REQUESTS = 64;
+/** Events delivered per session per notification flush. */
+const MAX_NOTIFICATION_EVENTS = 200;
+/** Close a consumer that lets this much data sit in the transport buffer. */
+const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
+/** Subscriptions one persistent connection may hold. */
+const MAX_SUBSCRIPTIONS = 64;
+
+interface SubscriptionState {
+  id: number;
+  /** Report views for every session in the instance, including new ones. */
+  all: boolean;
+  /** Stream events for these sessions (and report their views). */
+  sessionIds: Set<string>;
+  /** Last delivered event seq per session; pass as `since` to read. */
+  cursors: Map<string, number>;
+  /** Last view sent per session, serialized for change detection. */
+  lastViews: Map<string, string>;
+}
+
+interface ConnectionState {
+  stream: WireStream;
+  persistent: boolean;
+  subscriptions: Map<number, SubscriptionState>;
+  nextSubscription: number;
+  inflight: number;
+  flushScheduled: boolean;
+  closed: boolean;
+  observer: (() => void) | null;
+  /** The first frame decides the connection mode; later frames wait for it. */
+  handshaking: boolean;
+  early: string[];
 }
 
 export class AlreadyRunningError extends Error {
@@ -113,6 +154,7 @@ export class SupervisorServer {
   #sessions = new Map<string, Session>();
   #server: WireStreamServer | null = null;
   #streams = new Set<WireStream>();
+  #changeObservers = new Set<() => void>();
   #lock: LockInfo | null = null;
   #stopping = false;
   #acceptingNew = true;
@@ -291,47 +333,89 @@ export class SupervisorServer {
   #onConnection(stream: WireStream): void {
     this.#streams.add(stream);
     const abort = new AbortController();
+    const state: ConnectionState = {
+      stream,
+      persistent: false,
+      subscriptions: new Map(),
+      nextSubscription: 1,
+      inflight: 0,
+      flushScheduled: false,
+      closed: false,
+      observer: null,
+      handshaking: true,
+      early: [],
+    };
+
     stream.onClose(() => {
       abort.abort();
       this.#streams.delete(stream);
+      state.closed = true;
+      if (state.observer !== null) {
+        this.#changeObservers.delete(state.observer);
+        state.observer = null;
+      }
+      state.subscriptions.clear();
     });
 
-    let handled = false;
+    let first = true;
     const initialTimer = setTimeout(() => {
-      if (!handled) stream.terminate();
+      if (first && !state.closed) stream.terminate();
     }, 15_000);
     initialTimer.unref?.();
 
     stream.onError((error) => {
-      if (handled) return;
-      handled = true;
-      clearTimeout(initialTimer);
-      if (error instanceof FrameTooLargeError) {
-        this.#write(
-          stream,
-          failure(0, new HlaoError("bad_request", "request frame too large")),
-        );
-        stream.close();
-        return;
+      if (state.closed) return;
+      if (first) {
+        first = false;
+        clearTimeout(initialTimer);
+        if (error instanceof FrameTooLargeError) {
+          this.#write(
+            stream,
+            failure(0, new HlaoError("bad_request", "request frame too large")),
+          );
+          stream.close();
+          return;
+        }
       }
       abort.abort();
+      state.closed = true;
       stream.terminate();
     });
 
     stream.onFrame((line) => {
-      if (handled) return;
-      handled = true;
-      clearTimeout(initialTimer);
-      void this.#handleLine(line, stream, abort.signal);
+      if (state.closed) return;
+      if (first) {
+        first = false;
+        clearTimeout(initialTimer);
+        void this.#handleFrame(line, state, abort.signal).then(() => {
+          state.handshaking = false;
+          for (const queued of state.early.splice(0)) {
+            if (state.closed) break;
+            void this.#handleFrame(queued, state, abort.signal);
+          }
+        });
+        return;
+      }
+      if (state.handshaking) {
+        if (state.early.length >= MAX_INFLIGHT_REQUESTS) {
+          state.closed = true;
+          stream.terminate();
+          return;
+        }
+        state.early.push(line);
+        return;
+      }
+      void this.#handleFrame(line, state, abort.signal);
     });
   }
 
-  async #handleLine(
+  async #handleFrame(
     line: string,
-    stream: WireStream,
+    state: ConnectionState,
     signal: AbortSignal,
   ): Promise<void> {
     let id = 0;
+    let envelope: RequestEnvelope | null = null;
     try {
       let parsed: unknown;
       try {
@@ -339,17 +423,38 @@ export class SupervisorServer {
       } catch {
         throw new HlaoError("bad_request", "request is not valid JSON");
       }
-      const envelope = parseEnvelope(parsed);
+      envelope = parseEnvelope(parsed);
       id = envelope.id;
-      await this.#handleEnvelope(envelope, signal).then(
-        (result) => this.#write(stream, { id, ok: true, result }),
-        (error) => this.#write(stream, failure(id, error)),
-      );
+      if (state.inflight >= MAX_INFLIGHT_REQUESTS) {
+        throw new HlaoError(
+          "too_many_requests",
+          `at most ${MAX_INFLIGHT_REQUESTS} requests may be in flight`,
+        );
+      }
+      state.inflight += 1;
+      try {
+        const result = await this.#handleEnvelope(envelope, signal, state);
+        this.#write(state.stream, { id, ok: true, result });
+        if (!state.persistent && this.#requestsPersistentStream(envelope)) {
+          state.persistent = true;
+          state.observer = () => this.#scheduleFlush(state);
+          this.#changeObservers.add(state.observer);
+        }
+      } finally {
+        state.inflight -= 1;
+      }
     } catch (error) {
-      this.#write(stream, failure(id, error));
+      this.#write(state.stream, failure(id, error));
     }
 
-    stream.close();
+    this.#scheduleFlush(state);
+
+    // A legacy connection carries exactly one request, as in protocol 2.0.
+    if (!state.persistent) {
+      state.closed = true;
+      state.stream.close();
+    }
+
     const shutdown = this.#shutdownAfterResponse;
     if (shutdown) {
       this.#shutdownAfterResponse = null;
@@ -359,7 +464,20 @@ export class SupervisorServer {
     }
   }
 
-  async #handleEnvelope(envelope: RequestEnvelope, signal: AbortSignal): Promise<unknown> {
+  #requestsPersistentStream(envelope: RequestEnvelope): boolean {
+    if (envelope.method !== "hello") return false;
+    try {
+      return parseParams("hello", envelope.params).stream?.persistent === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async #handleEnvelope(
+    envelope: RequestEnvelope,
+    signal: AbortSignal,
+    connection?: ConnectionState,
+  ): Promise<unknown> {
     if (envelope.token !== this.token) {
       throw new HlaoError("unauthorized", "invalid supervisor token");
     }
@@ -403,6 +521,9 @@ export class SupervisorServer {
             .length,
           configHash: this.#configHash,
           configError: this.#configError ?? undefined,
+          ...(hello.stream !== undefined
+            ? { stream: { persistent: hello.stream.persistent === true } }
+            : {}),
         };
         return result;
       }
@@ -440,6 +561,10 @@ export class SupervisorServer {
         return this.#rename(params as RenameParams, caller);
       case "sessions.forget":
         return this.#forget(params as ForgetParams);
+      case "stream.subscribe":
+        return this.#subscribe(params as SubscribeParams, connection);
+      case "stream.unsubscribe":
+        return this.#unsubscribe(params as UnsubscribeParams, connection);
       case "supervisor.reload":
         return this.#reload(params as ReloadParams, caller);
       case "supervisor.shutdown":
@@ -570,6 +695,8 @@ export class SupervisorServer {
     }
 
     this.#sessions.set(id, session);
+    session.onChange(() => this.#emitChange());
+    this.#emitChange();
     this.#logger.info(
       `spawned ${id} (${backend.name}) in ${cwd}${parent ? ` parent=${parent.id}` : ""}`,
     );
@@ -907,6 +1034,7 @@ export class SupervisorServer {
       );
     }
     this.#sessions.delete(session.id);
+    this.#emitChange();
     this.#logger.info(`forgot ${session.id}`);
     return { sessionId: session.id, forgotten: true };
   }
@@ -1011,18 +1139,215 @@ export class SupervisorServer {
 
   #sweep(): void {
     const cutoff = Date.now() - this.#config.retainClosedMs;
+    let changed = false;
     for (const [id, session] of this.#sessions) {
       if (!session.isTerminal) continue;
       const endedAt = session.view().endedAt;
       if (endedAt && Date.parse(endedAt) < cutoff) {
         this.#sessions.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) this.#emitChange();
+  }
+
+  // -------------------------------------------------------------------------
+  // persistent streams
+  // -------------------------------------------------------------------------
+
+  /** Called after a session state change or a table change. No timer. */
+  #emitChange(): void {
+    for (const observer of [...this.#changeObservers]) {
+      try {
+        observer();
+      } catch {
+        // A slow or broken observer must never block the session table.
       }
     }
   }
 
-  #write(stream: WireStream, response: ResponseEnvelope): void {
+  #subscribe(
+    params: SubscribeParams,
+    connection?: ConnectionState,
+  ): SubscribeResult {
+    if (connection === undefined || !connection.persistent) {
+      throw new HlaoError(
+        "bad_request",
+        "stream.subscribe requires a persistent stream (hello with stream.persistent)",
+      );
+    }
+    if (connection.subscriptions.size >= MAX_SUBSCRIPTIONS) {
+      throw new HlaoError(
+        "too_many_requests",
+        `at most ${MAX_SUBSCRIPTIONS} subscriptions may be active`,
+      );
+    }
+
+    const sessionIds = (params.sessionIds ?? []).map(
+      (id) => this.#resolve(id).id,
+    );
+    const subscription: SubscriptionState = {
+      id: connection.nextSubscription,
+      all: params.fleet === true,
+      sessionIds: new Set(sessionIds),
+      cursors: new Map(),
+      lastViews: new Map(),
+    };
+    connection.nextSubscription += 1;
+
+    const sessions: SessionView[] = [];
+    const cursors: Record<string, number> = {};
+    const truncated: string[] = [];
+
+    for (const session of this.#subscriptionSessions(subscription)) {
+      const view = session.view();
+      sessions.push(view);
+      const since = params.since?.[session.id];
+      const cursor = since ?? view.lastSeq;
+      subscription.cursors.set(session.id, cursor);
+      subscription.lastViews.set(session.id, JSON.stringify(view));
+      cursors[session.id] = cursor;
+      if (since !== undefined && session.read({ since, limit: 1 }).truncated) {
+        truncated.push(session.id);
+      }
+    }
+
+    connection.subscriptions.set(subscription.id, subscription);
+
+    return {
+      subscription: subscription.id,
+      sessions,
+      cursors,
+      truncated,
+    };
+  }
+
+  #unsubscribe(
+    params: UnsubscribeParams,
+    connection?: ConnectionState,
+  ): UnsubscribeResult {
+    if (connection === undefined || !connection.persistent) {
+      throw new HlaoError(
+        "bad_request",
+        "stream.unsubscribe requires a persistent stream",
+      );
+    }
+    if (!connection.subscriptions.delete(params.subscription)) {
+      throw new HlaoError(
+        "not_found",
+        `no subscription ${params.subscription} on this connection`,
+      );
+    }
+    return { subscription: params.subscription, removed: true };
+  }
+
+  #subscriptionSessions(subscription: SubscriptionState): Session[] {
+    if (subscription.all) return [...this.#sessions.values()];
+    return [...subscription.sessionIds]
+      .map((id) => this.#sessions.get(id))
+      .filter((session): session is Session => session !== undefined);
+  }
+
+  #scheduleFlush(state: ConnectionState): void {
+    if (!state.persistent || state.closed || state.flushScheduled) return;
+    if (state.subscriptions.size === 0) return;
+    state.flushScheduled = true;
+    setImmediate(() => {
+      state.flushScheduled = false;
+      this.#flush(state);
+    });
+  }
+
+  #flush(state: ConnectionState): void {
+    if (!state.persistent || state.closed) return;
+    if (state.stream.bufferedBytes() > MAX_STREAM_BUFFER_BYTES) {
+      // The consumer is behind. Close it; it can resume from its cursor.
+      state.closed = true;
+      state.stream.terminate();
+      return;
+    }
+
+    let more = false;
+
+    for (const subscription of state.subscriptions.values()) {
+      const seen = new Set<string>();
+
+      for (const session of this.#subscriptionSessions(subscription)) {
+        const id = session.id;
+        seen.add(id);
+        const view = session.view();
+        const serialized = JSON.stringify(view);
+        if (subscription.lastViews.get(id) !== serialized) {
+          subscription.lastViews.set(id, serialized);
+          this.#writeNotification(state, {
+            type: "notification",
+            subscription: subscription.id,
+            kind: "session",
+            session: view,
+          });
+        }
+
+        if (!subscription.sessionIds.has(id)) continue;
+        const cursor = subscription.cursors.get(id) ?? view.lastSeq;
+        if (view.lastSeq <= cursor) continue;
+
+        let since = cursor;
+        let truncated = false;
+        let pages = 0;
+        while (pages < 4) {
+          const page = session.read({
+            since,
+            limit: MAX_NOTIFICATION_EVENTS,
+          });
+          pages += 1;
+          truncated = truncated || page.truncated;
+          const last = page.events[page.events.length - 1];
+          if (last === undefined) break;
+          since = last.seq;
+          subscription.cursors.set(id, last.seq);
+          this.#writeNotification(state, {
+            type: "notification",
+            subscription: subscription.id,
+            kind: "event",
+            sessionId: id,
+            events: page.events,
+            cursor: last.seq,
+            truncated,
+          });
+          if (!page.hasMore) break;
+        }
+        if (pages >= 4) more = true;
+      }
+
+      for (const id of [...subscription.lastViews.keys()]) {
+        if (seen.has(id)) continue;
+        subscription.lastViews.delete(id);
+        subscription.cursors.delete(id);
+        this.#writeNotification(state, {
+          type: "notification",
+          subscription: subscription.id,
+          kind: "session.removed",
+          sessionId: id,
+        });
+      }
+    }
+
+    if (more) this.#scheduleFlush(state);
+  }
+
+  #writeNotification(
+    state: ConnectionState,
+    frame: NotificationFrame,
+  ): void {
+    this.#write(state.stream, frame);
+  }
+
+  #write(
+    stream: WireStream,
+    frame: ResponseEnvelope | NotificationFrame,
+  ): void {
     try {
-      stream.write(`${JSON.stringify(response)}\n`);
+      stream.write(`${JSON.stringify(frame)}\n`);
     } catch {
       // The client may have vanished.
     }

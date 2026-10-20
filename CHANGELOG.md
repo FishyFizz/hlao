@@ -9,8 +9,16 @@
   supervisor, client, and liveness probe no longer import `node:net` directly.
 - A TCP adapter carries the same frames as the named pipe and Unix socket. The supervisor
   does not bind TCP by default, and the supervisor token remains local-IPC authority only.
-- Protocol 2.0 behavior is unchanged: one request per connection, the same envelope, errors,
-  and frame limits.
+- Protocol `2.1`: a `hello` may request `stream.persistent`. The connection then stays open,
+  multiplexes requests by `id`, and may carry server notifications
+  (`type: "notification"`). The 2.0 one-request path is unchanged.
+- `stream.subscribe` / `stream.unsubscribe`: fleet view notifications and per-session event
+  streaming, with per-session cursors, history replay, and `truncated` reporting. Notifications
+  are emitted at the same append point that wakes `sessions.wait`; there is no timer.
+- A persistent connection allows at most 64 in-flight requests (`too_many_requests`) and is
+  closed when more than 8 MiB sits in its outbound transport buffer. A client resumes from its
+  cursor.
+- New capabilities: `stream.persistent`, `stream.subscribe`, `stream.resume`.
 
 ## 0.5.0 — unreleased
 

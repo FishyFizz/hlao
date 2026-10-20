@@ -1,7 +1,8 @@
 # ADR 0009 — The wire is a frame stream, not a transport
 
-**Status:** accepted, 2026-10-20 (milestone 0.6). Layer 1 (transport adapter) implemented;
-Layer 2 (persistent multiplexed streams) is planned in `docs/milestones/0.6.md`.
+**Status:** accepted, 2026-10-20 (milestone 0.6). Layer 1 (transport adapter) and Layer 2
+(persistent multiplexed streams, protocol 2.1) are implemented. Network transport policy and
+the WebSocket adapter remain planned in `docs/milestones/0.6.md`.
 
 ## Context
 
