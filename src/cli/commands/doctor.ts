@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 
 import { type SupervisorConnection } from "../../client.js";
 import { configFingerprint, loadConfig, mergeBackends, toAgentView } from "../../config.js";
+import { readCrashMarker } from "../../crash.js";
 import { toHlaoError } from "../../errors.js";
 
 import { configPath, logPath } from "../../paths.js";
@@ -61,6 +62,15 @@ export async function cmdDoctor(args: string[]): Promise<number> {
         ? configFile
         : "no config.json — built-in backends only",
   });
+
+  const crash = readCrashMarker(ctx.home);
+  if (crash) {
+    checks.push({
+      name: "last crash",
+      status: "warn",
+      detail: `previous supervisor pid ${crash.pid} (started ${crash.startedAt}) did not stop cleanly; its live table and retained history were lost`,
+    });
+  }
 
   const logFile = logPath(ctx.home);
   const logExists = existsSync(logFile);

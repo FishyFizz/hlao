@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { readLock } from "../../src/lock.js";
-import { Harness, type SpawnValue } from "./harness.js";
+import { Harness, type ReadValue, type SpawnValue } from "./harness.js";
 
 test("the skill is shipped, injected once, and can be suppressed", async (t) => {
   const harness = new Harness();
@@ -18,6 +18,11 @@ test("the skill is shipped, injected once, and can be suppressed", async (t) => 
   assert.equal(skill.code, 0);
   assert.equal(skill.value.name, "hlao");
   assert.match(skill.value.text, /The prompt is the contract/);
+  for (const line of skill.value.text.split("\n")) {
+    if (/^\s*hlao send --self/.test(line)) {
+      assert.doesNotMatch(line, /--wait/, "the worker loop must not self-wait");
+    }
+  }
   assert.ok(existsSync(skill.value.path));
   assert.equal(readFileSync(skill.value.path, "utf8"), skill.value.text);
 
@@ -39,6 +44,25 @@ test("the skill is shipped, injected once, and can be suppressed", async (t) => 
   const first = spawned.value.firstTurn?.text ?? "";
   assert.match(first, /HLAO skill:/);
   assert.match(first, /hello/);
+  // The pointer ends with a blank line, so a block-concatenating adapter does
+  // not glue it onto the operator's first words.
+  assert.match(first, /tools\.\n\nhello/);
+
+  // The injection is recorded on the prompt that carried it.
+  const history = await harness.json<ReadValue>([
+    "read",
+    spawned.value.session.id,
+    "--since",
+    "0",
+  ]);
+  const injected = history.value.events.find(
+    (event) => event.type === "prompt.sent",
+  )?.data.injected;
+  assert.deepEqual(injected, {
+    skill: skill.value.version,
+    path: skill.value.path,
+    blocks: 2,
+  });
 
   // The pointer belongs to the first prompt only.
   const again = await harness.json<{ text?: string }>([
@@ -57,6 +81,18 @@ test("the skill is shipped, injected once, and can be suppressed", async (t) => 
     "--no-skill",
   ]);
   assert.doesNotMatch(suppressed.value.firstTurn?.text ?? "", /HLAO skill:/);
+  const suppressedHistory = await harness.json<ReadValue>([
+    "read",
+    suppressed.value.session.id,
+    "--since",
+    "0",
+  ]);
+  assert.equal(
+    suppressedHistory.value.events.find(
+      (event) => event.type === "prompt.sent",
+    )?.data.injected,
+    undefined,
+  );
 
   const fromEnv = await harness.json<SpawnValue>([
     "spawn",

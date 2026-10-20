@@ -38,7 +38,7 @@ that is a coordination rule, not permission to interfere with unrelated work.
 ```bash
 hlao read                       # your state plus a page of events
 hlao read --since 42            # continue from a cursor
-hlao send --self "..." --wait   # prompt yourself (the first positional is the message)
+hlao send --self "..."          # queue your next turn (do not wait inside this one)
 hlao send <id> "..."            # prompt another session
 hlao wait --until permission --timeout 10m
 hlao queue                      # what is queued behind the active turn
@@ -52,16 +52,27 @@ that message's turn; a timeout leaves the work running.
 
 ## Worker loop
 
-```bash
-hlao send --self "Check the log again." --wait --timeout 20m
-hlao read --since 42
-hlao wait --until permission --timeout 10m
-hlao send "$HLAO_PARENT_ID" "Blocked: the lock file is held by another worker."
-```
+A session is either inside a turn (you are running now) or between turns.
 
-`wait` is one-shot: it resolves once and must be re-armed. `idle` means no active turn and no
-queued prompt; `permission` means the provider is waiting for an answer; `exit` means the
-session ended.
+Inside a turn:
+
+- Use `hlao read` / `hlao read --since N` to inspect your transcript.
+- Use `hlao wait <other-id> --until settled` only to wait on *another* session.
+- Report a blocker in your final message; do not send yourself a message and wait.
+
+Between turns:
+
+- A self-send is a deferred next turn: `hlao send --self "Check the log again."` without
+  `--wait`. Finish the current turn; the queued prompt runs next.
+- Report a blocker to the parent: `hlao send "$HLAO_PARENT_ID" "Blocked: ..."`.
+
+Do not use `hlao send --self "..." --wait` from inside a turn. The message queues behind the
+turn you are in, so the wait cannot finish. HLAO rejects that shape with `bad_request` and
+names the deferred form.
+
+`wait` is one-shot: it resolves once and must be re-armed. `idle` and `settled` mean no
+runnable turn: finished, parked at a permission gate, or ended. `permission` means the
+provider is waiting for an answer; `exit` means the session ended.
 
 ## Reporting
 
@@ -73,8 +84,10 @@ session ended.
 
 ## Permission and trust
 
-- A pending request is visible in `read` and in `list --pending`. Answer it with
-  `hlao permit <id> --allow`, `--deny`, or `--option <id>`.
+- A pending request is visible in `read` and in `list --pending`. The operator, or another
+  session (normally the parent), answers it with `hlao permit <id> --allow`, `--deny`, or
+  `--option <id>`. A session parked on a permission request cannot run a command to answer
+  itself; leave a clear blocker and let the operator or parent answer.
 - The operator owns the permission gate. Do not change your own or another session's policy to
   remove it; report the blocker instead.
 - The instance token is the real authority. `ask` makes a request visible; it is not

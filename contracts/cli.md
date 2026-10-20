@@ -18,7 +18,7 @@ hlao read [<id>] [--self] [--since N | --before N] [--limit N]
                 [--raw] [--verbose] [--timestamps] [--jsonl] [--jsonl-page]
                 [--follow] [--fail-on-error] [--out FILE]
 hlao export [<id>] [--self] [--since N] [--raw] [--jsonl] [--out FILE]
-hlao get [<id>] [--self]
+hlao get [<id>] [--self] [--brief]
 hlao find TEXT [--all] [--type TYPE]... [--max N]
 hlao wait [<id>...] [--self] [--any | --all]
                 [--until idle|settled|permission|exit|change] [--since N]
@@ -43,10 +43,10 @@ hlao rename --self <name>
 hlao rename --self --clear
 hlao agents [--cwd DIR]
 hlao status [--start]
-hlao logs [--lines N] [--follow]
+hlao logs [--lines N] [--follow] [--raw]
 hlao config show|path|validate
 hlao reload
-hlao doctor [--start]
+hlao doctor [--start] [--probe]
 hlao whoami
 hlao skill [--path] [--json]
 hlao down [--force] [--dry-run]
@@ -102,11 +102,12 @@ still discards the queue.
 `list` filters are a client-side projection over all sessions in the instance:
 `--status`, `--backend`, `--root` (a session token resolved inside the list), `--mine` (the
 caller's root subtree, from `HLAO_ROOT_ID` or `HLAO_SESSION_ID`), `--name`
-(substring), `--pending`, and `--cwd-prefix`. `--wide` adds BUSY, POLICY, MODE, PENDING, and
-EXIT; `--tree` groups by root and indents by depth. Human output defaults to `--sort activity`;
-JSON preserves supervisor order unless `--sort activity` is explicit. `--watch` is a
-caller-owned redraw loop: one full result per line under `--json`, or a cleared screen in a TTY.
-It never changes supervisor state.
+(substring), `--pending`, `--cwd DIR` (exact working directory), and `--cwd-prefix DIR`
+(subtree). Filters never change the instance counts in the footer. `--wide` adds BUSY,
+POLICY, REQUESTER, MODEL, MODE, PENDING, and EXIT; `--tree` groups by root and indents by
+depth. Human output defaults to `--sort activity`; JSON preserves supervisor order unless
+`--sort activity` is explicit. `--watch` is a caller-owned redraw loop: one full result per
+line under `--json`, or a cleared screen in a TTY. It never changes supervisor state.
 
 `close` without selectors closes one session. With `--idle DUR` (idle status and no activity for
 DUR), `--status S[,S]`, or `--root SESSION`, it is a CLI assembly over `sessions.list` and
@@ -147,16 +148,19 @@ settle and exits 2 on timeout. `permit --all-pending` answers every pending requ
 per-session failures without stopping the others. `policy --root SESSION allow` applies one
 policy to the set.
 
-`get [<id>]` prints one session's state without events (`sessions.get`). `find TEXT [--all]
-[--type T]... [--max N]` scans live sessions (retained too with `--all`) by paging
-`read --grep`; it is capped at 20 pages per session and reports when a scan was capped.
+`get [<id>]` prints one session's state without events (`sessions.get`): status, turn, queue,
+settlement, policy, modes, config options, usage, pending permission, lineage, exit, and cwd.
+`--brief` prints only the standard header. `find TEXT [--all] [--type T]... [--max N]` scans
+live sessions (retained too with `--all`) by paging `read --grep`; it is capped at 20 pages per
+session and reports when a scan was capped.
 
-`--until idle` means no active turn **and** no queued prompt; the CLI maps it to the wire's
-`settled` condition. `--until settled` is the explicit form and treats a terminal session as a
-valid completion. For the historical `idle` form, a session that ended first is still
-unsatisfied and exits 3. `--fail-if-failed` makes any waited session that ended `failed` exit 3.
-The aggregate exit code is `2` for timeout, `3` when a target ended before the condition (or
-`--fail-if-failed` saw a failure), and `0` otherwise.
+`--until idle` is the historical completion alias: it maps to the wire's `settled` condition,
+so it resolves when the session settles, parks at a permission gate, or ends. A terminal
+session before that condition is unsatisfied and exits 3. `--until settled` is the explicit
+form and treats a terminal session as a valid completion (exit 0). A permission stop names
+`settled (permission)` and prints the `permit` hint. `--fail-if-failed` makes any waited session
+that ended `failed` exit 3. The aggregate exit code is `2` for timeout, `3` when a target ended
+before the condition (or `--fail-if-failed` saw a failure), and `0` otherwise.
 
 `list --usage` adds CONTEXT (each session's latest `used/size`) and COST columns. The footer
 totals cost per currency and says "context: latest per session"; token snapshots are not

@@ -264,8 +264,17 @@ export interface HelloResult {
   sessions: number;
   configHash: string;
   configError?: string;
+  /** Present when a stale lock showed the previous supervisor did not stop. */
+  lastCrash?: LastCrash;
   /** Present when persistence was requested; `persistent` is the accepted value. */
   stream?: { persistent: boolean };
+}
+/** A supervisor that acquired the lock after its predecessor died. */
+export interface LastCrash {
+  pid: number;
+  version: string;
+  startedAt: string;
+  detectedAt: string;
 }
 export interface SubscribeParams {
   /** Sessions to stream events for, and to report views for. 1..100 ids. */

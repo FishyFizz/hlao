@@ -1,4 +1,5 @@
 import type { SendResult } from "../../protocol.js";
+import { formatDuration } from "../../time.js";
 import {
   booleanOption,
   numberOption,
@@ -94,8 +95,13 @@ export async function cmdSend(args: string[]): Promise<number> {
       result.turn === null
         ? `the message is still queued behind turn ${result.session.turn}`
         : `turn ${result.turn} is still running`;
+    const bound =
+      timeoutMs !== undefined && timeoutMs > 0
+        ? ` after ${formatDuration(timeoutMs)}`
+        : "";
     out(
-      `${sessionLabel(ctx, result.session)} ${styleStatus(result.session.status, ctx.style)} — ${where}`,
+      `${sessionLabel(ctx, result.session)} ${styleStatus(result.session.status, ctx.style)} — ` +
+        `wait timed out${bound}; ${where} · ${sanitize(result.messageId)}`,
     );
     out(styleHint(ctx, `hlao read ${result.session.id} --since ${result.session.lastSeq + 1}`));
     return 2;
@@ -108,13 +114,16 @@ export async function cmdSend(args: string[]): Promise<number> {
           ? ctx.style.dim(` (queued behind turn ${result.session.turn})`)
           : result.turn !== null
             ? ctx.style.dim(` (turn ${result.turn})`)
-            : ""),
+            : "") +
+        ctx.style.dim(` · ${sanitize(result.messageId)}`),
     );
     return 0;
   }
 
   if (result.turn === null && result.stopReason === "cancelled") {
-    out(`${sessionLabel(ctx, result.session)}: the queued message was cancelled before it ran`);
+    out(
+      `${sessionLabel(ctx, result.session)}: the queued message ${sanitize(result.messageId)} was cancelled before it ran`,
+    );
     return 0;
   }
   if (result.text && result.text.trim().length > 0) {
@@ -123,7 +132,7 @@ export async function cmdSend(args: string[]): Promise<number> {
   const stop = result.stopReason ?? "unknown";
   out(
     ctx.style.dim(
-      `— turn ${result.turn ?? "?"} ${stop === "cancelled" ? "cancelled" : `ended: ${stop}`} —`,
+      `— turn ${result.turn ?? "?"} ${stop === "cancelled" ? "cancelled" : `ended: ${stop}`} · ${sanitize(result.messageId)} —`,
     ),
   );
   return 0;

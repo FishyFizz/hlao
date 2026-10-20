@@ -36,6 +36,8 @@ interface ListFilters {
   mineRoot?: string;
   name?: string;
   pending?: boolean;
+  /** Exact working-directory match, applied locally so counts stay instance-wide. */
+  cwd?: string;
   cwdPrefix?: string;
 }
 
@@ -84,6 +86,7 @@ export async function cmdList(args: string[]): Promise<number> {
     root: stringOption(parsed, "root"),
     name: stringOption(parsed, "name"),
     pending: booleanOption(parsed, "pending") === true,
+    cwd: resolveOptional(stringOption(parsed, "cwd")),
     cwdPrefix: resolveOptional(stringOption(parsed, "cwd-prefix")),
   };
   const render: ListRender = {
@@ -96,12 +99,10 @@ export async function cmdList(args: string[]): Promise<number> {
     booleanOption(parsed, "all") === true ||
     render.tree ||
     (statuses?.includes("closed") ?? false);
-  const cwd = resolveOptional(stringOption(parsed, "cwd"));
   // Always fetch the full table so counts and --root resolution see retained
   // sessions. What is displayed is decided locally.
   const params = {
     includeClosed: true,
-    ...(cwd !== undefined ? { cwd } : {}),
   };
 
   const conn = await connect(ctx);
@@ -173,7 +174,7 @@ export async function cmdList(args: string[]): Promise<number> {
 async function watchList(
   conn: SupervisorConnection,
   ctx: CommandContext,
-  params: { includeClosed: boolean; cwd?: string },
+  params: { includeClosed: boolean },
   filters: ListFilters,
   render: ListRender,
   showClosed: boolean,
@@ -282,6 +283,10 @@ function filterSessions(
   if (filters.pending === true) {
     result = result.filter((session) => session.pendingPermission !== null);
   }
+  if (filters.cwd !== undefined) {
+    const cwd = normalizePath(filters.cwd);
+    result = result.filter((session) => normalizePath(session.cwd) === cwd);
+  }
   if (filters.cwdPrefix !== undefined) {
     const prefix = normalizePath(filters.cwdPrefix);
     result = result.filter((session) =>
@@ -366,6 +371,7 @@ function hasFilters(filters: ListFilters): boolean {
     filters.mineRoot !== undefined ||
     filters.name !== undefined ||
     filters.pending === true ||
+    filters.cwd !== undefined ||
     filters.cwdPrefix !== undefined
   );
 }
@@ -452,6 +458,7 @@ function printEmptyList(
     filters.mineRoot !== undefined ||
     filters.name !== undefined ||
     filters.pending === true ||
+    filters.cwd !== undefined ||
     filters.cwdPrefix !== undefined;
   if (filtered) {
     out(ctx.style.dim("no sessions match the filters"));

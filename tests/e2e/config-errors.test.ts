@@ -4,10 +4,9 @@ import {
   Harness,
   type DoctorValue,
   type JsonError,
-  type ListValue,
 } from "./harness.js";
 
-test("invalid user config blocks backend requests but leaves the supervisor usable", async (t) => {
+test("invalid user config fails startup instead of creating an empty instance", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -16,15 +15,29 @@ test("invalid user config blocks backend requests but leaves the supervisor usab
   const spawned = await harness.json<JsonError>(["spawn", "fake"]);
   assert.equal(spawned.code, 1);
   assert.equal(spawned.value.error.code, "config_invalid");
+  assert.match(spawned.value.error.message, /unknown field "waitTime"/);
+
+  // The first command a user runs must report the config failure, not an
+  // empty instance with exit 0.
+  const listed = await harness.json<JsonError>(["list"]);
+  assert.equal(listed.code, 1);
+  assert.equal(listed.value.error.code, "config_invalid");
+  assert.match(listed.value.error.message, /config\.json/);
+  assert.equal(
+    (listed.value.error.message.match(/config\.json/g) ?? []).length,
+    1,
+    "the config path is named once",
+  );
 
   const agents = await harness.json<JsonError>(["agents"]);
   assert.equal(agents.code, 1);
   assert.equal(agents.value.error.code, "config_invalid");
 
-  // The supervisor is still alive and inspectable.
-  const listed = await harness.json<ListValue>(["list"]);
-  assert.equal(listed.code, 0);
+  const started = await harness.json<JsonError>(["status", "--start"]);
+  assert.equal(started.code, 1);
+  assert.equal(started.value.error.code, "config_invalid");
 
+  // Doctor inspects locally and fails without starting a supervisor.
   const doctor = await harness.json<DoctorValue>(["doctor"]);
   assert.equal(doctor.code, 1);
   assert.equal(doctor.value.ok, false);

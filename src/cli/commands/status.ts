@@ -68,6 +68,13 @@ export async function cmdStatus(args: string[]): Promise<number> {
     ),
   );
   if (hello.configError) out(ctx.style.red(`config error: ${hello.configError}`));
+  if (hello.lastCrash && conn.started !== true) {
+    out(
+      ctx.style.red(
+        `previous supervisor (pid ${hello.lastCrash.pid}) did not shut down cleanly; its live table and retained history were lost`,
+      ),
+    );
+  }
   if (hello.configHash !== configFingerprint(ctx.home)) {
     out(ctx.style.yellow("config on disk differs from the supervisor; run: hlao reload"));
   }

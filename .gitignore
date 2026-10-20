@@ -4,6 +4,7 @@ dist-test/
 *.tsbuildinfo
 .tmp-*/
 .hlao/
+.claude/worktrees/
 board.md
 npm-debug.log*
 .DS_Store

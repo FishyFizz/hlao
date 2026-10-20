@@ -110,6 +110,9 @@ export async function cmdSpawn(args: string[]): Promise<number> {
       `${sessionLabel(ctx, session)} (${session.backend}) in ${session.cwd}` +
       (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
       ctx.style.dim(`  policy ${session.permissionPolicy}`) +
+      (session.createdBy
+        ? ctx.style.dim(`  by ${sanitize(session.createdBy)}`)
+        : "") +
       (model ? ctx.style.dim(`  model ${sanitize(model)}`) : "") +
       (configKeys.length > 0
         ? ctx.style.dim(`  config ${configKeys.join(",")}`)
@@ -159,7 +162,7 @@ export async function cmdSpawn(args: string[]): Promise<number> {
     }
     out(
       ctx.style.dim(
-        `— turn ${sent.turn ?? 1} ended: ${sent.stopReason ?? "unknown"} —`,
+        `— turn ${sent.turn ?? 1} ended: ${sent.stopReason ?? "unknown"} · ${sanitize(sent.messageId)} —`,
       ),
     );
     out(styleHint(ctx, `hlao read ${session.id} --since 0`));
@@ -174,6 +177,7 @@ export async function cmdSpawn(args: string[]): Promise<number> {
     }
     if (result.firstTurn.timedOut) {
       out(ctx.style.yellow("the first turn is still running"));
+      if (result.messageId) out(ctx.style.dim(`first message ${sanitize(result.messageId)}`));
       out(styleHint(ctx, `hlao read ${session.id} --since ${session.lastSeq + 1}`));
       return 2;
     }
@@ -182,6 +186,7 @@ export async function cmdSpawn(args: string[]): Promise<number> {
         `— turn 1 ended: ${result.firstTurn.stopReason ?? "unknown"} —`,
       ),
     );
+    if (result.messageId) out(ctx.style.dim(`first message ${sanitize(result.messageId)}`));
   } else if (result.duplicate === true) {
     out(
       ctx.style.dim(
@@ -189,7 +194,12 @@ export async function cmdSpawn(args: string[]): Promise<number> {
       ),
     );
   } else if (prompt !== undefined) {
-    out(ctx.style.dim(`first message ${session.queued > 0 ? "queued" : "sent"}`));
+    out(
+      ctx.style.dim(
+        `first message ${session.queued > 0 ? "queued" : "sent"}` +
+          (result.messageId ? ` · ${sanitize(result.messageId)}` : ""),
+      ),
+    );
   }
   out(styleHint(ctx, `hlao read ${session.id} --since 0`));
   return 0;

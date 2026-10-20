@@ -115,6 +115,7 @@ test("down warns that live sessions and in-memory history are lost", async (t) =
 
   const down = await harness.run(["down"], { json: false });
   assert.equal(down.code, 0);
-  assert.match(down.stderr, /discards their in-memory history/);
+  assert.match(down.stderr, /discards its in-memory history/);
+  assert.match(down.stderr, /--dry-run/);
   assert.match(down.stdout, /supervisor stopped \(1 session closed\)/);
 });

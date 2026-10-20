@@ -87,17 +87,59 @@ Exit codes: 0 ok · 1 error · 2 a bounded wait expired (work continues) ·
 
 Examples:
   hlao spawn claude "Audit the build log and report the first failure."
-  hlao send --self "Check the log again." --wait --timeout 20m
-  hlao rename a1b2c3 builder
+  hlao send --self "Check the log again."     # deferred until this turn ends
+  hlao read --since 42
+  hlao wait --until permission --timeout 10m
   hlao permit a1b2c3 --allow --always
   hlao mode a1b2c3 auto
-  hlao wait a1b2c3 --until permission --timeout 10m
-  hlao read a1b2c3 --since 42
+  hlao rename a1b2c3 builder
   hlao list --json`;
 }
 
 export function hasCommandHelp(command: string): boolean {
   return COMMAND_HELP_NAMES.has(command) || command === "help";
+}
+
+/** Nearest command names for a mistyped command, best first. */
+export function suggestCommands(input: string, limit = 3): string[] {
+  const typed = input.toLowerCase();
+  const names = [...COMMAND_HELP_NAMES, "help", "version"];
+  return names
+    .map((name) => ({
+      name,
+      distance: editDistance(typed, name),
+      prefix: name.startsWith(typed),
+    }))
+    .filter(({ distance, prefix }) => prefix || distance <= 2)
+    .sort(
+      (left, right) =>
+        left.distance - right.distance || left.name.localeCompare(right.name),
+    )
+    .slice(0, limit)
+    .map(({ name }) => name);
+}
+
+function editDistance(left: string, right: string): number {
+  const rows = left.length + 1;
+  const columns = right.length + 1;
+  const table = Array.from({ length: rows }, (_, row) =>
+    Array.from({ length: columns }, (_, column) =>
+      row === 0 ? column : column === 0 ? row : 0,
+    ),
+  );
+  for (let row = 1; row < rows; row += 1) {
+    for (let column = 1; column < columns; column += 1) {
+      const substitution =
+        table[row - 1]![column - 1]! +
+        (left[row - 1] === right[column - 1] ? 0 : 1);
+      table[row]![column] = Math.min(
+        table[row - 1]![column]! + 1,
+        table[row]![column - 1]! + 1,
+        substitution,
+      );
+    }
+  }
+  return table[rows - 1]![columns - 1]!;
 }
 
 const COMMAND_HELP_NAMES = new Set([
@@ -156,7 +198,10 @@ Options:
 
 A session can be addressed by id, id prefix, or name. In human mode --wait
 prints the new handle before it starts waiting, so a long first turn is
-observable. The spawn result includes the handle, label, policy, and cursor.`,
+observable. The spawn result includes the handle, label, policy, and cursor.
+The first message id is printed when a message is sent. Text passed as a
+positional or --prompt is visible in process listings and shell history; use
+--stdin or --prompt-file for secrets.`,
     send: `hlao send [<id>] [message] [options]
 
 Queue a prompt. One turn runs at a time; a message sent while busy waits in a
@@ -174,7 +219,9 @@ Options:
                          original message id and never enqueues twice
 
 A timeout exits 2 and leaves the turn running. Every send returns a message id
-(msg-…) that events and queue entries carry.`,
+(msg-…) that events and queue entries carry. Text passed as a positional or
+--prompt is visible in process listings and shell history; use --stdin or
+--prompt-file for secrets.`,
     read: `hlao read [<id>] [options]
 
 Read orchestration state plus a bounded page of typed events.
@@ -202,11 +249,12 @@ The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
 hasMore, and truncated. Filters are applied before the page limit, and cursors
 advance past non-matching events. Tool payloads are omitted unless
 --raw/--verbose; --grep does not search private payloads without --raw.`,
-    get: `hlao get [<id>]
+    get: `hlao get [<id>] [--brief]
 
 Print one session's orchestration state without reading events: status, turn,
 queue, settlement, policy, modes, config options, usage, pending permission,
-and lineage. Inside a session, omit <id> or pass --self.`,
+and lineage. --brief prints only the header. Inside a session, omit
+<id> or pass --self.`,
     find: `hlao find TEXT [--all] [--type TYPE]... [--max N]
 
 Search events across sessions. It is a bounded client loop: list sessions, then
@@ -257,14 +305,24 @@ Options:
 Selector flags are a client assembly over list + wait; they take no positional
 ids and are limited to 100 targets by the wire.
 
-"idle" means no active turn and no queued prompt. The wire's turn boundary is
-also called idle; this CLI uses the completion condition. "settled" is the
-same condition expressed explicitly.
+Conditions:
+  idle        the historical completion condition: no runnable turn. It resolves
+              when the session settles, parks at a permission gate, or ends.
+              A session that ends before it becomes idle is unsatisfied (exit 3).
+  settled     the explicit completion condition: settled, permission, or exit.
+              Termination counts as completion (exit 0).
+  permission  a permission request is pending; answer it with permit.
+  exit        the session is terminal.
+  change      a new event matches --since/--type/--grep.
+
+A permission stop is an actionable completion for idle and settled: there is
+no runnable turn, and the output names "settled (permission)". Use
+--until permission when the gate itself is the event you want.
 
 With several ids, the JSON result includes per-target results in request order;
 a target still waiting when the wait resolves is reported as "pending". A
-timeout exits 2. If a target ends before the condition is met, the wait exits 3
-(except --until exit, which exits 0).`,
+timeout exits 2. A terminal session before the condition is unsatisfied and
+exits 3, except for settled and exit, where termination is completion.`,
     list: `hlao list [--all] [--cwd DIR] [--wide] [--usage] [--tree] [--watch]
 
 List sessions in this HLAO instance. A session is shown by id and name; every
@@ -274,10 +332,11 @@ instance count, and a view with a known caller marks that session with *.
 
 Filters: --status S[,S], --backend NAME, --root SESSION, --mine (the caller's
 own root subtree, from HLAO_ROOT_ID/HLAO_SESSION_ID), --name TEXT, --pending,
-and --cwd-prefix DIR (subtree). --sort created|activity (human
-default: activity). --wide adds BUSY, POLICY, MODE, PENDING, and EXIT;
---usage adds USAGE/COST and a per-currency footer total; --tree groups and
-indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
+--cwd DIR (exact working directory), and --cwd-prefix DIR (subtree). Filters
+never change the instance counts in the footer. --sort created|activity (human
+default: activity). --wide adds BUSY, POLICY, REQUESTER, MODEL, MODE, PENDING,
+and EXIT; --usage adds USAGE/COST and a per-currency footer total; --tree groups
+and indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
 emits one result per line) until Ctrl-C.`,
     cancel: `hlao cancel [<id>] [--keep-queue] [--wait]
 

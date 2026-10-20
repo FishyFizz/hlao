@@ -53,6 +53,7 @@ import {
   commandHelp,
   fullHelp,
   hasCommandHelp,
+  suggestCommands,
 } from "./help.js";
 
 export async function main(argv: string[]): Promise<number> {
@@ -166,7 +167,16 @@ export async function main(argv: string[]): Promise<number> {
       case "down":
         return await cmdDown(args);
       default:
-        throw usageError(`unknown command "${first}" — run "hlao help"`);
+        throw usageError(
+          `unknown command "${first}"` +
+            (() => {
+              const suggestions = suggestCommands(first);
+              return suggestions.length > 0
+                ? ` — did you mean ${suggestions.map((name) => `"${name}"`).join(", ")}?`
+                : "";
+            })() +
+            ` — run "hlao help"`,
+        );
     }
   } catch (error) {
     const converted = toHlaoError(error);

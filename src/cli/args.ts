@@ -165,8 +165,10 @@ export function expectPositionals(
         : max === Number.POSITIVE_INFINITY
           ? `at least ${min}`
           : `${min} to ${max}`;
+    // "1" and "at least 1" read as singular; zero and ranges read as plural.
+    const singular = expected === "1" || expected === "at least 1";
     throw usageError(
-      `${command} expects ${expected} positional argument${max === 1 ? "" : "s"}, got ${count}`,
+      `${command} expects ${expected} positional argument${singular ? "" : "s"}, got ${count}`,
     );
   }
 }

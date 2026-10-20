@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
+import { loadConfig } from "./config.js";
+import { writeCrashMarker } from "./crash.js";
 import { HlaoError, type HlaoErrorCode } from "./errors.js";
 import {
   pidAlive,
@@ -22,6 +24,7 @@ import {
   pathTarget,
   type WireStream,
 } from "./stream.js";
+import { nowIso } from "./time.js";
 import { VERSION } from "./version.js";
 
 let nextRequestId = 1;
@@ -53,6 +56,8 @@ export interface RequestOptions {
 
 export interface SupervisorConnection {
   lock: LockInfo;
+  /** True when this connection autostarted the supervisor. */
+  started?: boolean;
   request<T>(method: Method, params?: unknown, options?: RequestOptions): Promise<T>;
 }
 
@@ -61,9 +66,11 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 export async function connectSupervisor(
   options: ConnectionOptions,
 ): Promise<SupervisorConnection> {
-  const lock = await ensureLock(options);
+  const ensured = await ensureLock(options);
+  const lock = ensured.lock;
   return {
     lock,
+    started: ensured.started,
     request: <T>(
       method: Method,
       params: unknown = {},
@@ -79,11 +86,13 @@ export async function connectSupervisor(
   };
 }
 
-async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
+async function ensureLock(
+  options: ConnectionOptions,
+): Promise<{ lock: LockInfo; started: boolean }> {
   let existing = readLock(options.home);
   if (existing && (await probeSupervisor(existing, 750))) {
     warnVersionMismatch(existing);
-    return existing;
+    return { lock: existing, started: false };
   }
 
   if (options.autostart === false) {
@@ -101,13 +110,31 @@ async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
     const age = Number.isFinite(started) ? Date.now() - started : Infinity;
     if (!pidAlive(existing.pid) || age > 30_000) {
       // A dead pid or an unreachable lock older than a startup window is stale.
-      // Removing it lets autostart recover instead of polling a wedged lock.
+      // Record the loss before removing it so the new supervisor can announce
+      // it; the client removes the lock, so the supervisor never sees it.
+      try {
+        writeCrashMarker(options.home, {
+          pid: existing.pid,
+          version: existing.version,
+          startedAt: existing.startedAt,
+          detectedAt: nowIso(),
+        });
+      } catch {
+        // The startup still proceeds; the log records the failure.
+      }
       removeLock(options.home, existing.token);
       existing = null;
     }
   }
+  let started = false;
   if (!existing) {
+    // Fail before launching a process that cannot read its config: otherwise
+    // the first command waits for a supervisor that will never answer and then
+    // reports an empty instance instead of the parse error.
+    const loaded = loadConfig(options.home);
+    if (loaded.error) throw loaded.error;
     spawnSupervisor(options.home, options.cliPath);
+    started = true;
   }
 
   const startupTimeoutMs = options.startupTimeoutMs ?? 30_000;
@@ -125,7 +152,7 @@ async function ensureLock(options: ConnectionOptions): Promise<LockInfo> {
       }
       if (await probeSupervisor(lock, 500, expectedMajor)) {
         warnVersionMismatch(lock);
-        return lock;
+        return { lock, started };
       }
       lastProblem = `pid ${lock.pid} is not answering`;
     }

@@ -29,6 +29,10 @@ export function configPath(home: string): string {
   return join(home, "config.json");
 }
 
+export function lastCrashPath(home: string): string {
+  return join(home, "last-crash.json");
+}
+
 export function logPath(home: string): string {
   return join(home, "supervisor.log");
 }

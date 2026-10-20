@@ -7,6 +7,7 @@ import {
   toAgentView,
   type HlaoConfig,
 } from "./config.js";
+import { clearCrashMarker, readCrashMarker, writeCrashMarker } from "./crash.js";
 import { HlaoError, describeError, toHlaoError } from "./errors.js";
 import { generateSessionId } from "./ids.js";
 import {
@@ -23,6 +24,7 @@ import { ensureHome, isWindows, lockPath, supervisorEndpoint } from "./paths.js"
 import { resolveSession } from "./supervisor/resolve.js";
 import { actor, delay, failure, pathKey } from "./supervisor/util.js";
 import { SKILL_VERSION, ensureHomeSkill, homeSkillPath } from "./skill.js";
+import { nowIso } from "./time.js";
 import {
   FrameTooLargeError,
   createWireServer,
@@ -49,6 +51,7 @@ import {
   type ForgetResult,
   type HelloParams,
   type HelloResult,
+  type LastCrash,
   type ListParams,
   type ListResult,
   type NotificationFrame,
@@ -150,6 +153,8 @@ class SupervisorServer {
   #config: HlaoConfig;
   #configHash: string;
   #configError: string | null;
+  /** The lock owner replaced by this start, when it did not stop cleanly. */
+  #lastCrash: LastCrash | null = null;
   #sessions = new Map<string, Session>();
   #server: WireStreamServer | null = null;
   #streams = new Set<WireStream>();
@@ -194,6 +199,11 @@ class SupervisorServer {
   }
 
   async start(): Promise<void> {
+    // A supervisor that cannot read its config must not come up as an empty
+    // instance. The CLI reports this before autostart and exits 1.
+    if (this.#configError !== null) {
+      throw new HlaoError("config_invalid", this.#configError);
+    }
     ensureHome(this.#home);
     try {
       ensureHomeSkill(this.#home);
@@ -277,6 +287,7 @@ class SupervisorServer {
     }
 
     removeLock(this.#home, this.token);
+    clearCrashMarker(this.#home);
     if (!isWindows()) {
       try {
         unlinkSync(this.endpoint);
@@ -299,6 +310,7 @@ class SupervisorServer {
       version: this.#version,
       state: "starting",
     };
+    let detectedCrash: LastCrash | null = null;
 
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const existing = readLock(this.#home);
@@ -314,8 +326,10 @@ class SupervisorServer {
           if (await probeSupervisor(existing)) {
             throw new AlreadyRunningError(existing);
           }
+          detectedCrash = this.#crashFromLock(existing);
           removeLock(this.#home, existing.token);
         } else {
+          detectedCrash = this.#crashFromLock(existing);
           removeLock(this.#home, existing.token);
         }
       } else if (existsSync(lockPath(this.#home))) {
@@ -327,6 +341,16 @@ class SupervisorServer {
       }
 
       if (writeLockExclusive(this.#home, info)) {
+        if (detectedCrash !== null) {
+          try {
+            writeCrashMarker(this.#home, detectedCrash);
+          } catch (error) {
+            this.#logger.warn(
+              `could not record the previous supervisor crash: ${describeError(error)}`,
+            );
+          }
+        }
+        this.#lastCrash = detectedCrash ?? readCrashMarker(this.#home);
         this.#lock = info;
         return;
       }
@@ -335,6 +359,15 @@ class SupervisorServer {
     const owner = readLock(this.#home);
     if (owner) throw new AlreadyRunningError(owner);
     throw new HlaoError("internal", "could not acquire the supervisor lock");
+  }
+
+  #crashFromLock(lock: LockInfo): LastCrash {
+    return {
+      pid: lock.pid,
+      version: lock.version,
+      startedAt: lock.startedAt,
+      detectedAt: nowIso(),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -532,6 +565,7 @@ class SupervisorServer {
             .length,
           configHash: this.#configHash,
           configError: this.#configError ?? undefined,
+          ...(this.#lastCrash !== null ? { lastCrash: this.#lastCrash } : {}),
           ...(hello.stream !== undefined
             ? { stream: { persistent: hello.stream.persistent === true } }
             : {}),

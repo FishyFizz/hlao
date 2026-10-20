@@ -155,16 +155,29 @@ export function withProgress<T>(label: string, work: Promise<T>): Promise<T> {
   );
 }
 
-export function connect(
+export async function connect(
   ctx: CommandContext,
   autostart = true,
 ): Promise<SupervisorConnection> {
-  return connectSupervisor({
+  const conn = await connectSupervisor({
     home: ctx.home,
     cliPath: ctx.cliPath,
     callerSessionId: ctx.callerSessionId,
     autostart,
   });
+  if (conn.started === true) {
+    try {
+      const hello = await conn.request<HelloResult>("hello", {});
+      if (hello.lastCrash) {
+        process.stderr.write(
+          `hlao: previous supervisor (pid ${hello.lastCrash.pid}) did not shut down cleanly; its live table and retained history were lost\n`,
+        );
+      }
+    } catch {
+      // The command's own request reports a real connection failure.
+    }
+  }
+  return conn;
 }
 
 let capabilityCache: {

@@ -210,15 +210,25 @@ export async function cmdWait(args: string[]): Promise<number> {
     return code;
   }
 
-  const waited = formatDuration(result.waitedMs);
+  const waited =
+    result.reason === "timeout" && timeoutMs !== undefined && timeoutMs > 0
+      ? formatDuration(timeoutMs)
+      : formatDuration(result.waitedMs);
   if (result.results.length === 1) {
-    return renderSingleWait(ctx, result, result.results[0]!, until, waited);
+    return renderSingleWait(ctx, result, result.results[0]!, until, waited, code);
   }
 
   const satisfied = result.results.filter((entry) => entry.satisfied).length;
   for (const entry of result.results) {
     const entryLabel = sessionLabel(ctx, entry.session);
     if (entry.satisfied) {
+      const reason =
+        (until === "settled" || until === "idle") &&
+        entry.reason === "permission"
+          ? "settled (permission)"
+          : until === "settled" && entry.reason === "exit"
+            ? "settled (exit)"
+            : entry.reason;
       const detail =
         entry.reason === "exit"
           ? exitDetail(entry.session)
@@ -226,7 +236,7 @@ export async function cmdWait(args: string[]): Promise<number> {
             ? entry.session.pendingPermission.title
             : null;
       out(
-        `${entryLabel}: ${entry.reason}` + (detail ? ctx.style.dim(` · ${sanitize(detail)}`) : ""),
+        `${entryLabel}: ${reason}` + (detail ? ctx.style.dim(` · ${sanitize(detail)}`) : ""),
       );
       if (entry.reason === "permission" && entry.session.pendingPermission) {
         out(renderPermission(entry.session.id, entry.session.pendingPermission, ctx.style));
@@ -259,18 +269,23 @@ function renderSingleWait(
   entry: WaitResult["results"][number],
   until: string,
   waited: string,
+  code: number,
 ): number {
   const label = sessionLabel(ctx, entry.session);
   switch (result.reason) {
     case "idle":
       out(`${label} is idle (waited ${waited})`);
-      return 0;
+      return code;
     case "permission":
-      out(`${label} needs permission (waited ${waited})`);
+      if (until === "permission") {
+        out(`${label} needs permission (waited ${waited})`);
+      } else {
+        out(`${label} settled (permission) · waited ${waited}`);
+      }
       if (entry.session.pendingPermission) {
         out(renderPermission(entry.session.id, entry.session.pendingPermission, ctx.style));
       }
-      return 0;
+      return code;
     case "exit": {
       const detail = exitDetail(entry.session);
       if (until === "exit") {
@@ -278,26 +293,34 @@ function renderSingleWait(
           `${label} is ${styleStatus(entry.session.status, ctx.style)} (waited ${waited})` +
             (detail ? ctx.style.dim(` · ${detail}`) : ""),
         );
-        return 0;
+        return code;
+      }
+      if (until === "settled") {
+        out(
+          `${label} settled (exit) · waited ${waited}: ` +
+            `${styleStatus(entry.session.status, ctx.style)}` +
+            (detail ? ctx.style.dim(` · ${detail}`) : ""),
+        );
+        return code;
       }
       out(
         `${label} ended before reaching "${until}" (waited ${waited}): ` +
           `${styleStatus(entry.session.status, ctx.style)}` +
           (detail ? ctx.style.dim(` · ${detail}`) : ""),
       );
-      return 3;
+      return code;
     }
     case "change":
       out(`${label} changed at seq ${entry.session.lastSeq} (waited ${waited})`);
-      return 0;
+      return code;
     case "timeout":
       out(
         `${label} did not reach "${until}" within ${waited}; it is ${styleStatus(entry.session.status, ctx.style)}`,
       );
-      return 2;
+      return code;
     default:
       out(`${entry.session.id}: ${result.reason}`);
-      return 0;
+      return code;
   }
 }
 

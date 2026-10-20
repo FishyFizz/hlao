@@ -310,7 +310,7 @@ export class Session {
     if (this.isTerminal || this.#closing) {
       throw new HlaoError(
         "session_closed",
-        `session ${this.id} is ${this.#closing ? "closing" : this.#status}`,
+        `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`,
       );
     }
     if (!this.#ready || !this.#conn || !this.#agentSessionId) {
@@ -318,6 +318,23 @@ export class Session {
     }
     if (text.length === 0 || text.length > MAX_PROMPT_CHARS) {
       throw new HlaoError("bad_request", "prompt text is empty or too long");
+    }
+
+    // A session is inside its own turn when it runs this command. Waiting for
+    // a message queued behind that same turn would deadlock until the wait
+    // timeout; reject it and name the deferred form instead.
+    if (
+      wait &&
+      !this.#cancelling &&
+      from === this.id &&
+      (this.#active !== null ||
+        this.#status === "busy" ||
+        this.#status === "waiting_permission")
+    ) {
+      throw new HlaoError(
+        "bad_request",
+        "cannot wait for a self-message behind your own turn; send it without --wait to run it after this turn, or wait on another session",
+      );
     }
 
     // A retry must not be rejected by the queue its own first attempt filled.
@@ -456,6 +473,7 @@ export class Session {
         this.#turnStartedAt = nowIso();
         this.#lastStopReason = null;
         const waitedMs = Date.now() - item.enqueuedAt;
+        const injectSkill = this.#skillEnabled && !this.#skillInjected;
         this.#emit(
           "prompt.sent",
           {
@@ -465,23 +483,31 @@ export class Session {
             wasQueued: item.wasQueued,
             waitedMs,
             queuedMs: waitedMs,
+            ...(injectSkill
+              ? {
+                  injected: {
+                    skill: VERSION,
+                    path: this.#skillPath,
+                    blocks: 2,
+                  },
+                }
+              : {}),
           },
           item.turn,
         );
         this.#emit("turn.started", { turn: item.turn }, item.turn);
-        await this.#runPrompt(item);
+        await this.#runPrompt(item, injectSkill);
       }
     } finally {
       this.#pumping = false;
     }
   }
 
-  async #runPrompt(item: QueueItem): Promise<void> {
+  async #runPrompt(item: QueueItem, injectSkill: boolean): Promise<void> {
     const turn = item.turn!;
     try {
       const blocks: ContentBlock[] = [];
-      if (this.#skillEnabled && !this.#skillInjected) {
-        this.#skillInjected = true;
+      if (injectSkill) {
         blocks.push({
           type: "text",
           text: skillPointer(this.#skillPath),
@@ -492,6 +518,9 @@ export class Session {
         sessionId: this.#agentSessionId!,
         prompt: blocks,
       });
+      // Mark the pointer delivered only after the prompt request succeeds; a
+      // failed request leaves it to be sent with the next prompt.
+      if (injectSkill) this.#skillInjected = true;
       this.#finishTurn(item, response.stopReason as StopReason);
     } catch (error) {
       if (this.#closing || this.#cancelling) {
@@ -891,7 +920,7 @@ export class Session {
   /** Changes the operator-facing label. The id and env identity do not change. */
   setName(name: string | null, by = "operator"): void {
     if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
     }
     if (name !== null && name.trim().length === 0) {
       throw new HlaoError("bad_request", "a session name must not be empty; pass null to clear");
@@ -904,7 +933,7 @@ export class Session {
   /** Reads or writes the live HLAO permission policy. */
   setPolicy(policy: PermissionPolicy, by = "operator"): void {
     if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
     }
     this.#changePolicy(policy, by);
 
@@ -934,7 +963,7 @@ export class Session {
   /** Switches a provider-native mode when the backend advertises modes. */
   async setMode(modeId: string, by = "operator"): Promise<SessionModes> {
     if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
     }
     if (!this.#ready || !this.#conn || !this.#agentSessionId) {
       throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);
@@ -969,7 +998,7 @@ export class Session {
     by = "operator",
   ): Promise<SessionConfigOptionView[]> {
     if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is closing`);
+      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
     }
     if (!this.#ready || !this.#conn || !this.#agentSessionId) {
       throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);

@@ -413,7 +413,8 @@ function readJson(file: string): unknown {
   try {
     return JSON.parse(readFileSync(file, "utf8"));
   } catch (error) {
-    throw new HlaoError("config_invalid", `cannot parse ${file}: ${describeError(error)}`);
+    // The caller prefixes the file path; do not repeat it here.
+    throw new HlaoError("config_invalid", `cannot parse: ${describeError(error)}`);
   }
 }
 

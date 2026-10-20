@@ -91,15 +91,19 @@ export async function cmdDown(args: string[]): Promise<number> {
       const parts: string[] = [];
       if (live.length > 0) {
         parts.push(
-          `closes ${live.length} live session${live.length === 1 ? "" : "s"} and discards their in-memory history`,
+          `closes ${live.length} live session${live.length === 1 ? "" : "s"} and discards ${
+            live.length === 1 ? "its" : "their"
+          } in-memory history`,
         );
       }
       if (retained > 0) {
         parts.push(
-          `discards ${retained} retained session histor${retained === 1 ? "y" : "ies"}`,
+          `also discards ${retained} retained session histor${retained === 1 ? "y" : "ies"}`,
         );
       }
-      process.stderr.write(`hlao: stopping ${parts.join(" and ")}\n`);
+      process.stderr.write(
+        `hlao: stopping ${parts.join("; ")} · run "hlao down --dry-run" to inspect\n`,
+      );
     }
 
     const result = await conn.request<{

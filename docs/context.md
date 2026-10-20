@@ -7,16 +7,17 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.5.0, built 2026-10-20 on `milestone/0.5-universal-addressing`
-  (one instance is one address space; ADR 0008).
+- **Version:** 0.10.0, built 2026-10-20 on `milestone/0.10-truth-pass`
+  (truth before features; protocol 2.4 additive).
 - **Status:** the primitive surface, supervisor, CLI, tests, and the four acceptance
   assemblies are implemented and green. The socket is a public client contract: the bundled
   CLI, a future dashboard/TUI, and an MCP server are interchangeable clients (ADR 0007).
   Every session in an HLAO instance is addressable by every caller; isolation is another
   instance.
-- **Verification:** `npm test` runs 134 tests: 54 unit and 80 end-to-end through the real CLI
-  and supervisor against a scripted ACP agent, including the five acceptance-assembly tests
-  and a raw-NDJSON conformance test that never invokes the CLI.
+- **Verification:** `npm test` runs 191 tests: 189 pass, 2 skipped (POSIX-only process-group
+  tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
+  ACP agent, including the acceptance assemblies and a raw-NDJSON conformance test that never
+  invokes the CLI.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through
   `wait --until permission`, resumed after `hlao permit`, and — from inside its own shell —

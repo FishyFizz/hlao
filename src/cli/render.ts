@@ -90,6 +90,8 @@ export function renderSessionTable(
         truncateRight(oneLine(lastEvent), 40),
         busyFor(session),
         session.permissionPolicy,
+        session.createdBy ? oneLine(session.createdBy) : "—",
+        modelLabel(session),
         session.modes?.currentModeId ?? "—",
         session.pendingPermission
           ? truncateRight(oneLine(session.pendingPermission.title), 30)
@@ -121,7 +123,17 @@ export function renderSessionTable(
       "QUEUED",
       "ACTIVITY",
       ...(options.wide
-        ? ["CREATED", "EVENT", "BUSY", "POLICY", "MODE", "PENDING", "EXIT"]
+        ? [
+            "CREATED",
+            "EVENT",
+            "BUSY",
+            "POLICY",
+            "REQUESTER",
+            "MODEL",
+            "MODE",
+            "PENDING",
+            "EXIT",
+          ]
         : []),
       ...(options.usage ? ["CONTEXT", "COST"] : []),
       "CWD",
@@ -163,6 +175,15 @@ function exitDetail(session: SessionView): string {
     : `exit ${session.exit.code ?? "?"}`;
 }
 
+/** The provider config option whose category is `model`, when advertised. */
+function modelLabel(session: SessionView): string {
+  const options = session.configOptions ?? [];
+  const model =
+    options.find((option) => option.category === "model") ??
+    options.find((option) => option.id === "model");
+  return model ? oneLine(String(model.currentValue)) : "—";
+}
+
 export function renderSessionHeader(session: SessionView, style: Style): string {
   const terminal = isTerminalStatus(session.status);
   const parts = [
@@ -178,6 +199,7 @@ export function renderSessionHeader(session: SessionView, style: Style): string 
     session.queued > 0 ? `queued ${session.queued}` : null,
     session.modes ? `mode ${session.modes.currentModeId}` : null,
     `policy ${session.permissionPolicy}`,
+    session.createdBy ? `by ${oneLine(session.createdBy)}` : null,
     session.parentId ? `parent ${session.parentId}` : "root",
     session.depth > 0 ? `root ${session.rootId}` : null,
     terminal ? `ended ${session.endedAt ? formatAge(session.endedAt) : "?"}` : null,
@@ -192,6 +214,85 @@ export function renderSessionHeader(session: SessionView, style: Style): string 
         : null,
   ].filter((part): part is string => part !== null);
   return `${parts.join("  ")}\n${style.dim(details.join(" · "))}`;
+}
+
+/**
+ * `get`'s human projection: the state the command promises without reading
+ * events. The one-line header remains available as `get --brief`.
+ */
+export function renderSessionState(
+  session: SessionView,
+  style: Style,
+  commandPrefix = "hlao",
+): string {
+  const terminal = isTerminalStatus(session.status);
+  const head = [
+    style.bold(session.id),
+    session.name ? style.cyan(oneLine(session.name)) : null,
+    session.backend,
+    styleStatus(session.status, style),
+  ]
+    .filter((part): part is string => part !== null)
+    .join("  ");
+
+  const state = [
+    session.settled ? "settled" : "not settled",
+    `turn ${session.turn}`,
+    `queued ${session.queued}`,
+    session.lastStopReason ? `last stop ${session.lastStopReason}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+
+  const mode = session.modes
+    ? `${session.modes.currentModeId} (${session.modes.availableModes.length} available)`
+    : "—";
+  const config = session.configOptions?.length
+    ? session.configOptions
+        .map((option) => `${option.id}=${String(option.currentValue)}`)
+        .join(" · ")
+    : "—";
+  const usage = session.usage
+    ? `${formatTokens(session.usage.used)}/${formatTokens(session.usage.size)} tokens` +
+      (session.usage.cost
+        ? ` · ${(session.usage.cost.amount / 100).toFixed(2)} ${session.usage.cost.currency}`
+        : "") +
+      ` (${formatAge(session.usage.at)})`
+    : "—";
+  const lineage = [
+    `created by ${session.createdBy ? oneLine(session.createdBy) : "unknown"}`,
+    session.parentId ? `parent ${session.parentId}` : "root",
+    `root ${session.rootId}`,
+    `depth ${session.depth}`,
+  ].join(" · ");
+  const pending = session.pendingPermission
+    ? `${oneLine(session.pendingPermission.title)} (requested ${formatAge(
+        session.pendingPermission.requestedAt,
+      )}) — ${commandPrefix} permit ${session.id} --allow`
+    : "—";
+  const exit = terminal
+    ? session.exit
+      ? session.exit.signal
+        ? `signal ${session.exit.signal}`
+        : `code ${session.exit.code ?? "?"}`
+      : "unknown"
+    : session.processId
+      ? `pid ${session.processId}`
+      : "—";
+
+  return [
+    head,
+    style.dim(`state    ${state}`),
+    style.dim(`policy   ${session.permissionPolicy} · mode ${mode}`),
+    style.dim(`config   ${config}`),
+    style.dim(`usage    ${usage}`),
+    style.dim(`lineage  ${lineage}`),
+    style.dim(`pending  ${pending}`),
+    style.dim(
+      `exit     ${exit}${session.endedAt ? ` · ended ${formatAge(session.endedAt)}` : ""}`,
+    ),
+    style.dim(`cwd      ${oneLine(session.cwd)}`),
+  ].join("\n");
 }
 
 export function renderReadResult(
@@ -284,18 +385,38 @@ export function renderEvents(
   let hiddenStderr = 0;
   let firstHiddenStderr: number | null = null;
   let firstHiddenAt = "";
+  let firstHiddenDay = false;
+  let lastDay = "";
+  let agentDay = false;
+  let thoughtDay = false;
+
+  const dayKey = (at: string): string => {
+    const date = new Date(at);
+    return Number.isFinite(date.getTime())
+      ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
+      : "";
+  };
+  /** True for the first event of a new local day (including the page's first). */
+  const markDay = (at: string): boolean => {
+    const key = dayKey(at);
+    if (key === "" || key === lastDay) return false;
+    lastDay = key;
+    return true;
+  };
 
   const flushAgent = (): void => {
     if (agentText.length > 0) {
-      lines.push(`${cursor(agentSeq, agentAt, style, full)}${style.cyan("agent")} › ${indent(agentText)}`);
+      lines.push(`${cursor(agentSeq, agentAt, style, full, agentDay)}${style.cyan("agent")} › ${indent(agentText)}`);
       agentText = "";
       agentMessageId = null;
+      agentDay = false;
     }
   };
   const flushThought = (): void => {
     if (thoughtText.length > 0) {
-      lines.push(`${cursor(thoughtSeq, thoughtAt, style, full)}${style.dim("thinking")} › ${style.dim(indent(thoughtText))}`);
+      lines.push(`${cursor(thoughtSeq, thoughtAt, style, full, thoughtDay)}${style.dim("thinking")} › ${style.dim(indent(thoughtText))}`);
       thoughtText = "";
+      thoughtDay = false;
     }
   };
   const flush = (): void => {
@@ -305,6 +426,7 @@ export function renderEvents(
 
   for (const event of events) {
     const data = event.data;
+    const dayChanged = markDay(event.at);
     switch (event.type) {
       case "agent.message": {
         flushThought();
@@ -315,6 +437,7 @@ export function renderEvents(
         if (agentText.length === 0) {
           agentSeq = event.seq;
           agentAt = event.at;
+          agentDay = dayChanged;
         }
         if (messageId !== null) agentMessageId = messageId;
         agentText += typeof data.text === "string" ? data.text : "";
@@ -325,6 +448,7 @@ export function renderEvents(
         if (thoughtText.length === 0) {
           thoughtSeq = event.seq;
           thoughtAt = event.at;
+          thoughtDay = dayChanged;
         }
         thoughtText += typeof data.text === "string" ? data.text : "";
         break;
@@ -334,33 +458,58 @@ export function renderEvents(
       case "prompt.sent": {
         flush();
         const text = typeof data.text === "string" ? data.text : "";
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.bold("you")} › ${indent(text)}`);
+        const from = actorName(data.from);
+        const who =
+          from === null ? "unknown" : from === "operator" ? "operator" : `from ${from}`;
+        const id =
+          typeof data.messageId === "string"
+            ? ` (${oneLine(data.messageId)})`
+            : "";
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.bold(who)}${style.dim(id)} › ${indent(text)}`,
+        );
         break;
       }
       case "prompt.queued": {
         flush();
+        const id =
+          typeof data.messageId === "string" ? oneLine(data.messageId) : "msg-?";
+        const from = actorName(data.from) ?? "unknown";
+        const preview = eventPreview(data);
+        const position =
+          data.position === undefined ? "" : ` (position ${String(data.position)})`;
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.dim(`queued message (position ${String(data.position ?? "?")})`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `queued ${id} · from ${from}${preview ? ` · "${preview}"` : ""}${position}`,
+          )}`,
         );
         break;
       }
       case "prompt.discarded": {
         flush();
+        const id =
+          typeof data.messageId === "string" ? oneLine(data.messageId) : "msg-?";
+        const from = actorName(data.from) ?? "unknown";
+        const preview = eventPreview(data);
+        const reason = String(data.reason ?? "cancelled");
+        const by = actorName(data.by);
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.dim(`discarded a queued message (${String(data.reason ?? "cancelled")})`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `discarded ${id} · from ${from}${preview ? ` · "${preview}"` : ""} (${reason}${by ? `; by ${by}` : ""})`,
+          )}`,
         );
         break;
       }
       case "turn.started": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} —`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} —`)}`);
         break;
       }
       case "turn.ended": {
         flush();
         const stop = String(data.stopReason ?? "unknown");
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} ended: ${stop} —`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`— turn ${String(data.turn ?? event.turn ?? "?")} ended: ${stop} —`)}`,
         );
         break;
       }
@@ -368,7 +517,7 @@ export function renderEvents(
         flush();
         const title = oneLine(data.title ?? data.toolCallId ?? "tool");
         const kind = data.kind ? style.dim(` [${String(data.kind)}]`) : "";
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.yellow("tool")} › ${title}${kind}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.yellow("tool")} › ${title}${kind}`);
         if (verbose) lines.push(...renderPayload(data.rawInput, style));
         break;
       }
@@ -378,7 +527,7 @@ export function renderEvents(
         const title = oneLine(data.title ?? data.toolCallId ?? "tool");
         if (status !== "completed" && status !== "failed") break;
         const colour = status === "failed" ? style.red : style.dim;
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.yellow("tool")} › ${title} ${colour(`→ ${status}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.yellow("tool")} › ${title} ${colour(`→ ${status}`)}`);
         if (verbose) lines.push(...renderPayload(data.rawOutput, style));
         break;
       }
@@ -390,12 +539,12 @@ export function renderEvents(
         const title = oneLine(data.title ?? "permission required");
         if (data.auto === true) {
           lines.push(
-            `${cursor(event.seq, event.at, style, full)}${style.magenta("permission")} › ${title} ${style.dim(`— auto-answered by policy:${String(data.policy ?? "allow")}`)}`,
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission")} › ${title} ${style.dim(`— auto-answered by policy:${String(data.policy ?? "allow")}`)}`,
           );
           break;
         }
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.magenta("permission needed")} › ${title}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission needed")} › ${title}`,
         );
         for (const option of options) {
           lines.push(
@@ -416,76 +565,105 @@ export function renderEvents(
         flush();
         const answer = data.optionId === null ? "cancelled" : oneLine(data.optionId);
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.magenta("permission")} › ${answer} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission")} › ${answer} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
         );
         break;
       }
       case "policy.changed": {
         flush();
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.magenta("policy")} › ${oneLine(data.permissionPolicy ?? "")} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("policy")} › ${oneLine(data.permissionPolicy ?? "")} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
         );
         break;
       }
       case "session.created": {
         flush();
+        const createdBy = actorName(data.createdBy);
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.dim(`session created · ${oneLine(data.backend ?? "")} · ${oneLine(data.cwd ?? "")}`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `session created · ${oneLine(data.backend ?? "")} · ${oneLine(data.cwd ?? "")}` +
+              (createdBy ? ` · by ${createdBy}` : ""),
+          )}`,
         );
         break;
       }
       case "session.renamed": {
         flush();
         const name = data.name === null || data.name === undefined ? "(cleared)" : oneLine(data.name);
+        const by = actorName(data.by);
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.dim(`session renamed · ${name}`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `session renamed · ${name}` + (by ? ` (by ${by})` : ""),
+          )}`,
         );
         break;
       }
       case "session.initialized": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("ACP session ready")}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim("ACP session ready")}`);
         break;
       }
       case "session.closed": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("session closed")}`);
+        const by = actorName(data.by);
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `session closed${by ? ` (by ${by})` : ""}`,
+          )}`,
+        );
         break;
       }
       case "session.failed": {
         flush();
+        const by = actorName(data.by);
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.red(`session failed: ${oneLine(data.message ?? "unknown")}`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.red(
+            `session failed: ${oneLine(data.message ?? "unknown")}${by ? ` (by ${by})` : ""}`,
+          )}`,
         );
         break;
       }
       case "cancel.requested": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("cancel requested")}`);
+        const by = actorName(data.by);
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `cancel requested${by ? ` (by ${by})` : ""}`,
+          )}`,
+        );
         break;
       }
       case "error": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.red(`error: ${oneLine(data.message ?? "unknown")}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.red(`error: ${oneLine(data.message ?? "unknown")}`)}`);
         break;
       }
       case "stderr": {
         flush();
         if (verbose) {
-          lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`stderr › ${oneLine(data.text)}`)}`);
+          lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`stderr › ${oneLine(data.text)}`)}`);
         } else {
           hiddenStderr += 1;
           if (firstHiddenStderr === null) {
             firstHiddenStderr = event.seq;
             firstHiddenAt = event.at;
+            firstHiddenDay = dayChanged;
           }
         }
         break;
       }
       case "notice": {
         flush();
+        const severity =
+          typeof data.severity === "string" ? data.severity.toLowerCase() : "info";
+        const label =
+          severity === "error"
+            ? style.red("error")
+            : severity === "warning"
+              ? style.yellow("warning")
+              : style.cyan("notice");
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.cyan("notice")} › ${oneLine(data.title ?? "")}${
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${label} › ${oneLine(data.title ?? "")}${
             data.description ? style.dim(` — ${oneLine(data.description)}`) : ""
           }`,
         );
@@ -501,14 +679,14 @@ export function renderEvents(
             ? ` · ${(cost.amount / 100).toFixed(2)} ${cost.currency ?? "USD"}`
             : "";
         lines.push(
-          `${cursor(event.seq, event.at, style, full)}${style.dim(`usage › ${used}/${size} tokens${costText}`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`usage › ${used}/${size} tokens${costText}`)}`,
         );
         break;
       }
       case "plan": {
         flush();
         const entries = Array.isArray(data.entries) ? data.entries : [];
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.cyan("plan")} › ${entries.length} entries`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.cyan("plan")} › ${entries.length} entries`);
         for (const entry of entries.slice(0, 10)) {
           const item = entry as { status?: string; content?: string };
           lines.push(`  ${style.dim(`[${oneLine(item.status ?? "?")}]`)} ${oneLine(item.content ?? "")}`);
@@ -520,37 +698,63 @@ export function renderEvents(
       }
       case "mode": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`mode › ${oneLine(data.currentModeId ?? "")}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`mode › ${oneLine(data.currentModeId ?? "")}`)}`);
         break;
       }
       case "config": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim("config updated")}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim("config updated")}`);
         break;
       }
       case "commands": {
         flush();
         if (!verbose) break;
         const commands = Array.isArray(data.commands) ? data.commands.length : 0;
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`commands › ${commands} available`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`commands › ${commands} available`)}`);
         break;
       }
       case "session.info": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(`session › ${oneLine(data.title ?? "")}`)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`session › ${oneLine(data.title ?? "")}`)}`);
         break;
       }
       case "plan.update":
       case "compaction":
-      case "subagent":
+      case "subagent": {
+        flush();
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(event.type)}`);
+        break;
+      }
       case "raw": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(event.type)}`);
+        const payload = data.raw;
+        if (verbose && payload !== undefined) {
+          let text: string;
+          try {
+            text =
+              typeof payload === "string"
+                ? payload
+                : (JSON.stringify(payload) ?? String(payload));
+          } catch {
+            text = "[unserializable payload]";
+          }
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+              `raw › ${truncateRight(oneLine(text), 500)}`,
+            )}`,
+          );
+        } else {
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+              "raw — payload hidden; use --raw",
+            )}`,
+          );
+        }
         break;
       }
       default: {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full)}${style.dim(event.type)}`);
+        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(event.type)}`);
         break;
       }
     }
@@ -559,7 +763,7 @@ export function renderEvents(
   flush();
   if (hiddenStderr > 0 && firstHiddenStderr !== null) {
     lines.push(
-      `${cursor(firstHiddenStderr, firstHiddenAt, style, full)}${style.dim(
+      `${cursor(firstHiddenStderr, firstHiddenAt, style, full, firstHiddenDay)}${style.dim(
         `${hiddenStderr} adapter diagnostic line${hiddenStderr === 1 ? "" : "s"} hidden (use --raw)`,
       )}`,
     );
@@ -687,19 +891,30 @@ function formatAge(iso: string): string {
   return `${formatDuration(delta)} ago`;
 }
 
-function cursor(seq: number, at: string, style: Style, full: boolean): string {
-  const stamp = formatTimestamp(at, full);
+function cursor(
+  seq: number,
+  at: string,
+  style: Style,
+  full: boolean,
+  dayChanged = false,
+): string {
+  const stamp = formatTimestamp(at, full, dayChanged);
   return style.gray(`#${String(seq).padEnd(4)} ${stamp ? `${stamp} ` : ""}`);
 }
 
-function formatTimestamp(at: string, full: boolean): string {
+function formatTimestamp(at: string, full: boolean, dayChanged: boolean): string {
   const date = new Date(at);
   if (!Number.isFinite(date.getTime())) return "";
   if (full) return at;
+  const day = dayChanged
+    ? `${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+        date.getDate(),
+      ).padStart(2, "0")} `
+    : "";
   const hh = String(date.getHours()).padStart(2, "0");
   const mm = String(date.getMinutes()).padStart(2, "0");
   const ss = String(date.getSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
+  return `${day}${hh}:${mm}:${ss}`;
 }
 
 const ANSI_ESCAPE =
@@ -722,6 +937,29 @@ function oneLine(value: unknown): string {
     .replace(/[\n\t]+/g, " ")
     .replace(/ {2,}/g, " ")
     .trim();
+}
+
+/** The `from`/`by`/`createdBy` value exactly as the event carries it. */
+function actorName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = oneLine(value);
+  return name.length > 0 ? name : null;
+}
+
+const EVENT_PREVIEW_CHARS = 200;
+
+/** A bounded, one-line preview from a prompt event, sanitized for the terminal. */
+function eventPreview(data: Record<string, unknown>): string {
+  const text =
+    typeof data.textPreview === "string"
+      ? data.textPreview
+      : typeof data.text === "string"
+        ? data.text
+        : "";
+  const line = oneLine(text);
+  return line.length > EVENT_PREVIEW_CHARS
+    ? `${line.slice(0, EVENT_PREVIEW_CHARS)}…`
+    : line;
 }
 
 function indent(text: string): string {

@@ -113,7 +113,7 @@ The token is the instance boundary.
   be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
   `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`, `wait.settled`,
   `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
-  `spawn.idempotency`, `spawn.createdBy`.
+  `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -128,6 +128,10 @@ The token is the instance boundary.
   skill toggle to `sessions.spawn`, `QueueItemView.id` and drop-by-id, and
   `SessionView.createdBy`. Every prompt result now carries `messageId`; a client that ignores
   it is unaffected.
+- **2.4** adds `hello.lastCrash` (the lock owner this supervisor replaced after it stopped
+  answering) and `prompt.sent.data.injected` (the skill version, path, and block count for
+  the first prompt). Capabilities: `supervisor.lastCrash`, `prompt.injected`. Both are
+  optional; a client that ignores them is unaffected.
 
 ## Methods
 
@@ -161,10 +165,20 @@ Result:
   version: string,
   sessions: number,
   configHash: string,         // sha256 of the user config file, or "missing"
-  configError?: string,       // present when user config failed validation
+  configError?: string,       // present only for a reload-degraded supervisor
+  lastCrash?: {               // present when the previous lock owner died (2.4)
+    pid: number,
+    version: string,
+    startedAt: string,
+    detectedAt: string
+  },
   stream?: { persistent: boolean } // present when persistence was requested
 }
 ```
+
+An invalid user config is fatal at startup: the supervisor does not bind or create a lock, and
+the client reports `config_invalid` before autostart. `configError` remains for a supervisor
+that reloaded an invalid file after a valid start; in that state only new spawns are blocked.
 
 `stream: { persistent: true }` is only valid on the first frame. On success the connection
 stays open and every later frame is a request; the connection closes when either side does.
@@ -634,7 +648,9 @@ that depends on it is notified.
 Actor fields are explicit:
 
 - `prompt.sent` and `prompt.queued` carry `from`: a session id or `"operator"`, plus the
-  message id as `messageId` (2.3).
+  message id as `messageId` (2.3). The first prompt that carries the skill pointer also
+  carries `injected: { skill, path, blocks }` (2.4); the pointer is marked delivered only
+  after the provider accepts the prompt, so a failed request is retried with the next prompt.
 - `prompt.discarded` carries the original `from`, the acting `by`, `reason`, a bounded
   `textPreview`, and `messageId` (2.3).
 - `session.created` carries `createdBy`: `"operator"` or the requesting session id (2.3).

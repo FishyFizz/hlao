@@ -25,11 +25,15 @@ export function previewText(text: string): string {
 }
 
 export function skillPointer(path: string): string {
-  return [
-    `HLAO skill: read "${path}" (or run "hlao skill") before acting.`,
-    "Context is whatever this prompt says, verbatim or by reference; do not invent it.",
-    "HLAO carries orchestration text, not file payloads; reference paths and use your own tools.",
-  ].join("\n");
+  // A trailing blank line keeps an adapter that concatenates text blocks from
+  // gluing the pointer onto the operator's first words.
+  return (
+    [
+      `HLAO skill: read "${path}" (or run "hlao skill") before acting.`,
+      "Context is whatever this prompt says, verbatim or by reference; do not invent it.",
+      "HLAO carries orchestration text, not file payloads; reference paths and use your own tools.",
+    ].join("\n") + "\n\n"
+  );
 }
 
 const EVENT_TITLE_CHARS = 120;

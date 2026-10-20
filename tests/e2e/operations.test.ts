@@ -371,7 +371,7 @@ test("spawn --wait prints the handle before the first turn finishes", async (t) 
     const code = await exited;
     assert.equal(code, 0);
     assert.match(stdout, /spawned /);
-    assert.match(stdout, /— turn 1 ended: end_turn —/);
+    assert.match(stdout, /— turn 1 ended: end_turn(?: · msg-\S+)? —/);
     assert.match(stdout, /stopped: end_turn/);
   } finally {
     if (!settled) child.kill("SIGKILL");

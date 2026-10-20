@@ -5,6 +5,7 @@ import {
   displayWidth,
   renderEvents,
   renderReadResult,
+  renderSessionState,
   renderSessionTable,
 } from "../../src/cli/render.js";
 import type {
@@ -101,11 +102,25 @@ test("same message id streams into one block; a new id starts a new block", () =
   assert.doesNotMatch(blocks[1]!, /first/);
 });
 
-test("read cursors show HH:MM:SS by default and ISO with --timestamps", () => {
+test("read cursors show a date on the first event and HH:MM:SS afterwards", () => {
   const events = [event(7, "agent.message", { text: "hi", messageId: "m1" })];
   const short = renderEvents(events, style, "abc123")[0]!;
-  assert.match(short, /^#7\s+\d{2}:\d{2}:\d{2}\s/);
+  assert.match(short, /^#7\s+\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s/);
   assert.ok(!short.includes(AT));
+
+  const twoDays = renderEvents(
+    [
+      event(7, "agent.message", { text: "first", messageId: "m1" }),
+      {
+        ...event(8, "agent.message", { text: "second", messageId: "m2" }),
+        at: "2026-10-20T00:00:01.000Z",
+      },
+    ],
+    style,
+    "abc123",
+  );
+  assert.match(twoDays[0]!, /^#7\s+\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s/);
+  assert.match(twoDays[1]!, /^#8\s+\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s/);
 
   const full = renderEvents(events, style, "abc123", "hlao", {
     fullTimestamps: true,
@@ -323,4 +338,159 @@ test("the session table marks the caller and omits the column for operators", ()
 
   const operator = renderSessionTable(sessions, style);
   assert.doesNotMatch(operator, /SELF/);
+});
+
+test("prompt, queue, and lifecycle events render their actor", () => {
+  const output = renderEvents(
+    [
+      event(1, "prompt.sent", {
+        messageId: "msg-a",
+        text: "hello",
+        from: "abc999",
+      }),
+      event(2, "prompt.sent", {
+        messageId: "msg-b",
+        text: "from me",
+        from: "operator",
+      }),
+      event(3, "prompt.queued", {
+        messageId: "msg-c",
+        position: 2,
+        textPreview: "later",
+        from: "operator",
+      }),
+      event(4, "prompt.discarded", {
+        messageId: "msg-c",
+        text: "later",
+        from: "operator",
+        by: "abc999",
+        reason: "cancel",
+      }),
+      event(5, "session.created", {
+        backend: "fake",
+        cwd: "D:\\work",
+        createdBy: "abc999",
+      }),
+      event(6, "session.renamed", { name: "builder", by: "abc999" }),
+      event(7, "cancel.requested", { by: "abc999" }),
+      event(8, "session.closed", { by: "abc999" }),
+    ],
+    style,
+    "abc123",
+  ).join("\n");
+
+  assert.match(output, /from abc999 \(msg-a\) › hello/);
+  assert.match(output, /operator \(msg-b\) › from me/);
+  assert.match(output, /queued msg-c · from operator · "later" \(position 2\)/);
+  assert.match(output, /discarded msg-c · from operator · "later" \(cancel; by abc999\)/);
+  assert.match(output, /session created .* by abc999/);
+  assert.match(output, /session renamed · builder \(by abc999\)/);
+  assert.match(output, /cancel requested \(by abc999\)/);
+  assert.match(output, /session closed \(by abc999\)/);
+});
+
+test("notice severity and raw payload state are visible", () => {
+  const notices = renderEvents(
+    [
+      event(1, "notice", { severity: "warning", title: "careful" }),
+      event(2, "notice", { severity: "error", title: "bad" }),
+    ],
+    style,
+    "abc123",
+  ).join("\n");
+  assert.match(notices, /warning › careful/);
+  assert.match(notices, /error › bad/);
+
+  const hidden = renderEvents([event(1, "raw", {})], style, "abc123").join("\n");
+  assert.match(hidden, /raw — payload hidden; use --raw/);
+  const shown = renderEvents(
+    [event(1, "raw", { raw: { sessionUpdate: "session_message" } })],
+    style,
+    "abc123",
+    "hlao",
+    { verbose: true },
+  ).join("\n");
+  assert.match(shown, /raw › .*session_message/);
+});
+
+test("get's state block carries the promised fields", () => {
+  const output = renderSessionState(
+    session({
+      status: "waiting_permission",
+      settled: false,
+      turn: 2,
+      queued: 1,
+      createdBy: "operator",
+      parentId: "parent1",
+      rootId: "parent1",
+      depth: 1,
+      processId: 4242,
+      modes: {
+        currentModeId: "default",
+        availableModes: [
+          { id: "default", name: "Manual" },
+          { id: "auto", name: "Auto" },
+        ],
+      },
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: "opus",
+          values: [{ value: "opus", name: "Opus" }],
+        },
+      ],
+      usage: {
+        used: 42,
+        size: 200_000,
+        cost: { amount: 1234, currency: "USD" },
+        at: AT,
+      },
+      pendingPermission: {
+        requestId: "req-1",
+        toolCallId: "call-1",
+        title: "Run the build",
+        kind: "execute",
+        options: [],
+        requestedAt: AT,
+      },
+    }),
+    style,
+  );
+
+  assert.match(output, /state\s+not settled · turn 2 · queued 1/);
+  assert.match(output, /policy\s+allow · mode default \(2 available\)/);
+  assert.match(output, /config\s+model=opus/);
+  assert.match(output, /usage\s+42\/200\.0k tokens · 12\.34 USD/);
+  assert.match(output, /lineage\s+created by operator · parent parent1 · root parent1 · depth 1/);
+  assert.match(output, /pending\s+Run the build .* permit abc123 --allow/);
+  assert.match(output, /exit\s+pid 4242/);
+  assert.match(output, /cwd\s+D:\\work/);
+});
+
+test("wide list carries requester and model", () => {
+  const table = renderSessionTable(
+    [
+      session({
+        createdBy: "agent7",
+        configOptions: [
+          {
+            id: "model",
+            name: "Model",
+            category: "model",
+            type: "select",
+            currentValue: "opus",
+            values: [{ value: "opus", name: "Opus" }],
+          },
+        ],
+      }),
+    ],
+    style,
+    null,
+    { wide: true },
+  );
+  assert.match(table, /REQUESTER\s+MODEL/);
+  assert.match(table, /agent7\s+opus/);
 });

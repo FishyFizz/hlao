@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.10.0 — unreleased
+
+### Added
+
+- Human `read` names the actor on every actor-bearing event: `operator` or `from <id>` for
+  prompts, and `from`/`by` for queue, rename, close, cancel, and creation events. Queue and
+  discard lines carry the message id, sender, and bounded preview.
+- `hlao get` prints a state block with status, turn, queue, settlement, policy, modes, config
+  options, usage, pending permission, lineage, exit, and cwd. `get --brief` keeps the old
+  one-line header. `list --wide` adds REQUESTER and MODEL.
+- A supervisor crash is recorded and announced: `status` and `doctor` report the previous
+  pid, and the autostarting command prints one warning. `lastCrash` is additive wire metadata.
+- The first prompt records `injected: { skill, path, blocks }`, and the skill pointer ends
+  with a blank line so a block-concatenating adapter cannot glue it onto the operator's text.
+- `supervisor.lastCrash` and `prompt.injected` are additive protocol 2.4 capabilities.
+
+### Changed
+
+- `wait --until settled` now returns the computed exit code in human mode; termination is a
+  valid completion (exit 0). `idle` is documented as the historical completion alias, with its
+  terminal exit-3 exception, and a permission stop is named `settled (permission)`.
+- An invalid config fails startup instead of creating a degraded empty instance; autostart
+  prints the parse error and exits 1. This also makes `status --start` exit 1 on bad config.
+- `list --cwd` filters locally, so a missing match still reports the true instance counts;
+  `--cwd` is exact and `--cwd-prefix` is a subtree.
+- The skill and README distinguish inside-turn from between-turn. A busy `send --self --wait`
+  is rejected with the deferred form instead of deadlocking. A parked permission is answered
+  by the operator or parent, not the parked session itself.
+- Terminal sessions report `closed`/`failed`, not `is closing`; send/spawn print the message
+  id; wait timeouts show the requested duration; read cursors show the date on a new day;
+  notice severity is visible; `raw` events say when the payload is hidden; unknown commands
+  suggest the nearest command.
+- `package.json` is the single version source; the lock file, CLI, skill metadata, and
+  changelog heading are checked against it.
+
+## 0.9.0 — unreleased
+
+### Changed
+
+- Maintenance-only pass: split oversized modules behind stable barrels, removed duplicated
+  logic and dead exports, and aligned the test harness with the wire types. No behavior,
+  wire, event, flag, or exit-code change.
+
+## 0.8.0 — unreleased
+
+### Added
+
+- The HLAO skill ships with the package, is injected once as a separate first-prompt block,
+  and is exposed through `HLAO_SKILL`/`HLAO_SKILL_VERSION`; `spawn --no-skill` suppresses the
+  pointer.
+- Message ids and idempotency keys make delivery retry-safe; `SendResult.outcome` reports
+  `completed`, `cancelled`, or `timed_out`.
+- `createdBy` records the spawn requester; `whoami` reports the live name; `list --mine`
+  scopes to the caller's root.
+- POSIX adapters run in their own process group, and `close --force`/`down` signal it.
+- Windows shim readiness, spawn-wait recovery hints, and bounded partial text on timeout.
+
 ## 0.7.0 — unreleased
 
 ### Added
@@ -199,7 +256,9 @@ First complete release of the primitive surface.
   recorded `policy:allow`), opt-in `ask`, `deny`, `permit --always` to remove the gate from a
   live session, and provider-native modes through `spawn --mode` and `hlao mode`.
 - Identity generated before process start and injected as `HLAO_*` environment variables;
-  self-and-descendants visibility enforced by the supervisor.
+  universal addressing by the supervisor (ADR 0008): every session is addressable, and
+  lineage is context, not a scope. (This corrects the earlier "self-and-descendants
+  visibility" claim.)
 - Backend manifests as data: built-in Claude and Codex adapters plus user and project
   configuration.
 - Human and `--json` output for every command; exit code 2 distinguishes a bounded wait

@@ -58,10 +58,11 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `stream`, `errors` |
 | `logger` | Supervisor diagnostics log | log rotation | `paths` |
 | `config` | Backend manifests and user/project config | config merge rules | `paths`, `errors` |
+| `crash` | Diagnostic marker for a supervisor replaced after a crash | — | `paths`, `protocol` |
 | `events` | Bounded, seq-addressed event log | retention and cursors | — |
 | `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
-| `supervisor` | Process lifecycle, lock/listener, dispatch, universal addressing | live session table | `session`, `config`, `lock`, `logger`, `paths`, `protocol`, `stream`, `errors` |
-| `client` | Client-side transport and autostart | — | `lock`, `protocol`, `paths`, `stream`, `errors` |
+| `supervisor` | Process lifecycle, lock/listener, dispatch, universal addressing | live session table | `session`, `config`, `crash`, `lock`, `logger`, `paths`, `protocol`, `stream`, `errors` |
+| `client` | Client-side transport and autostart | — | `config`, `crash`, `lock`, `protocol`, `paths`, `stream`, `time`, `errors` |
 | `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
 Three modules have focused submodules. `protocol.ts` is a barrel over `protocol/version.ts`

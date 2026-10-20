@@ -93,7 +93,7 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao get [<id>]` | One session's orchestration state without reading events. |
 | `hlao find TEXT` | Search events across sessions (`list` + paged `read --grep`); `--all` includes retained histories. |
 | `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `settled`, `permission`, `exit`, or a filtered `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3 (for `settled`, termination is a valid completion). |
-| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
+| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/requester/model/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
@@ -144,12 +144,16 @@ owns no timer. `read --out FILE` writes the current page as JSON while normal ou
 it is the supported export path before `down`.
 
 `hlao list --watch` redraws the visible sessions every `--interval` (default 2s) and never
-starts a supervisor timer. `--wide` adds busy time, policy, mode, pending-permission title, and
-exit detail; `--tree` indents by lineage. Filters (`--status`, `--backend`, `--root`, `--name`,
-`--pending`, `--cwd-prefix`) run over the instance list, so they only narrow the local view.
-Human output sorts by recent activity by default; `--sort created` restores creation order.
+starts a supervisor timer. `--wide` adds busy time, policy, requester, model, mode,
+pending-permission title, and exit detail; `--tree` indents by lineage. Filters (`--status`,
+`--backend`, `--root`, `--name`, `--pending`, `--cwd` exact, `--cwd-prefix` subtree) run over
+the instance list, so they only narrow the local view. Human output sorts by recent activity
+by default; `--sort created` restores creation order.
 
-`hlao status` probes an existing supervisor and `--start` opts into autostart. `hlao logs` reads
+`hlao status` probes an existing supervisor and `--start` opts into autostart. A previous
+supervisor that stopped answering is recorded: `status` and `doctor` report the old pid, and
+the next autostarting command prints one warning. Its live table and retained history are lost;
+HLAO does not claim to recover them. `hlao logs` reads
 `supervisor.log` directly (rotated at 2 MiB while running, with one previous file) and can
 follow it. `agents`, `config`, and `doctor` are local reads; only `doctor --start` starts a
 supervisor and `doctor --probe` starts adapters. A long `--wait` prints a progress line on a
@@ -225,7 +229,10 @@ Provider-native modes are a separate layer. `hlao spawn claude ... --mode auto` 
 session in the adapter's Auto mode; `hlao mode <id>` lists the modes and `hlao mode <id> auto`
 switches a live one. In Claude Code these are Manual, Accept edits, Plan, Auto, and (where
 allowed) Bypass permissions. Using a provider mode is the way to stop the provider from
-asking at the source; the HLAO policy is the guarantee that a request cannot silently hang.
+asking at the source. The HLAO policy makes a request visible and answerable; `ask` parks the
+session until an operator or another session answers, so an unattended `ask` session can
+wait indefinitely. Use `wait --until permission` in a notification loop when you need an
+alert rather than a quiet gate.
 
 Provider config options are a third layer: model, reasoning effort, and adapter-specific
 settings. `hlao option <id>` lists them and `hlao option <id> model opus` sets one;
@@ -255,14 +262,21 @@ is a usage artifact, not a context payload: it says to pass context verbatim or 
 and to reference files and images rather than shipping their bytes through the harness.
 
 The agent can run `hlao` from `PATH`, or `node "$HLAO_CLI"` when HLAO is not installed
-globally. A typical worker loop:
+globally. A worker runs one turn at a time. Inside a turn, use `read`, wait only on *other*
+sessions, and report a blocker in your final message. A self-send is a deferred next turn:
+omit `--wait`, finish the turn, and let the queued prompt run.
 
 ```bash
-hlao send --self "Check the log again." --wait --timeout 20m
 hlao read --since 42
-hlao wait --until permission --timeout 10m
+hlao wait <other-id> --until settled --timeout 10m
+hlao send --self "Check the log again."        # runs after this turn
 hlao send "$HLAO_PARENT_ID" "Blocked: the lock file is held by another worker."
 ```
+
+Do not run `send --self ... --wait` from inside a turn: the message queues behind the turn
+you are in, so the wait cannot finish. HLAO rejects that shape with `bad_request` and names
+the deferred form. A session parked on a permission request cannot run a command to answer
+itself; the operator or parent answers it.
 
 The worker can also scope a listing to its own job with `hlao list --mine`, and read the
 skill with `hlao skill` when it wants the full guidance rather than the pointer.
@@ -405,7 +419,7 @@ current version.
   judgement error reportable, recoverable, and not self-perpetuating.
 - Not a security boundary between cooperating agents. Visibility is a coordination rule.
   Any process with the runtime home and lock token can act as the operator.
-- Not a PTY fallback. v0.7 speaks ACP v1 only; a tool with no ACP adapter is out of scope
+- Not a PTY fallback. HLAO speaks ACP v1 only; a tool with no ACP adapter is out of scope
   until the optional PTY path from `STACK.md` is built.
 
 ## Development
