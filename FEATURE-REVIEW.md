@@ -244,11 +244,20 @@ The remaining work is grouped so each milestone has one design decision:
    N-14. Shipped.
 2. **0.9 — maintenance.** No new findings. Split oversized modules, remove duplication and
    dead code, prune this ledger, and keep every test green. No wire or behavior changes.
-3. **0.10 — safety and policy.** N-08 enforcement, N-10, N-11.
-4. **Resume.** P0-14 on its own; it needs ACP `session/load`/`resume` and a recovery contract.
-5. **Surfaces.** Dashboard/TUI/MCP over the 2.1 persistent streams, plus the 0.6 transport
+3. **0.10 — truth before features.** Finish the human/JSON truth pass and the agent-birth
+   corrections: the 0.10 review's R-01..R-09, R-13 (partial), R-26, R-28, R-30, R-31, and
+   the documentation half of R-14. Signal supervisor crashes; add no provider capabilities
+   and no new authority. See `docs/milestones/0.10.md`. This supersedes the earlier note
+   that safety moves to 0.10.
+4. **Provider-native state.** R-10..R-12 and the agent name/version half of R-13: advertise
+   and project ACP compaction, notices, plans, and inter-session messages.
+5. **Fleet observation and bulk operations.** R-15, R-17, R-18, R-22, R-23, R-25.
+6. **Safety and policy.** N-08 enforcement, N-10, N-11, and R-14's timeout/escalation. This
+   may move ahead of fleet observation if risk dominates.
+7. **Resume.** P0-14 on its own; it needs ACP `session/load`/`resume` and a recovery contract.
+8. **Surfaces.** Dashboard/TUI/MCP over the 2.1 persistent streams, plus the 0.6 transport
    policy work (opt-in loopback TCP, TLS/credential rules, WebSocket adapter).
-6. **1.0 — contract freeze.** Decide whether `--json=envelope` becomes the default, align the
+9. **1.0 — contract freeze.** Decide whether `--json=envelope` becomes the default, align the
    remaining inner JSON shapes, finish package/update metadata, and document the multi-instance
    ("project home") ergonomics.
 
