@@ -113,8 +113,10 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao help [command]` | Full help or one command's help. |
 | `hlao version` | Print the CLI version (`--json` for an object). |
 
-Global flags: `--json`, `--home DIR`, `--no-color`, `-h`; they may appear before or after a
-session command. `help` and `version` honor `--json` too: help returns
+Global flags: `--json`, `--json=envelope`, `--home DIR`, `--no-color`, `-h`; they may appear
+before or after a session command. The envelope wraps every success as
+`{ok:true,command,result}` and every error as `{ok:false,command,error}`; the default `--json`
+shapes are unchanged. `help` and `version` honor `--json` too: help returns
 `{topic, help}` and version returns `{version}`. `--` ends option parsing, so a message may
 start with a dash. Durations are `500ms`, `30s`, `5m`, `2h`, `1d`, or a bare millisecond count.
 Exit codes: `0` ok, `1` error, `2` a bounded wait expired (the work continues), `3` a `wait`

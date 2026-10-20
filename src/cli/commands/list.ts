@@ -18,6 +18,7 @@ import {
   out,
   sleepMs,
   writeJson,
+  writeJsonLine,
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
@@ -177,9 +178,10 @@ async function watchList(
       render.tree,
     );
     if (ctx.json) {
-      process.stdout.write(
-        `${JSON.stringify({ sessions, counts: instanceCounts(result.sessions) })}\n`,
-      );
+      writeJsonLine({
+        sessions,
+        counts: instanceCounts(result.sessions),
+      });
     } else {
       if (!first) {
         if (process.stdout.isTTY === true) {

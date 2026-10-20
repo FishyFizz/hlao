@@ -243,8 +243,14 @@ condition is now impossible, not that the command failed to run.
 ## `--json` output
 
 - Success: one JSON object, exactly the method's `result` (session views included).
+- `--json=envelope` (also `--json --json-envelope`) wraps success as
+  `{ ok: true, command, result }` and failure as `{ ok: false, command, error }`. `command` is
+  the top-level command (`config show` reports `config`). Streaming JSON wraps each document
+  the same way. It is incompatible with `--jsonl`, whose lines are events rather than command
+  results.
 - `help` returns `{topic, help}` and `version` returns `{version}` when `--json` is present;
-  `help` with no topic uses `topic: null`.
+  `help` with no topic uses `topic: null`. Under the envelope they become
+  `{ok:true,command:"help"|"version",result:{...}}`.
 - Failure: one JSON object `{ "ok": false, "error": { "code", "message", "details"? } }` on
   **stdout**, exit code `1`. Agents that capture stdout always see a parseable document.
 - Human mode writes errors to stderr.

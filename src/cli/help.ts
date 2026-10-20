@@ -59,6 +59,8 @@ Usage:
 
 Global options:
   --json                 machine output; errors are {"ok":false,"error":...}
+  --json=envelope        wrap success as {"ok":true,"command","result"} and
+                         errors as {"ok":false,"command","error"}; implies --json
   --home DIR             runtime home (default $HLAO_HOME or ~/.hlao)
   --no-color             disable ANSI colours (NO_COLOR also works)
   -h, --help             help

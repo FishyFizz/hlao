@@ -36,6 +36,7 @@ import {
   warnInert,
   withProgress,
   writeJson,
+  writeJsonLine,
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
@@ -299,6 +300,9 @@ export async function cmdExport(args: string[]): Promise<number> {
   if (ctx.json && booleanOption(parsed, "jsonl") === true) {
     throw usageError("choose --json or --jsonl");
   }
+  if (ctx.jsonEnvelope && booleanOption(parsed, "jsonl") === true) {
+    throw usageError("--json=envelope cannot be combined with --jsonl");
+  }
   const sessionId = resolveTarget(parsed, "export", "selfDefault");
   const raw = booleanOption(parsed, "raw") === true;
   const jsonl = booleanOption(parsed, "jsonl") === true;
@@ -424,6 +428,9 @@ export async function cmdRead(args: string[]): Promise<number> {
   }
   if (jsonl && ctx.json) {
     throw usageError("choose --json or --jsonl");
+  }
+  if (jsonl && ctx.jsonEnvelope) {
+    throw usageError("--json=envelope cannot be combined with --jsonl");
   }
   if (jsonl && outFile !== undefined) {
     throw usageError("--out cannot be combined with --jsonl");
@@ -587,7 +594,7 @@ async function followRead(
       }
     } else if (ctx.json) {
       // One complete page per line: a stream consumer can parse without framing.
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      writeJsonLine(result);
     } else if (first) {
       out(
         renderReadResult(result, ctx.style, "hlao", {

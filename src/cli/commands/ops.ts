@@ -43,6 +43,7 @@ import {
   out,
   sleepMs,
   writeJson,
+  writeJsonLine,
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
@@ -237,7 +238,7 @@ function emitLogLines(
 ): void {
   if (ctx.json) {
     for (const line of lines) {
-      process.stdout.write(`${JSON.stringify({ path: file, line })}\n`);
+      writeJsonLine({ path: file, line });
     }
     return;
   }

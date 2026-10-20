@@ -25,6 +25,7 @@ export const CLI_ENTRY = fileURLToPath(new URL("../cli.js", import.meta.url));
 
 export const COMMON: OptionSpec[] = [
   { name: "json", type: "boolean" },
+  { name: "json-envelope", type: "boolean" },
   { name: "home", type: "path", valueName: "DIR" },
   { name: "help", short: "h", type: "boolean" },
   { name: "no-color", type: "boolean" },
@@ -35,17 +36,37 @@ export interface CommandContext {
   callerSessionId: string | null;
   cliPath: string;
   json: boolean;
+  jsonEnvelope: boolean;
   style: Style;
+}
+
+let jsonEnvelope = false;
+let jsonCommand = "hlao";
+
+/** Records the command name for `--json=envelope`. */
+export function configureJsonEnvelope(command: string): void {
+  jsonCommand = command;
+}
+
+/** Set before dispatch so even errors and help/version honor the flag. */
+export function setJsonEnvelope(enabled: boolean): void {
+  jsonEnvelope = enabled;
 }
 
 export function contextFrom(parsed: ParsedArgs): CommandContext {
   const json = booleanOption(parsed, "json") ?? false;
+  const envelope = booleanOption(parsed, "json-envelope") ?? false;
+  if (envelope && !json) {
+    throw usageError("--json-envelope requires --json (or use --json=envelope)");
+  }
+  jsonEnvelope = envelope;
   const noColor = booleanOption(parsed, "no-color") ?? false;
   return {
     home: resolveHome(stringOption(parsed, "home"), process.env),
     callerSessionId: process.env.HLAO_SESSION_ID?.trim() || null,
     cliPath: CLI_ENTRY,
     json,
+    jsonEnvelope: envelope,
     style: createStyle(colorsEnabled(json) && !noColor),
   };
 }
@@ -190,7 +211,38 @@ export function out(line: string): void {
 }
 
 export function writeJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  const payload = jsonEnvelope
+    ? { ok: true, command: jsonCommand, result: value }
+    : value;
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+/** One JSON document per line, envelope-aware (watch/follow streams). */
+export function writeJsonLine(value: unknown): void {
+  const payload = jsonEnvelope
+    ? { ok: true, command: jsonCommand, result: value }
+    : value;
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/** Error output for the envelope mode; the default error shape is unchanged. */
+export function writeJsonFailure(error: {
+  code: string;
+  message: string;
+  details?: unknown;
+}): void {
+  const payload = jsonEnvelope
+    ? { ok: false, command: jsonCommand, error }
+    : { ok: false, error };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+export function jsonEnvelopeEnabled(): boolean {
+  return jsonEnvelope;
+}
+
+export function jsonCommandName(): string {
+  return jsonCommand;
 }
 
 export function styleHint(ctx: CommandContext, text: string): string {

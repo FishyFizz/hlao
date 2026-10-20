@@ -38,6 +38,9 @@
   loop; `--all` includes retained histories.
 - `permit --all-pending` answers every parked request, reporting per-session failures without
   stopping the rest.
+- `--json=envelope` (ADR 0010) wraps any command's success as
+  `{ok:true,command,result}` and failure as `{ok:false,command,error}`. Streaming JSON wraps
+  each line; `--jsonl` is excluded. Default `--json` shapes are unchanged.
 
 ### Fixed
 

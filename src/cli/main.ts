@@ -42,8 +42,11 @@ import {
 import {
   CLI_ENTRY,
   COMMON,
+  configureJsonEnvelope,
   renderError,
+  setJsonEnvelope,
   writeJson,
+  writeJsonFailure,
 } from "./context.js";
 import {
   commandHelp,
@@ -52,12 +55,19 @@ import {
 } from "./help.js";
 
 export async function main(argv: string[]): Promise<number> {
-  const endOfOptions = argv.indexOf("--");
-  const jsonRequested = (
-    endOfOptions === -1 ? argv : argv.slice(0, endOfOptions)
-  ).includes("--json");
+  // `--json=envelope` is accepted anywhere before `--` and expands to the
+  // boolean pair the option parser understands.
+  const normalized = argv.flatMap((token) =>
+    token === "--json=envelope" ? ["--json", "--json-envelope"] : [token],
+  );
+  const endOfOptions = normalized.indexOf("--");
+  const beforeEnd =
+    endOfOptions === -1 ? normalized : normalized.slice(0, endOfOptions);
+  const jsonRequested = beforeEnd.includes("--json");
+  const envelopeRequested = beforeEnd.includes("--json-envelope");
+  setJsonEnvelope(envelopeRequested);
   try {
-    const { rest, injected } = splitLeadingGlobals(argv);
+    const { rest, injected } = splitLeadingGlobals(normalized);
     const first = rest[0];
     if (first === "__supervisor") {
       const parsed = parseArgs([...rest.slice(1), ...injected], COMMON);
@@ -66,8 +76,12 @@ export async function main(argv: string[]): Promise<number> {
     }
 
     if (first === undefined || first === "--help" || first === "-h") {
-      if (jsonRequested) writeJson({ topic: null, help: fullHelp() });
-      else process.stdout.write(`${fullHelp()}\n`);
+      if (jsonRequested) {
+        configureJsonEnvelope("help");
+        writeJson({ topic: null, help: fullHelp() });
+      } else {
+        process.stdout.write(`${fullHelp()}\n`);
+      }
       return 0;
     }
     if (first === "help") {
@@ -79,16 +93,25 @@ export async function main(argv: string[]): Promise<number> {
       }
       const text = topic ? commandHelp(topic) : fullHelp();
       const json = booleanOption(parsed, "json") ?? jsonRequested;
-      if (json) writeJson({ topic: topic ?? null, help: text });
-      else process.stdout.write(`${text}\n`);
+      if (json) {
+        configureJsonEnvelope("help");
+        writeJson({ topic: topic ?? null, help: text });
+      } else {
+        process.stdout.write(`${text}\n`);
+      }
       return 0;
     }
     if (first === "version" || first === "--version" || first === "-v") {
-      if (jsonRequested) writeJson({ version: VERSION });
-      else process.stdout.write(`hlao ${VERSION}\n`);
+      if (jsonRequested) {
+        configureJsonEnvelope("version");
+        writeJson({ version: VERSION });
+      } else {
+        process.stdout.write(`hlao ${VERSION}\n`);
+      }
       return 0;
     }
 
+    configureJsonEnvelope(first);
     const args = [...rest.slice(1), ...injected];
     switch (first) {
       case "spawn":
@@ -145,13 +168,10 @@ export async function main(argv: string[]): Promise<number> {
   } catch (error) {
     const converted = toHlaoError(error);
     if (jsonRequested) {
-      writeJson({
-        ok: false,
-        error: {
-          code: converted.code,
-          message: converted.message,
-          ...(converted.details !== undefined ? { details: converted.details } : {}),
-        },
+      writeJsonFailure({
+        code: converted.code,
+        message: converted.message,
+        ...(converted.details !== undefined ? { details: converted.details } : {}),
       });
     } else {
       process.stderr.write(renderError(converted));
@@ -169,7 +189,7 @@ function splitLeadingGlobals(argv: string[]): { rest: string[]; injected: string
   let index = 0;
   while (index < argv.length) {
     const token = argv[index]!;
-    if (token === "--json") {
+    if (token === "--json" || token === "--json-envelope") {
       injected.push(token);
       index += 1;
       continue;
