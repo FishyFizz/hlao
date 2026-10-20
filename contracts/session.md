@@ -169,8 +169,11 @@ export class Session {
    POSIX the adapter is spawned detached and its whole process group is signaled, so tools it
    started do not outlive it; on Windows the existing `taskkill /T` path is unchanged.
 5. **Permission requests are data.** An unanswered request appears in `view()` and produces
-   `permission.requested`; it blocks only that session's turn. The policy is `allow` by
-   default, `ask` opt-in, and `permit(..., always)` can switch a live session to `allow`.
+   `permission.requested`; it blocks only that session's turn. A provider can also ask
+   outside a prompt turn (an autonomous cycle); such a request is surfaced and answered the
+   same way, and its events carry `turn: null` and `data.outsideTurn: true`. The policy is
+   `allow` by default, `ask` opt-in, and `permit(..., always)` can switch a live session to
+   `allow`.
 6. **Provider modes and config options are data.** `view().modes` and `view().configOptions`
    report what the adapter advertises; setters change them and record the actor.
 7. **Names are labels.** `setName` changes `name` and emits an event; the handle, addressing,

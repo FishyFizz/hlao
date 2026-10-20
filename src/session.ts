@@ -1164,16 +1164,21 @@ export class Session {
   #onPermission(
     params: RequestPermissionRequest,
     requestId: string,
+    signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
     if (this.isTerminal || this.#closing || this.#cancelling) {
       return Promise.resolve(cancelledResponse());
     }
-    // A permission request is meaningful only while a prompt turn is active.
-    // A late request after a failed or finished turn must not resurrect a
-    // waiting_permission state.
-    if (!this.#active) {
+    if (signal.aborted) {
       return Promise.resolve(cancelledResponse());
     }
+    // A request is live work even when no prompt turn owns it. Claude Code can
+    // run an autonomous cycle after a turn's result (a background-task
+    // notification, a peer message), and its tool calls still ask for
+    // permission; answering `cancelled` there aborts the tool call with
+    // "Tool use aborted" without ever surfacing the request. So answer it like
+    // any other request. Its events carry `turn: null` and, under `ask`, the
+    // session parks in `waiting_permission` until someone answers.
     if (this.#pending) {
       this.#emit("error", {
         message: "a second permission request arrived while one was pending",
@@ -1195,6 +1200,9 @@ export class Session {
       })),
       policy: this.#permissionPolicy,
       auto,
+      // True when the request belongs to work no prompt turn owns, such as an
+      // autonomous cycle. The request is still answered; the flag is diagnostic.
+      outsideTurn: this.#active === null,
     });
 
     const policyChoice = chooseByPolicy(params.options, this.#permissionPolicy);
@@ -1218,7 +1226,29 @@ export class Session {
     }
 
     return new Promise<RequestPermissionResponse>((resolve) => {
-      this.#pending = { requestId, requestedAt: nowIso(), request: params, resolve };
+      // The provider withdraws a request it no longer needs, for example when
+      // it abandons the tool call. The ACP connection aborts this signal on
+      // `$/cancel_request`; clearing the pending state keeps an operator from
+      // answering a request that no longer exists.
+      const onWithdraw = (): void => {
+        if (this.#pending?.requestId !== requestId) return;
+        this.#clearPending("withdrawn", "agent");
+      };
+      const settle = (response: RequestPermissionResponse): void => {
+        signal.removeEventListener("abort", onWithdraw);
+        resolve(response);
+      };
+      this.#pending = {
+        requestId,
+        requestedAt: nowIso(),
+        request: params,
+        resolve: settle,
+      };
+      signal.addEventListener("abort", onWithdraw, { once: true });
+      if (signal.aborted) {
+        this.#clearPending("withdrawn", "agent");
+        return;
+      }
       this.#status = "waiting_permission";
       this.#changed();
     });
@@ -1367,8 +1397,8 @@ export class Session {
       .onNotification("session/update", ({ params }) => {
         this.#onUpdate(params);
       })
-      .onRequest("session/request_permission", ({ params, requestId }) =>
-        this.#onPermission(params, String(requestId)),
+      .onRequest("session/request_permission", ({ params, requestId, signal }) =>
+        this.#onPermission(params, String(requestId), signal),
       );
 
     this.#conn = app.connect(stream);

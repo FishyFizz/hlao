@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   Harness,
+  waitFor,
   type GetValue,
   type JsonError,
   type PermitValue,
@@ -320,6 +321,144 @@ test("permit --always switches the session policy and stops future prompts", asy
   assert.equal(second.code, 0);
   assert.equal(second.value.text, "permission: allow");
   assert.equal(second.value.session.pendingPermission, null);
+});
+
+test("an out-of-turn permission request is answered instead of cancelling the tool call", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "run",
+    "--env",
+    "FAKE_MODE=permission-after-turn",
+    "--permission",
+    "allow",
+    "--wait",
+  ]);
+  const id = spawned.value.session.id;
+
+  await waitFor(async () => {
+    const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
+    return read.value.events.some(
+      (event) =>
+        event.type === "agent.message" &&
+        event.data.text === "late permission: allow",
+    );
+  }, "the agent's late permission to be answered");
+
+  const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
+  const requested = read.value.events.find(
+    (event) => event.type === "permission.requested",
+  );
+  assert.ok(requested, "permission.requested was emitted");
+  assert.equal(requested?.data.auto, true);
+  assert.equal(requested?.data.outsideTurn, true);
+  const resolved = read.value.events.find(
+    (event) => event.type === "permission.resolved",
+  );
+  assert.equal(resolved?.data.by, "policy:allow");
+});
+
+test("ask policy surfaces an out-of-turn permission for the operator", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "run",
+    "--env",
+    "FAKE_MODE=permission-after-turn",
+    "--permission",
+    "ask",
+    "--wait",
+  ]);
+  const id = spawned.value.session.id;
+
+  const waited = await harness.json<WaitValue>([
+    "wait",
+    id,
+    "--until",
+    "permission",
+    "--timeout",
+    "10s",
+  ]);
+  assert.equal(waited.code, 0);
+  assert.equal(waited.value.session.status, "waiting_permission");
+  assert.equal(
+    waited.value.session.pendingPermission?.title,
+    "Run the late build",
+  );
+
+  const permitted = await harness.json<PermitValue>(["permit", id, "--allow"]);
+  assert.equal(permitted.value.optionId, "allow");
+
+  await waitFor(async () => {
+    const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
+    return read.value.events.some(
+      (event) =>
+        event.type === "agent.message" &&
+        event.data.text === "late permission: allow",
+    );
+  }, "the agent's late permission to be answered");
+});
+
+test("a provider-withdrawn permission clears its pending state", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const spawned = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "run",
+    "--env",
+    "FAKE_MODE=permission-withdrawn",
+    "--permission",
+    "ask",
+  ]);
+  const id = spawned.value.session.id;
+
+  const waited = await harness.json<WaitValue>([
+    "wait",
+    id,
+    "--until",
+    "permission",
+    "--timeout",
+    "10s",
+  ]);
+  assert.equal(waited.code, 0);
+  assert.equal(
+    waited.value.session.pendingPermission?.title,
+    "Run the withdrawn build",
+  );
+
+  await waitFor(async () => {
+    const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
+    return read.value.events.some(
+      (event) =>
+        event.type === "permission.resolved" &&
+        event.data.reason === "withdrawn",
+    );
+  }, "the provider to withdraw its permission request");
+
+  const after = await harness.json<GetValue>(["get", id]);
+  assert.equal(after.value.session.pendingPermission, null);
+
+  const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
+  const resolved = read.value.events.find(
+    (event) => event.type === "permission.resolved",
+  );
+  assert.equal(resolved?.data.by, "agent");
+  assert.equal(resolved?.data.reason, "withdrawn");
+  assert.ok(
+    read.value.events.some(
+      (event) =>
+        event.type === "agent.message" &&
+        event.data.text === "permission: withdrawn",
+    ),
+  );
 });
 
 test("permit without a pending request is a typed error", async (t) => {

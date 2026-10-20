@@ -29,6 +29,10 @@
 
 ### Fixed
 
+- A permission request raised outside a prompt turn — an autonomous cycle such as a
+  background-task notification — is now surfaced and answered instead of cancelled.
+  Cancelling it aborted the provider's tool call with
+  `Tool permission request failed: Error: Tool use aborted`.
 - Piping `read --jsonl` or `export --jsonl` to a reader that exits early (`| head`) no longer
   crashes with an unhandled EPIPE; the CLI ends output quietly.
 - `read --jsonl --jsonl-page` now emits its page metadata line without requiring `--follow`.

@@ -39,7 +39,8 @@ answer them, and they must never be invisible. Only the default and the escape h
   `permission.requested`, and `wait --until permission`.
 - Policy `allow` (default) answers with the first allow option and records
   `permission.resolved { by: "policy:allow" }`.
-- Policy `ask` stores the request, surfaces it, and blocks the ACP turn until answered.
+- Policy `ask` stores the request, surfaces it, and blocks the ACP turn — or, for a request
+  raised outside a turn, parks the session in `waiting_permission` — until answered.
 - Policy `deny` answers with a reject option.
 - `hlao permit` answers with an explicit option; `--allow`/`--deny` pick the first compatible
   kind, `--option ID` names one, and `--always` also switches the session policy to allow.

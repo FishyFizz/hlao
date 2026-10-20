@@ -214,6 +214,86 @@ const app = agent({ name: "fake-acp" })
       return { stopReason: stop };
     }
 
+    if (mode === "permission-after-turn") {
+      // Model work that outlives the prompt: an autonomous cycle (a
+      // background-task notification, a peer message) still runs tool calls
+      // that need permission after the prompt's result is delivered.
+      await message("turn done");
+      setTimeout(() => {
+        void (async () => {
+          await send({
+            sessionUpdate: "tool_call",
+            toolCallId: "call-late",
+            title: "Run the late build",
+            kind: "execute",
+            status: "pending",
+          });
+          const response = await client.request("session/request_permission", {
+            sessionId,
+            toolCall: {
+              toolCallId: "call-late",
+              title: "Run the late build",
+              kind: "execute",
+              status: "pending",
+            },
+            options: [
+              { optionId: "allow", name: "Allow once", kind: "allow_once" },
+              { optionId: "allow-always", name: "Always", kind: "allow_always" },
+              { optionId: "reject", name: "Reject", kind: "reject_once" },
+            ],
+          });
+          const outcome = response.outcome;
+          await message(
+            outcome.outcome === "selected"
+              ? `late permission: ${outcome.optionId}`
+              : "late permission: cancelled",
+            "m2",
+          );
+        })();
+      }, 60);
+      return { stopReason: "end_turn" };
+    }
+
+    if (mode === "permission-withdrawn") {
+      await send({
+        sessionUpdate: "tool_call",
+        toolCallId: "call-withdrawn",
+        title: "Run the withdrawn build",
+        kind: "execute",
+        status: "pending",
+      });
+      const controller = new AbortController();
+      const response = client
+        .request(
+          "session/request_permission",
+          {
+            sessionId,
+            toolCall: {
+              toolCallId: "call-withdrawn",
+              title: "Run the withdrawn build",
+              kind: "execute",
+              status: "pending",
+            },
+            options: [
+              { optionId: "allow", name: "Allow once", kind: "allow_once" },
+              { optionId: "allow-always", name: "Always", kind: "allow_always" },
+              { optionId: "reject", name: "Reject", kind: "reject_once" },
+            ],
+          },
+          { cancellationSignal: controller.signal },
+        )
+        .catch(() => null);
+      setTimeout(() => controller.abort(), 500);
+      const settled = await response;
+      await message(
+        settled?.outcome.outcome === "selected"
+          ? `permission: ${settled.outcome.optionId}`
+          : "permission: withdrawn",
+        "m2",
+      );
+      return { stopReason: "end_turn" };
+    }
+
     if (mode === "permission-then-fail") {
       await send({
         sessionUpdate: "tool_call",
