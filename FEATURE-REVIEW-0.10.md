@@ -941,7 +941,7 @@ unless noted.
 |---|---|---|
 | Closed session says “is closing” indefinitely | `send q0dgt4` after `close` → `session q0dgt4 is closing`; `list`/`get` say `closed` | Use `closed` for terminal, reserve `closing` for an in-flight close (`src/session.ts:894,907,937,972`) |
 | Missing-argument grammar | `spawn` with no args → `spawn expects at least 1 positional arguments` | “at least 1 positional argument” or “a backend” (`src/cli/args.ts:169`) |
-| `down` singular grammar | `stopping closes 1 live session and discards their in-memory history` | “its” for one; list the session names or suggest `--dry-run` |
+| `down` grammar/wording | `stopping closes 1 live session and discards their in-memory history`; with live and retained rows it says `… history and discards 2 retained session histories` | “its” for one; avoid the repeated “and discards”; list the session names or suggest `--dry-run` |
 | Duplicated config path | `C:\…\config.json: cannot parse C:\…\config.json: …` | Let the inner error omit the filename |
 | `send --wait` timeout wording | `busy — the message is still queued behind turn 1`, exit 2, no “timed out” | Say “wait timed out after 1s”; include the message id |
 | `wait` timeout rounding | `within 999ms` for `--timeout 1s` | Format with the requested unit or round up |
