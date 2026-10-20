@@ -18,6 +18,8 @@ surfaces. This file is the map between them and the code.
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
   ACP agent, including the acceptance assemblies and a raw-NDJSON conformance test that never
   invokes the CLI.
+- **Next:** 0.11 provider-native state is planned in `docs/milestones/0.11.md`; the dashboard
+  wire-readiness assessment is `docs/protocol-stability.md`.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through
   `wait --until permission`, resumed after `hlao permit`, and — from inside its own shell —

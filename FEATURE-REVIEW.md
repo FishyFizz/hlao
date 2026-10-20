@@ -397,7 +397,7 @@ The remaining work is grouped so each milestone has one design decision:
    here. See `docs/milestones/0.10.md`.
 4. **0.11 — provider-native state.** R-10..R-12 and the R-13 residual: advertise and project
    ACP compaction, notices, plans, titles, and inter-session messages. This is the only
-   remaining ACP-capability decision.
+   remaining ACP-capability decision. See `docs/milestones/0.11.md`.
 5. **0.12 — fleet observation and bulk operations.** R-15, R-17, R-18, R-21, R-22, R-23, R-25,
    R-29.
 6. **Safety and policy.** N-08 enforcement, N-10, N-11, and R-14's mechanism. This may move

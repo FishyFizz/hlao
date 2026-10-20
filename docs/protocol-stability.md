@@ -1,0 +1,159 @@
+# Protocol stability for a dashboard client
+
+**Evaluated:** 2026-10-20, HLAO 0.10.0, wire protocol 2.4.
+**Question:** is the current frame protocol stable enough to start a dashboard side project?
+**Verdict:** **Yes, with a versioned, capability-aware client.** The frame format, persistent
+stream, subscriptions, view/event notifications, and resume cursors are implemented, documented,
+and exercised by the raw-client tests. A dashboard can start now. Three conditions matter:
+
+1. Require wire **major 2** and feature-detect capabilities; do not key behavior off the
+   package version or a minor number.
+2. Use a **local process** (Node/Tauri/Electron) that can open the named pipe/Unix socket and
+   read the token. A browser needs a local frame bridge; it must never receive the supervisor
+   token.
+3. Treat event `data` as an open object and leave UI space for the provider-state fields 0.11
+   will add (compaction, plan, title, agent identity).
+
+## What is stable
+
+- **Frame contract.** One JSON object per frame, ordered, reliable, bidirectional, boundaries
+  preserved, bounded at 16 MiB per request. NDJSON for byte-stream transports. The contract is
+  `contracts/stream.md`; the transport seam is `src/stream.ts`. The protocol is defined over
+  frames, not over the socket, so a future WebSocket/bridge adapter does not change methods.
+- **Versioning.** `hello.protocolVersion` is `{major, minor}`. Major equality is required;
+  minor additions are backward-compatible; `hello.capabilities` is the feature-detect list.
+  The current major has been 2 since 0.4/2.0; 2.1 added persistent streams, 2.2 settled waits
+  and view fields, 2.3 message identity/idempotency/provenance, 2.4 crash and injection
+  metadata. Every addition was optional.
+- **Persistent streams.** `hello` with `stream: {persistent: true}` opens a multiplexed
+  connection. Requests carry a client-chosen `id`; responses echo it. The server may send
+  notification frames. The legacy one-request-per-connection path remains, so a dashboard can
+  fall back to polling if it meets an older supervisor.
+- **Subscriptions.** `stream.subscribe`:
+  - `fleet: true` reports a `SessionView` for every session, including new sessions, and emits
+    `kind: "session.removed"` exactly once when a session leaves the live table (forget or
+    retention expiry).
+  - `sessionIds` (1..100 per subscription) streams batched events for those sessions, with a
+    per-session cursor and a `truncated` flag.
+  - A subscription can do both. At most 64 subscriptions and 64 in-flight requests per
+    connection.
+  - The initial result includes current views, cursors, and ids whose history was evicted.
+- **Live state.** `SessionView` is the state projection: status, turn, queue depth, settled,
+  pending permission, policy, modes, config options, usage/cost, last event, and lineage. View
+  notifications are full `SessionView` objects, JSON-diffed server-side; the first notification
+  after a reconnect is a full view, so replacing local state is safe.
+- **Events.** `EventView` has `seq`, `at`, `type`, `turn`, and `data`. The event-type taxonomy
+  is documented. Event notifications are batched (up to 200 events per page, up to 4 pages per
+  session per flush), carry the last delivered cursor, and report truncation.
+- **Resume.** Pass the last cursor as `since` on `stream.subscribe` (and `stream.resume` is a
+  capability). If history was evicted before the cursor, the initial result and event
+  notification set `truncated`; the client resumes from `earliestRetainedSeq`.
+- **Backpressure.** The supervisor closes a consumer that lets more than 8 MiB sit in its
+  outbound buffer. This is deliberate: a slow client is disconnected, not allowed to block the
+  session table; it reconnects and resumes. Rule: never treat a stream close as data loss until
+  resume reports truncation.
+- **Control surface.** A dashboard can perform every orchestration operation the CLI does
+  through the wire: spawn, send, cancel, close, permit, mode, policy, config options, queue,
+  rename, read, wait, list, get, export via paging, reload, shutdown, and backend listing.
+  Client-only assemblies (`find`, bulk selectors, `@last`) remain client loops. Local
+  diagnostics (`logs`, `config show`, `skill`, `doctor`) are CLI-local; `hello`,
+  `backends.list`, and `reload` are on the wire.
+
+## What is tested, and what is only contracted
+
+The raw-client tests (`tests/e2e/persistent-stream.test.ts`, `protocol-client.test.ts`,
+`wire-contract.test.ts`) cover:
+
+- persistent handshake and capability advertisement;
+- multiplexed requests and the 64-request in-flight cap;
+- fleet + session subscription, initial views/cursors, event history, event batches with
+  cursors, session view notifications, `session.removed` on forget, and unsubscribe;
+- the legacy one-request path;
+- wire validation and error envelopes.
+
+Contract statements that a dashboard should treat as dependencies and test in its own client:
+
+- automatic `session` view notification for a **new** session in a fleet scope;
+- `session.removed` on **retention expiry** (the forget path is tested);
+- reconnect + `since` resume after a backpressure close;
+- `truncated` resumption from `earliestRetainedSeq`;
+- multiple concurrent subscriptions on one connection;
+- notification/response interleaving order (do not assume an order; make state application
+  idempotent).
+
+These are implemented in `#flush`/`#subscribe`, but the dashboard's reconnect and truncation
+handling should be exercised against a slow/stalled consumer before it is trusted.
+
+## Recommended dashboard shape
+
+1. **Startup:** read `<HLAO_HOME>/supervisor.json` (endpoint + token) or ask the operator for
+   the home. Call `hello` without persistence first; require `protocolVersion.major === 2`,
+   and check `stream.persistent`, `stream.subscribe`, and `stream.resume` before using push.
+2. **Persistent connection:** call `hello` again with `stream: {persistent: true}` (or send the
+   persistent hello first if the supervisor is known to be 2.1+).
+3. **Subscriptions:**
+   - one `fleet: true` subscription for the session list/state;
+   - one `sessionIds: [...]` subscription for the session(s) whose transcript is on screen.
+     A fleet-only subscription does not stream events. When the fleet reports a new session and
+     the user selects it, add it to the event subscription by resubscribing (there is no
+     "update subscription" method; unsubscribe and subscribe with the new id set, passing the
+     current cursors).
+4. **State:** apply full `SessionView` notifications by id. Apply event batches by appending to
+   the per-session log; advance the cursor to `notification.cursor`. Ignore duplicate or
+   out-of-order events by seq. A response and a notification describing the same change may
+   arrive in either order.
+5. **Reconnect:** on close, reconnect with backoff, call `hello`, resubscribe with the last
+   cursors, and replace views from the initial result. If `truncated` is set, mark the missing
+   range in the transcript rather than pretending the history is complete.
+6. **Rendering:** render known event types; fall back to a generic `type · title/preview` row
+   for unknown types. Do not require `data.raw`; `--raw`-style payloads are a debug path, not a
+   UI contract. Treat `EventView.data` as `Record<string, unknown>` and ignore unknown fields.
+7. **Auth/transport:** a local app may hold the token. A browser must use a local bridge that
+   speaks frames and authenticates its own UI; do not put the supervisor token in a page, and
+   do not build a second semantic protocol. The network transport policy (TLS, credentials,
+   WebSocket) is not shipped; local IPC is the supported dashboard transport today.
+8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
+   `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`, and the 0.11
+   provider-state capabilities when they appear. A missing capability means "render the old
+   view", not "fail the dashboard".
+
+## Known gaps and how to handle them now
+
+- **No fleet-wide event stream.** `fleet` is views only. Use the two-subscription pattern
+  above. The 100-id-per-subscription limit is fine for a single-screen dashboard; a very large
+  fleet needs multiple subscriptions or a selected-session view. A fleet event scope is a
+  candidate for the fleet-observation milestone (R-15/0.12), not a blocker.
+- **Provider-native state is lossy today.** Compaction is stored as `{}`, plan deltas render as
+  bare `plan.update`, provider titles are not in `SessionView`, provider agent name/version are
+  not in the view, and ACP inter-session messages become `raw`. A dashboard can ship the basic
+  session/transcript view now; 0.11 is planned to make these first-class (R-10–R-13).
+  Leave optional UI slots for them rather than parsing `raw`.
+- **No wire `logs`/`config show`/`find`/`usage` aggregation.** These are CLI-local or client
+  assemblies. A dashboard that needs supervisor logs must read the file locally (as `hlao logs`
+  does) or wait for a wire method; do not infer them from events. Usage per session is in
+  `SessionView`; per-job aggregation is R-23.
+- **No heartbeat.** Local IPC closes reliably when the supervisor dies; a bridge over a
+  network transport should add its own heartbeat above the frame layer. The wire itself adds no
+  timer, by design.
+- **Loose event payloads.** `EventView.data` is untyped and provider updates can be
+  experimental. The dashboard must be defensive: known `type` + optional fields, generic
+  fallback, no assumptions about `_meta` or content-block shape.
+- **Token is full operator authority.** Never expose `supervisor.json` or the token to a web
+  origin. A dashboard bridge should have its own auth and should forward frames, not reimplement
+  semantics (ADR 0009).
+
+## Go/no-go checklist
+
+- [ ] Client requires `hello.protocolVersion.major === 2`.
+- [ ] Client checks `stream.persistent`, `stream.subscribe`, `stream.resume` before push.
+- [ ] Fleet subscription drives the session list; a per-session subscription drives the
+      transcript; new sessions are added by resubscribing.
+- [ ] Reconnect + `since` resume is implemented and tested against a closed stream.
+- [ ] `truncated` is surfaced in the transcript, not hidden.
+- [ ] Unknown event types and fields have a generic fallback.
+- [ ] The token never reaches a browser origin.
+- [ ] The UI has optional slots for compaction, plan, title, and agent identity.
+
+**Conclusion:** the dashboard can start now against wire major 2 with capability detection.
+0.11's provider-state additions are additive and will enrich the same views; they do not require
+a protocol break or a second surface.
