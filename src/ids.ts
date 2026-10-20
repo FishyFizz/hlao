@@ -2,7 +2,7 @@ import { randomInt } from "node:crypto";
 
 /** Crockford-style alphabet: digits plus letters with i, l, o, u removed. */
 export const SESSION_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
-export const SESSION_ID_LENGTH = 6;
+const SESSION_ID_LENGTH = 6;
 
 const SESSION_ID_PATTERN = /^[0-9abcdefghjkmnpqrstvwxyz]{6}$/;
 

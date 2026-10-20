@@ -3,12 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Harness } from "./harness.js";
-
-interface DoctorValue {
-  ok: boolean;
-  checks: { name: string; status: "ok" | "warn" | "fail"; detail: string }[];
-}
+import { Harness, type DoctorValue } from "./harness.js";
 
 test("doctor keeps its JSON shape when project config is invalid", async (t) => {
   const harness = new Harness();

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { QueueDropResult, QueueResult } from "../../src/protocol.js";
 import {
   Harness,
   type JsonError,
@@ -9,29 +10,8 @@ import {
   type WaitValue,
 } from "./harness.js";
 
-interface QueueValue {
-  session: { id: string; queued: number };
-  active: {
-    position: null;
-    textPreview: string;
-    from: string;
-    turn: number | null;
-  } | null;
-  queue: {
-    position: number | null;
-    textPreview: string;
-    textLength: number;
-    from: string;
-    queuedMs: number;
-    turn: number | null;
-  }[];
-}
-
-interface QueueDropValue {
-  session: { id: string; queued: number };
-  dropped: { position: number | null; textPreview: string };
-  discarded: number;
-}
+type QueueValue = QueueResult;
+type QueueDropValue = QueueDropResult;
 
 async function spawnParent(
   harness: Harness,
@@ -48,15 +28,6 @@ async function spawnParent(
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;
   return { id, env: { HLAO_SESSION_ID: id, HLAO_NAME: name } };
-}
-
-async function waitForBusy(harness: Harness, id: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const read = await harness.json<ReadValue>(["read", id]);
-    if (read.value.session.status === "busy") return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`session ${id} never became busy`);
 }
 
 test("policy reads and writes live state and records the actor", async (t) => {
@@ -174,7 +145,7 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
     "FAKE_MODE=never",
   ], { env: parent.env });
   const activeId = active.value.session.id;
-  await waitForBusy(harness, activeId);
+  await harness.waitForSession(activeId, "busy");
   const cancelled = await harness.json<{ discarded: number }>(
     ["cancel", activeId],
     { env: parent.env },
@@ -294,7 +265,7 @@ test("queue inspection, drop, and keep-queue cancel", async (t) => {
   ]);
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;
-  await waitForBusy(harness, id);
+  await harness.waitForSession(id, "busy");
 
   const first = await harness.json(["send", id, "first queued"]);
   assert.equal(first.code, 0);

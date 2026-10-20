@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   Harness,
+  waitFor,
   type ListValue,
   type SpawnValue,
   type WaitValue,
@@ -18,12 +19,12 @@ async function spawn(
 }
 
 async function waitForPending(harness: Harness, count: number): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const listed = await harness.json<ListValue>(["list", "--pending"]);
-    if (listed.value.sessions.length >= count) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`expected ${count} pending permissions`);
+  await waitFor(
+    async () =>
+      (await harness.json<ListValue>(["list", "--pending"])).value.sessions
+        .length >= count,
+    `${count} pending permissions`,
+  );
 }
 
 test("wait and get select whole sets without collecting ids", async (t) => {
@@ -127,14 +128,13 @@ test("cancel --root --wait stops a whole set and confirms settlement", async (t)
   await harness.json(["send", one, "go"]);
   await harness.json(["send", two, "go"]);
 
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  await waitFor(async () => {
     const listed = await harness.json<ListValue>(["list"]);
     const busy = listed.value.sessions.filter(
       (session) => session.status === "busy",
     );
-    if (busy.length >= 2) break;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+    return busy.length >= 2;
+  }, "two busy sessions");
 
   const cancelled = await harness.json<{
     count: number;

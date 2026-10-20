@@ -4,8 +4,6 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { HlaoError } from "./errors.js";
 
-export const IPC_PROTOCOL_VERSION = 1;
-
 /** Resolves the runtime home. `--home` wins; then HLAO_HOME; then ~/.hlao. */
 export function resolveHome(explicit?: string, env: NodeJS.ProcessEnv = process.env): string {
   const chosen = explicit ?? env.HLAO_HOME;

@@ -1,11 +1,12 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-20 after milestones 0.2 through 0.7.
+**Updated:** 2026-10-20 after milestones 0.2 through 0.8; 0.9 is a maintenance pass with no
+new findings.
 **Scope:** unresolved findings only. This is the long-standing ledger. The 0.1–0.4 review and
 the 0.5 review were merged here, resolved items were removed, and `FEATURE-REVIEW-0.5.md` was
 deleted after the merge. Shipped fixes are described in `docs/milestones/0.2.md` through
-`docs/milestones/0.7.md` and ADR 0005, ADR 0006, ADR 0007, ADR 0009, and ADR 0010.
+`docs/milestones/0.8.md` and ADR 0005, ADR 0006, ADR 0007, ADR 0009, and ADR 0010.
 
 The substrate is unchanged: five primitives, a per-user supervisor, a bounded cursor-addressed
 event log, identity at spawn, and one-shot waits. The gaps below are affordances around those
@@ -18,6 +19,14 @@ optional JSON envelope (protocol 2.2). None of that changes the primitive set.
 The 0.5 review's truthfulness P0s (dry-run, idle, export, down), the truth pass
 (list/read/help/sanitization/examples), and its job-shaped assemblies (wait/cancel/permit/policy
 selectors, `get`, `find`) landed in 0.7 and are not repeated here.
+
+0.8 resolved message identity and idempotency (N-07), onboarding at birth (N-12), POSIX
+process-group termination (N-14), the spawn requester record (part of N-08), live `whoami`
+and `list --mine` (P2-36, P2-0.5-26), a machine-readable cancelled outcome (P2-53), Windows
+shell-shim readiness (P2-0.5-3), partial text on timeout (P2-0.5-14), and the spawn-wait
+recovery hint (P2-0.5-22). Those entries were removed. Attachments and `--context`/`--ledger`
+(N-13) are closed by product decision: the prompt is the only context channel, and it carries
+verbatim text or references, never payloads.
 
 ---
 
@@ -50,86 +59,27 @@ table still owns identity.
 
 ### Agent trust, identity, and reliability (from the 0.5 review)
 
-#### N-07. `send` and `spawn` have no message identity or idempotency
+#### N-08. Control is advisory, not enforced
 
-`SendResult` reports a turn number but no message id. Queue items have position, sender,
-preview, and age, but no id; prompt events have text and sender but no id. A sender that does
-not use `--wait` cannot ask "did **my** message run, or is it still queued?" except by matching
-preview text. A client that times out after the supervisor enqueued a message and then retries
-can enqueue the same prompt twice; the same applies to `spawn` after a lost response.
-
-**Fix shape.** Add optional `messageId`/`idempotencyKey` to `sessions.send` and
-`sessions.spawn`, echo it in the result, the `prompt.sent`/`prompt.queued` events, and queue
-items; dedupe a repeated key for a bounded window in the live session. This is live-session
-state, not a store. `send` should return the id even when the message is queued.
-
-**Effort:** M.
-
-#### N-08. Attribution and control are advisory, not enforced
-
-The most important conceptual gap. Spawn has no actor: `session.created` records backend, cwd,
-name, mode, lineage, and policy, but not who requested the spawn. Caller identity is
-self-declared from `HLAO_SESSION_ID`; a spawned agent can unset it or read
+Caller identity is self-declared from `HLAO_SESSION_ID`; a spawned agent can unset it or read
 `<HLAO_HOME>/supervisor.json` and call the socket as the operator (`reload`, `shutdown`,
 `by: "operator"`). A session with `permissionPolicy: ask` can run `hlao policy --self allow` (or
-re-policy a sibling) and remove the gate. A stale-caller spawn silently becomes an unrelated
-root.
+re-policy a sibling) and remove the gate. 0.8 recorded `createdBy` on the spawn result and
+`session.created`, but it is provenance, not authority, and there is still no scoped client
+credential. A stale-caller spawn still becomes an unrelated root without a warning.
 
 **Why it matters.** The target user drives agents over build logs, repositories, and web
 content; those agents read untrusted material. The docs say the token is not an ACL, but the
 CLI's `operator_only` errors and the phrase "ask is the gated mode" imply more than the model
 delivers.
 
-**Fix shape.** Record `createdBy`/`by` on `session.created` and the spawn result; document the
-trust model beside `--permission ask` and `operator_only`; warn on a stale-caller spawn. For
-containment, offer a scoped client token/shim (no raw operator methods, no arbitrary policy
-changes) or require a separate instance for untrusted agents. The instance token is the real
-authority; say so where the controls are described.
+**Fix shape.** Document the trust model beside `--permission ask` and `operator_only`; decide
+whether a stale-caller spawn should warn. For containment, offer a scoped client token/shim
+(no raw operator methods, no arbitrary policy changes) or require a separate instance for
+untrusted agents. The instance token is the real authority; say so where the controls are
+described.
 
-**Effort:** S for events/docs; L for enforcement.
-
-#### N-12. Agents are not onboarded at birth; the name drifts
-
-A fresh child inherits `HLAO_SESSION_ID`, `HLAO_NAME`, `HLAO_PARENT_ID`, `HLAO_ROOT_ID`,
-`HLAO_DEPTH`, `HLAO_BACKEND`, `HLAO_HOME`, and `HLAO_CLI`, but no brief saying what they mean or
-which moves it has. The README's agent section is documentation for the human operator; nothing
-puts it in front of the agent. Separately, `rename` changes the live view and event log but not
-the process environment: after a rename the agent's own `HLAO_NAME` is stale, and `whoami`
-reports the environment.
-
-**Fix shape.** Inject `HLAO_BRIEF` (a path or compact text) at spawn, or add `hlao brief` and
-make the default spawn prompt include a one-line pointer. Add `spawn --context FILE` /
-`--ledger FILE` to inject a reference into the joining prompt and environment. Document that
-`HLAO_NAME` is birth-time only, or have `whoami` resolve the live name through the supervisor.
-Warn when a stale caller becomes a root (see N-08).
-
-**Effort:** S/M.
-
-#### N-13. Prompts are text-only; no attachments or system prompt
-
-The ACP prompt is a single `{ type: "text", text }` block. There is no `--attach`, no
-image/resource content, no MIME handling, and no `--system`/instructions file. `--prompt-file`
-reads text; it does not attach a file by reference or content.
-
-**Fix shape.** Add an additive `attachments` or ACP content-block array to `sessions.send` and
-`sessions.spawn`, with adapter capability checks; CLI `--attach FILE` (repeatable) and
-`--system-file FILE` where the adapter supports it. Keep text as the default and do not
-advertise filesystem/terminal capabilities to the provider.
-
-**Effort:** M.
-
-#### N-14. Unix force-close does not take the adapter's descendants
-
-On Windows, `close --force` and the normal close fallback call `killProcessTree`, with a
-dedicated test. On Unix, the code sends `SIGTERM` and then `SIGKILL` to the adapter PID only.
-Provider tools that spawn shell/build processes can survive the adapter, leaving a build running
-after `hlao close --force` or `hlao down`.
-
-**Fix shape.** Spawn adapters in their own process group and signal the group, or implement the
-platform-specific tree walk used on Windows. Add a POSIX test with a spawned child process.
-Document the behavior until fixed.
-
-**Effort:** M.
+**Effort:** S for docs/warning; L for scoped-client enforcement.
 
 ### Permissions and resource bounds (from the 0.5 review)
 
@@ -235,19 +185,9 @@ IDs beginning with `P2-0.5-` come from the 0.5 review; the other numbers preserv
 - **P2-23 — No pager or wrapping.** A large read page or long tool title floods the terminal.
 - **P2-33 — `agents` does not show configured environment keys.** `AgentView.envKeys` exists;
   the human table omits it. Add an `ENV` column or `--show-env` (never values).
-- **P2-36 — `whoami` does not validate a stale `HLAO_SESSION_ID`.** It reports the environment
-  as-is. Add a live check or a `live: false` field.
-- **P2-50 — Package metadata lacks `repository`, `homepage`, and `bugs`.** Minor distribution
-  polish.
-- **P2-53 — A queued message cancelled before it starts returns exit 0.** `send --wait` reports
-  `stopReason: "cancelled"` with `completed: true`; scripts may treat it as success. Add a
-  distinct code or a machine-readable outcome.
 - **P2-0.5-1 — Leading global flags are incomplete.** `hlao --no-color list` and `-h` before a
   command still misparse; only `--json`, `--json-envelope`, and `--home` are handled as leading
   globals. Handle the full global set or document command-only placement.
-- **P2-0.5-3 — Backend readiness means "command exists".** A Windows `.cmd`/`.ps1` or npm shim
-  is READY but `spawn` can return `internal: spawn EINVAL`. Mark unsupported wrappers
-  unavailable with a reason, support them safely, or rename READY to PRESENT.
 - **P2-0.5-4 — Secret exposure in backend args.** `agents`/`config show` redact env values but
   print args; `--token secret` in args is visible. Redact known secret flags or warn.
 - **P2-0.5-5 — Project config inspection is incomplete.** Runtime errors now name
@@ -272,8 +212,6 @@ IDs beginning with `P2-0.5-` come from the 0.5 review; the other numbers preserv
 - **P2-0.5-13 — Read flag semantics drift.** `--timestamps` does nothing under `--json`;
   `--verbose` + `--json` unexpectedly includes raw payloads; `--raw` in human mode also enables
   payload rendering. `--jsonl-page` was added in 0.7; align the rest.
-- **P2-0.5-14 — Partial text is hidden on timeout.** `send --wait`/`spawn --wait` on timeout
-  print "still running" but hide the partial agent text that JSON already contains.
 - **P2-0.5-16 — Remaining age/time inconsistencies.** ACTIVITY and CREATED landed in 0.7, but
   the `--watch` header uses UTC ISO while `read` uses local `HH:MM:SS`, and the usage event
   prints `42/200000` while the list formats `42.0k`. Standardize.
@@ -289,17 +227,10 @@ IDs beginning with `P2-0.5-` come from the 0.5 review; the other numbers preserv
 - **P2-0.5-21 — Message blocks split across follow pages.** `read --follow` renders per page; a
   streamed agent message split at a page boundary becomes two blocks with different cursors.
   Carry message-id state across pages.
-- **P2-0.5-22 — Spawn-wait failure leaves no recovery hint.** If the two-phase human
-  `spawn --wait` send fails, the session remains and the CLI does not suggest
-  `close`/`read`.
 - **P2-0.5-23 — `queue drop` collides with a session named `drop`.** The first positional is
   treated as a subcommand. Use a flag (`queue --drop N`) or `--id`.
 - **P2-0.5-24 — Help topics are incomplete.** `hlao help version` is unknown; `-h` before a
   command prints full help rather than that command's; `-a`, `-n`, `-f` are undocumented.
-- **P2-0.5-26 — No agent "mine" view or project-home story.** An agent's natural view is its
-  root subtree, but `list` defaults to the whole instance; the CLI has no `--mine` or
-  ergonomic per-project home. Add `--mine`/`--root $HLAO_ROOT_ID` and document a per-project
-  home recipe.
 - **P2-0.5-27 — No interactive surface.** The wire is ready for a dashboard or TUI (2.1 adds
   persistent streams). Build one client before adding more core features.
 
@@ -310,12 +241,14 @@ IDs beginning with `P2-0.5-` come from the 0.5 review; the other numbers preserv
 The remaining work is grouped so each milestone has one design decision:
 
 1. **0.8 — agent at birth and reliability.** N-07, N-08 (docs + scoped client), N-12, N-13,
-   N-14.
-2. **0.9 — safety and policy.** N-10, N-11.
-3. **Resume.** P0-14 on its own; it needs ACP `session/load`/`resume` and a recovery contract.
-4. **Surfaces.** Dashboard/TUI/MCP over the 2.1 persistent streams, plus the 0.6 transport
+   N-14. Shipped.
+2. **0.9 — maintenance.** No new findings. Split oversized modules, remove duplication and
+   dead code, prune this ledger, and keep every test green. No wire or behavior changes.
+3. **0.10 — safety and policy.** N-08 enforcement, N-10, N-11.
+4. **Resume.** P0-14 on its own; it needs ACP `session/load`/`resume` and a recovery contract.
+5. **Surfaces.** Dashboard/TUI/MCP over the 2.1 persistent streams, plus the 0.6 transport
    policy work (opt-in loopback TCP, TLS/credential rules, WebSocket adapter).
-5. **1.0 — contract freeze.** Decide whether `--json=envelope` becomes the default, align the
+6. **1.0 — contract freeze.** Decide whether `--json=envelope` becomes the default, align the
    remaining inner JSON shapes, finish package/update metadata, and document the multi-instance
    ("project home") ergonomics.
 
@@ -329,6 +262,7 @@ caller-owned and the answer is recorded as an event.
 
 ## Note
 
-Everything above remains outside the implemented 0.7 surface. The implementation and its tests
-(166 across unit, end-to-end, and acceptance) are described in `README.md`, `contracts/`, and
-`docs/milestones/0.7.md`.
+Everything above remains outside the implemented 0.8 surface. The implementation and its tests
+are described in `README.md`, `contracts/`, and `docs/milestones/0.2.md` through
+`docs/milestones/0.8.md`. 0.9 changed no behavior and added no finding; it is described in
+`docs/milestones/0.9.md`.

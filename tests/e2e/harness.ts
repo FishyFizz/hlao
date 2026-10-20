@@ -1,9 +1,21 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pidAlive, readLock } from "../../src/lock.js";
+import type {
+  CancelResult,
+  CloseResult,
+  GetResult,
+  ListResult,
+  PermitResult,
+  ReadResult,
+  SendResult,
+  SessionView,
+  SpawnResult,
+  WaitResult,
+} from "../../src/protocol.js";
 
 export const CLI_ENTRY = fileURLToPath(
   new URL("../../../dist/cli.js", import.meta.url),
@@ -11,6 +23,33 @@ export const CLI_ENTRY = fileURLToPath(
 export const FAKE_AGENT = fileURLToPath(
   new URL("../fixtures/fake-acp-agent.js", import.meta.url),
 );
+
+/** The backend manifest every harness config starts with. */
+export const FAKE_BACKEND = {
+  command: process.execPath,
+  args: [FAKE_AGENT],
+  description: "scripted ACP test agent",
+};
+
+/**
+ * Poll supervisor state that the test process cannot await directly. Throws a
+ * labelled error when the deadline passes, so a broken precondition fails the
+ * test instead of falling through.
+ */
+export async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`${label} did not happen within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
 
 export interface RunOptions {
   env?: Record<string, string>;
@@ -37,22 +76,23 @@ export class Harness {
   constructor() {
     this.home = mkdtempSync(join(tmpdir(), "hlao-e2e-"));
     this.cliEntry = CLI_ENTRY;
+    this.writeConfig({ backends: { fake: FAKE_BACKEND } });
+  }
+
+  /** Replace this harness's user config. */
+  writeConfig(value: unknown): void {
     writeFileSync(
       join(this.home, "config.json"),
-      JSON.stringify(
-        {
-          backends: {
-            fake: {
-              command: process.execPath,
-              args: [FAKE_AGENT],
-              description: "scripted ACP test agent",
-            },
-          },
-        },
-        null,
-        2,
-      ),
+      JSON.stringify(value, null, 2),
     );
+  }
+
+  /** Read, mutate, and rewrite this harness's user config. */
+  updateConfig(mutate: (config: Record<string, unknown>) => void): void {
+    const file = join(this.home, "config.json");
+    const config = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    mutate(config);
+    this.writeConfig(config);
   }
 
   run(args: string[], options: RunOptions = {}): Promise<RunResult> {
@@ -121,6 +161,16 @@ export class Harness {
     });
   }
 
+  /** Poll `read` until the session reports `status`. */
+  async waitForSession(id: string, status: SessionValue["status"]): Promise<void> {
+    await waitFor(
+      async () =>
+        (await this.json<ReadValue>(["read", id])).value.session.status ===
+        status,
+      `session ${id} reaching ${status}`,
+    );
+  }
+
   async json<T>(
     args: string[],
     options: RunOptions = {},
@@ -165,117 +215,29 @@ export interface JsonError {
   error: { code: string; message: string; details?: unknown };
 }
 
-export interface SpawnValue {
-  session: SessionValue;
-  nextSeq: number;
-  messageId?: string;
-  duplicate?: boolean;
-  createdBy?: string;
-  firstTurn?: { stopReason?: string; text: string; timedOut: boolean };
+/** The `doctor` JSON result, shared by the tests that assert on checks. */
+export interface DoctorValue {
+  ok: boolean;
+  checks: { name: string; status: "ok" | "warn" | "fail"; detail: string }[];
 }
 
-export interface SessionValue {
-  id: string;
-  name: string | null;
-  createdBy: string | null;
-  backend: string;
-  cwd: string;
-  status: string;
-  parentId: string | null;
-  rootId: string;
-  depth: number;
-  turn: number;
-  turnStartedAt: string | null;
-  queued: number;
-  settled: boolean;
-  lastSeq: number;
-  lastEvent: { type: string; title: string | null; at: string } | null;
-  endedAt: string | null;
-  pendingPermission: {
-    requestId: string;
-    title: string;
-    options: { optionId: string; name: string; kind: string }[];
-  } | null;
-  lastStopReason: string | null;
-  permissionPolicy: "ask" | "allow" | "deny";
-  modes: {
-    currentModeId: string;
-    availableModes: { id: string; name: string; description?: string }[];
-  } | null;
-  configOptions: {
-    id: string;
-    name: string;
-    category?: string;
-    type: "select" | "boolean";
-    currentValue: string | boolean;
-    values: { value: string; name: string; group?: string }[];
-  }[] | null;
-  usage: {
-    used: number;
-    size: number;
-    cost: { amount: number; currency: string } | null;
-    at: string;
-  } | null;
+/** Count non-overlapping occurrences of a literal. */
+export function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
 }
 
-export interface ListValue {
-  sessions: SessionValue[];
-}
-
-export interface ReadValue {
-  session: SessionValue;
-  events: { seq: number; type: string; data: Record<string, unknown> }[];
-  earliestRetainedSeq: number;
-  lastSeq: number;
-  nextSeq: number;
-  nextBefore: number | null;
-  hasMore: boolean;
-  truncated: boolean;
-}
-
-export interface SendValue {
-  session: SessionValue;
-  messageId: string;
-  queued: boolean;
-  turn: number | null;
-  completed: boolean;
-  timedOut: boolean;
-  stopReason?: string;
-  text?: string;
-  outcome?: "completed" | "cancelled" | "timed_out";
-  duplicate?: boolean;
-}
-
-export interface WaitValue {
-  satisfied: boolean;
-  reason: string;
-  waitedMs: number;
-  results: {
-    session: SessionValue;
-    satisfied: boolean;
-    reason: string;
-  }[];
-  session: SessionValue;
-}
-
-export interface CloseValue {
-  session: SessionValue;
-  killed: boolean;
-  wasTerminal: boolean;
-}
-
-export interface PermitValue {
-  session: SessionValue;
-  requestId: string;
-  optionId: string;
-  by: string;
-}
-
-export interface CancelValue {
-  session: SessionValue;
-  discarded: number;
-}
-
-export interface GetValue {
-  session: SessionValue;
-}
+/*
+ * Value types mirror the wire results. They are aliases, not copies, so the
+ * suite cannot drift from `src/protocol.ts`.
+ */
+export type SessionValue = SessionView;
+export type SpawnValue = SpawnResult;
+export type ListValue = ListResult;
+export type ReadValue = ReadResult;
+export type SendValue = SendResult;
+/** A single-target wait always includes the session; the wire marks it optional. */
+export type WaitValue = WaitResult & { session: SessionView };
+export type CloseValue = CloseResult;
+export type PermitValue = PermitResult;
+export type CancelValue = CancelResult;
+export type GetValue = GetResult;

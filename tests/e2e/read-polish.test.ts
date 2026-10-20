@@ -1,37 +1,16 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
 import {
-  FAKE_AGENT,
+  FAKE_BACKEND,
   Harness,
+  occurrences,
   type ReadValue,
   type SpawnValue,
   type WaitValue,
 } from "./harness.js";
 
-function occurrences(haystack: string, needle: string): number {
-  return haystack.split(needle).length - 1;
-}
-
 function writeConfig(harness: Harness, extra: Record<string, unknown>): void {
-  writeFileSync(
-    join(harness.home, "config.json"),
-    JSON.stringify(
-      {
-        ...extra,
-        backends: {
-          fake: {
-            command: process.execPath,
-            args: [FAKE_AGENT],
-            description: "scripted ACP test agent",
-          },
-        },
-      },
-      null,
-      2,
-    ),
-  );
+  harness.writeConfig({ ...extra, backends: { fake: FAKE_BACKEND } });
 }
 
 test("a truncated tail is reported in JSON and human output", async (t) => {

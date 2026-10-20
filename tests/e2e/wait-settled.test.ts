@@ -41,7 +41,7 @@ test("wait --until idle does not resolve between queued turns", async (t) => {
   );
 });
 
-test("the wire keeps idle precise and settles only when the queue drains", async (t) => {
+test("the CLI settles only after the queue drains", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 

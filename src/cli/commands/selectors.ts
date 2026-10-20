@@ -1,7 +1,9 @@
 import type { SupervisorConnection } from "../../client.js";
 import type { ListResult, SessionView } from "../../protocol.js";
 import type { CommandContext } from "../context.js";
-import { resolveInList } from "./list.js";
+import { displayStatus, resolveInList } from "./session-view.js";
+
+export { displayStatus, isTerminal } from "./session-view.js";
 
 /**
  * The selector grammar shared by close, wait, cancel, permit, and policy.
@@ -21,16 +23,6 @@ export function selectorsUsed(flags: SelectorFlags): boolean {
     flags.statuses !== undefined ||
     flags.idle !== undefined
   );
-}
-
-export function displayStatus(session: SessionView): string {
-  return session.status === "idle" && session.queued > 0
-    ? "busy"
-    : session.status;
-}
-
-export function isTerminal(session: SessionView): boolean {
-  return session.status === "closed" || session.status === "failed";
 }
 
 export async function selectSessions(

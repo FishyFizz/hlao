@@ -1,0 +1,568 @@
+import type { HlaoErrorCode } from "../errors.js";
+import type { ProtocolCapability, ProtocolVersion } from "./version.js";
+
+export type StopReason =
+  | "end_turn"
+  | "max_tokens"
+  | "max_turn_requests"
+  | "refusal"
+  | "cancelled";
+
+export type PermissionPolicy = "ask" | "allow" | "deny";
+export type SessionStatus =
+  | "starting"
+  | "idle"
+  | "busy"
+  | "waiting_permission"
+  | "closed"
+  | "failed";
+
+/** A session in a terminal state can never run another turn. */
+export function isTerminalStatus(status: SessionStatus): boolean {
+  return status === "closed" || status === "failed";
+}
+
+export type WaitUntil = "idle" | "settled" | "permission" | "exit" | "change";
+
+export const EVENT_TYPES = [
+  "session.created",
+  "session.initialized",
+  "session.closed",
+  "session.failed",
+  "session.renamed",
+  "prompt.sent",
+  "prompt.queued",
+  "prompt.discarded",
+  "turn.started",
+  "turn.ended",
+  "cancel.requested",
+  "agent.message",
+  "agent.thought",
+  "user.message",
+  "tool.call",
+  "tool.update",
+  "plan",
+  "plan.update",
+  "permission.requested",
+  "permission.resolved",
+  "policy.changed",
+  "notice",
+  "usage",
+  "mode",
+  "config",
+  "commands",
+  "session.info",
+  "compaction",
+  "subagent",
+  "stderr",
+  "error",
+  "raw",
+] as const;
+
+export type EventType = (typeof EVENT_TYPES)[number];
+
+export interface PermissionView {
+  requestId: string;
+  toolCallId: string | null;
+  title: string;
+  kind: string | null;
+  options: { optionId: string; name: string; kind: string }[];
+  requestedAt: string;
+}
+
+export interface SessionModeOption {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface SessionConfigValueView {
+  value: string;
+  name: string;
+  description?: string;
+  group?: string;
+}
+
+export interface SessionConfigOptionView {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: "select" | "boolean";
+  currentValue: string | boolean;
+  values: SessionConfigValueView[];
+}
+
+export interface SessionModes {
+  currentModeId: string;
+  availableModes: SessionModeOption[];
+}
+
+export interface SessionUsageView {
+  used: number;
+  size: number;
+  cost: { amount: number; currency: string } | null;
+  /** When the snapshot was observed (the `usage` event's timestamp). */
+  at: string;
+}
+
+export interface SessionView {
+  id: string;
+  name: string | null;
+  /** Who requested the spawn: "operator" or a session id. Provenance only. */
+  createdBy: string | null;
+  backend: string;
+  cwd: string;
+  status: SessionStatus;
+  parentId: string | null;
+  rootId: string;
+  depth: number;
+  createdAt: string;
+  lastActivityAt: string;
+  endedAt: string | null;
+  turn: number;
+  turnStartedAt: string | null;
+  queued: number;
+  /**
+   * True only when there is no active turn and no queued prompt. This is the
+   * completion signal; `status: "idle"` alone can still have queued work.
+   */
+  settled: boolean;
+  lastSeq: number;
+  /** The most recent event, projected for fleet views and dashboards. */
+  lastEvent: {
+    type: EventType;
+    title: string | null;
+    at: string;
+  } | null;
+  pendingPermission: PermissionView | null;
+  lastStopReason: StopReason | null;
+  agentSessionId: string | null;
+  processId: number | null;
+  exit: { code: number | null; signal: string | null } | null;
+  permissionPolicy: PermissionPolicy;
+  modes: SessionModes | null;
+  configOptions: SessionConfigOptionView[] | null;
+  /** Latest provider usage snapshot, or null when the adapter reported none. */
+  usage: SessionUsageView | null;
+}
+
+export interface EventView {
+  seq: number;
+  at: string;
+  type: EventType;
+  turn: number | null;
+  data: Record<string, unknown>;
+}
+
+export interface AgentView {
+  name: string;
+  source: "builtin" | "user" | "project";
+  command: string;
+  args: string[];
+  envKeys: string[];
+  description?: string;
+  configPath?: string;
+  available: boolean;
+  unavailableReason?: string;
+}
+
+/** A configured adapter, as exposed by `backends.list`. */
+export type BackendView = AgentView;
+
+export interface WireError {
+  code: HlaoErrorCode;
+  message: string;
+  details?: unknown;
+}
+
+export interface RequestEnvelope {
+  id: number;
+  method: string;
+  params: unknown;
+  token: string;
+  callerSessionId: string | null;
+}
+
+export type ResponseEnvelope =
+  | { id: number; ok: true; result: unknown }
+  | { id: number; ok: false; error: WireError };
+
+/**
+ * A server-initiated frame on a persistent connection. Responses carry no
+ * `type`; this discriminator is how a persistent client tells them apart.
+ */
+export type NotificationFrame =
+  | {
+      type: "notification";
+      subscription: number;
+      kind: "session";
+      session: SessionView;
+    }
+  | {
+      type: "notification";
+      subscription: number;
+      kind: "session.removed";
+      sessionId: string;
+    }
+  | {
+      type: "notification";
+      subscription: number;
+      kind: "event";
+      sessionId: string;
+      events: EventView[];
+      /** The last delivered seq; pass it as `since` to resume. */
+      cursor: number;
+      truncated: boolean;
+    };
+
+const METHODS = [
+  "hello",
+  "backends.list",
+  "sessions.spawn",
+  "sessions.list",
+  "sessions.get",
+  "sessions.send",
+  "sessions.read",
+  "sessions.wait",
+  "sessions.cancel",
+  "sessions.close",
+  "sessions.permit",
+  "sessions.set_mode",
+  "sessions.set_policy",
+  "sessions.set_config_option",
+  "sessions.queue",
+  "sessions.queue_drop",
+  "sessions.rename",
+  "sessions.forget",
+  "stream.subscribe",
+  "stream.unsubscribe",
+  "supervisor.reload",
+  "supervisor.shutdown",
+] as const;
+
+export type Method = (typeof METHODS)[number];
+
+export interface HelloParams {
+  /** The client's wire version. A major mismatch is `version_mismatch`. */
+  protocolVersion?: ProtocolVersion;
+  /**
+   * Ask for a persistent, multiplexed connection. A supervisor without the
+   * `stream.persistent` capability rejects the unknown field; call `hello`
+   * without it first when the supervisor may be older.
+   */
+  stream?: {
+    persistent?: boolean;
+  };
+}
+export interface HelloResult {
+  protocolVersion: ProtocolVersion;
+  capabilities: ProtocolCapability[];
+  pid: number;
+  startedAt: string;
+  version: string;
+  sessions: number;
+  configHash: string;
+  configError?: string;
+  /** Present when persistence was requested; `persistent` is the accepted value. */
+  stream?: { persistent: boolean };
+}
+export interface SubscribeParams {
+  /** Sessions to stream events for, and to report views for. 1..100 ids. */
+  sessionIds?: string[];
+  /** Report views for every session in the instance, including new ones. */
+  fleet?: boolean;
+  /** Per-session resume cursor: the last seq the client already has. */
+  since?: Record<string, number>;
+}
+export interface SubscribeResult {
+  subscription: number;
+  /** Current views for the subscription's view scope. */
+  sessions: SessionView[];
+  /** Per-session last delivered seq; pass as `since` on resume. */
+  cursors: Record<string, number>;
+  /** Session ids whose history was evicted before the supplied cursor. */
+  truncated: string[];
+}
+export interface UnsubscribeParams {
+  subscription: number;
+}
+export interface UnsubscribeResult {
+  subscription: number;
+  removed: true;
+}
+export interface BackendsListParams {
+  /** Defaults to the caller's cwd, or the supervisor's cwd for an operator. */
+  cwd?: string;
+}
+export interface BackendsListResult {
+  backends: BackendView[];
+}
+export interface SpawnParams {
+  backend: string;
+  cwd?: string;
+  name?: string;
+  prompt?: string;
+  wait?: boolean;
+  timeoutMs?: number;
+  mode?: string;
+  model?: string;
+  config?: Record<string, string | boolean>;
+  parentSessionId?: string;
+  permissionPolicy?: PermissionPolicy;
+  env?: Record<string, string>;
+  /** Include the HLAO skill pointer in the first prompt. Default true. */
+  skill?: boolean;
+  /** Dedupe key for a retrying spawn (1h in the supervisor). */
+  idempotencyKey?: string;
+}
+export interface FirstTurnResult {
+  stopReason?: StopReason;
+  text: string;
+  timedOut: boolean;
+}
+export interface SpawnResult {
+  session: SessionView;
+  nextSeq: number;
+  firstTurn?: FirstTurnResult;
+  /** The first prompt's message id, when a prompt was sent. */
+  messageId?: string;
+  /** True when the idempotency key matched an existing session. */
+  duplicate?: boolean;
+  createdBy?: string;
+}
+export interface ListParams {
+  includeClosed?: boolean;
+  cwd?: string;
+}
+export interface ListResult {
+  sessions: SessionView[];
+}
+export interface GetParams {
+  sessionId: string;
+}
+export interface GetResult {
+  session: SessionView;
+}
+export type SendOutcome = "completed" | "cancelled" | "timed_out";
+
+export interface SendParams {
+  sessionId: string;
+  text: string;
+  wait?: boolean;
+  timeoutMs?: number;
+  /** Caller-chosen message id; generated when omitted. */
+  messageId?: string;
+  /** Dedupe key for a retrying caller (1h / 256 keys in the live session). */
+  idempotencyKey?: string;
+}
+export interface SendResult {
+  session: SessionView;
+  messageId: string;
+  queued: boolean;
+  turn: number | null;
+  completed: boolean;
+  timedOut: boolean;
+  stopReason?: StopReason;
+  text?: string;
+  outcome?: SendOutcome;
+  /** True when the idempotency key matched an existing message. */
+  duplicate?: boolean;
+}
+export interface ReadParams {
+  sessionId: string;
+  /** Forward cursor: return events with seq > since. */
+  since?: number;
+  /** Backward cursor: return events with seq < before. Exclusive with since. */
+  before?: number;
+  limit?: number;
+  raw?: boolean;
+  /** Keep only these event types (AND with the other filters). */
+  types?: EventType[];
+  /** Keep only events from this turn. */
+  turn?: number;
+  /** Case-insensitive literal over the event type and its data JSON. */
+  grep?: string;
+}
+export interface ReadResult {
+  session: SessionView;
+  events: EventView[];
+  earliestRetainedSeq: number;
+  lastSeq: number;
+  /** Forward cursor for the next page; always present. */
+  nextSeq: number;
+  /** Backward cursor for the next older page, or null when there is none. */
+  nextBefore: number | null;
+  hasMore: boolean;
+  truncated: boolean;
+}
+export interface WaitParams {
+  /** Exactly one of sessionId or sessionIds. */
+  sessionId?: string;
+  sessionIds?: string[];
+  /** For multiple ids: resolve on the first (`any`) or when all satisfy (`all`). */
+  mode?: "any" | "all";
+  until: WaitUntil;
+  /** Only valid with a single id and `until: "change"`. */
+  since?: number;
+  /** Only valid with `until: "change"`; filters the event that satisfies it. */
+  types?: EventType[];
+  /** Only valid with `until: "change"`; case-insensitive literal over type + data. */
+  grep?: string;
+  timeoutMs?: number;
+}
+export interface WaitTargetResult {
+  session: SessionView;
+  satisfied: boolean;
+  /** `pending` means the target was still waiting when the aggregate resolved. */
+  reason: WaitUntil | "timeout" | "pending";
+}
+export interface WaitResult {
+  satisfied: boolean;
+  /**
+   * The matched condition. `settled` is reported only as a multi-id `all`
+   * aggregate, where targets may have matched different conditions; per-target
+   * reasons name the actual one.
+   */
+  reason: WaitUntil | "timeout";
+  waitedMs: number;
+  results: WaitTargetResult[];
+  /** Present for a single-id request; omitted when several ids were given. */
+  session?: SessionView;
+}
+export interface CancelParams {
+  sessionId: string;
+  keepQueue?: boolean;
+}
+export interface CancelResult {
+  session: SessionView;
+  discarded: number;
+}
+export interface CloseParams {
+  sessionId: string;
+  force?: boolean;
+}
+export interface CloseResult {
+  session: SessionView;
+  killed: boolean;
+  wasTerminal: boolean;
+}
+export interface PermitParams {
+  sessionId: string;
+  optionId?: string;
+  requestId?: string;
+  always?: boolean;
+}
+export interface PermitResult {
+  session: SessionView;
+  requestId: string;
+  optionId: string;
+  by: string;
+}
+export interface SetPolicyParams {
+  sessionId: string;
+  permissionPolicy: PermissionPolicy;
+}
+export interface SetPolicyResult {
+  session: SessionView;
+}
+export interface QueueItemView {
+  /** Stable message id; the active turn's id is also in its prompt.sent event. */
+  id: string;
+  position: number | null;
+  textPreview: string;
+  textLength: number;
+  from: string;
+  queuedMs: number;
+  turn: number | null;
+}
+export interface QueueParams {
+  sessionId: string;
+}
+export interface QueueResult {
+  session: SessionView;
+  active: QueueItemView | null;
+  queue: QueueItemView[];
+}
+export interface QueueDropParams {
+  sessionId: string;
+  /** Exactly one of position or messageId. */
+  position?: number;
+  messageId?: string;
+}
+export interface QueueDropResult {
+  session: SessionView;
+  dropped: QueueItemView;
+  discarded: number;
+}
+export interface SetModeParams {
+  sessionId: string;
+  modeId: string;
+}
+export interface SetModeResult {
+  session: SessionView;
+}
+export interface SetConfigOptionParams {
+  sessionId: string;
+  configId: string;
+  value: string | boolean;
+}
+export interface SetConfigOptionResult {
+  session: SessionView;
+}
+export interface RenameParams {
+  sessionId: string;
+  name: string | null;
+}
+export interface RenameResult {
+  session: SessionView;
+}
+export interface ForgetParams {
+  sessionId: string;
+}
+export interface ForgetResult {
+  sessionId: string;
+  forgotten: true;
+}
+export interface ShutdownParams {
+  force?: boolean;
+}
+export interface ShutdownResult {
+  sessionsClosed: number;
+  /** Retained terminal sessions whose event logs are lost with the supervisor. */
+  retainedDiscarded: number;
+}
+export interface ReloadParams {}
+export interface ReloadResult {
+  configHash: string;
+  configError: string | null;
+}
+
+export type ParamsByMethod = {
+  hello: HelloParams;
+  "backends.list": BackendsListParams;
+  "sessions.spawn": SpawnParams;
+  "sessions.list": ListParams;
+  "sessions.get": GetParams;
+  "sessions.send": SendParams;
+  "sessions.read": ReadParams;
+  "sessions.wait": WaitParams;
+  "sessions.cancel": CancelParams;
+  "sessions.close": CloseParams;
+  "sessions.permit": PermitParams;
+  "sessions.set_mode": SetModeParams;
+  "sessions.set_policy": SetPolicyParams;
+  "sessions.set_config_option": SetConfigOptionParams;
+  "sessions.queue": QueueParams;
+  "sessions.queue_drop": QueueDropParams;
+  "sessions.rename": RenameParams;
+  "sessions.forget": ForgetParams;
+  "stream.subscribe": SubscribeParams;
+  "stream.unsubscribe": UnsubscribeParams;
+  "supervisor.reload": ReloadParams;
+  "supervisor.shutdown": ShutdownParams;
+};
+
+export function isMethod(value: string): value is Method {
+  return (METHODS as readonly string[]).includes(value);
+}

@@ -64,11 +64,20 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `client` | Client-side transport and autostart | — | `lock`, `protocol`, `paths`, `stream`, `errors` |
 | `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
+Three modules have focused submodules. `protocol.ts` is a barrel over `protocol/version.ts`
+(wire constants and capabilities), `protocol/contract.ts` (types and method names), and
+`protocol/parse.ts` (boundary validation). `session.ts` keeps the `Session` state machine;
+`session/{queue,async,process,permissions,projection}.ts` hold its pure helpers.
+`supervisor.ts` keeps the server; `supervisor/{util,resolve}.ts` hold helpers and token
+resolution. Submodules never import their own barrel.
+
 The CLI is split by responsibility: `main.ts` dispatches and owns global exits; `context.ts`
 resolves the runtime home, caller identity, and targets, and formats errors; `args.ts` and
 `input.ts` parse flags and messages; `help.ts` holds the help text; `render.ts` renders tables
-and events; and `commands/{prompts,list,control,ops}.ts` implement command groups. No command
-module owns orchestration state.
+and events; and `commands/` has one module per command. `commands/session-view.ts` holds the
+shared display/terminal/resolve projections and `commands/prompt-support.ts` the bounded
+partial-output helper. `commands/{control,prompts,ops}.ts` remain as barrels for stable
+imports. No command module owns orchestration state.
 
 Edges point one way. `session` does not import `supervisor`; `client` does not import
 `session`; no core module imports `src/cli/*` (guarded by a unit test). A module's public

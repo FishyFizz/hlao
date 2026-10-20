@@ -56,7 +56,7 @@ test("list --mine scopes to the caller's root subtree", async (t) => {
   assert.match(missing.value.error.message, /HLAO_SESSION_ID or HLAO_ROOT_ID/);
 });
 
-test("a timed-out wait reports partial text", async (t) => {
+test("timed-out spawn and send report partial text", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 

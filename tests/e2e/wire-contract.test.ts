@@ -96,6 +96,10 @@ test("a raw socket client can observe and control every session", async () => {
       "read.filters",
       "read.before",
       "wait.multi",
+      "send.messageId",
+      "send.idempotency",
+      "spawn.idempotency",
+      "spawn.createdBy",
     ];
     for (const capability of expected) {
       assert.ok(hello.capabilities.includes(capability), capability);

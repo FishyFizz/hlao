@@ -149,7 +149,7 @@ test("wait accepts a list of ids with any/all semantics", async (t) => {
 
   const sent = await harness.json<{ queued: boolean }>(["send", busyId, "go"]);
   assert.equal(sent.code, 0);
-  await waitForStatus(harness, busyId, "busy");
+  await harness.waitForSession(busyId, "busy");
 
   const any = await harness.json<WaitValue>([
     "wait",
@@ -272,16 +272,3 @@ test("list --usage reports the latest snapshot and an aggregate", async (t) => {
   assert.match(human.stdout, /cost: none reported · context: latest per session/);
 });
 
-async function waitForStatus(
-  harness: Harness,
-  id: string,
-  status: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const listed = await harness.json<ListValue>(["list"]);
-    const session = listed.value.sessions.find((entry) => entry.id === id);
-    if (session?.status === status) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`session ${id} never reached ${status}`);
-}

@@ -38,15 +38,16 @@ test("a session is spawned, read, sent to, and closed", async (t) => {
   assert.ok(listed.value.sessions.some((session) => session.id === id));
 
   const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
-  const types = read.value.events.map((event) => event.type);
-  for (const expected of [
+  const types: string[] = read.value.events.map((event) => event.type);
+  const expectedTypes: string[] = [
     "session.created",
     "session.initialized",
     "prompt.sent",
     "turn.started",
     "agent.message",
     "turn.ended",
-  ]) {
+  ];
+  for (const expected of expectedTypes) {
     assert.ok(types.includes(expected), `missing ${expected}`);
   }
   assert.equal(read.value.truncated, false);
@@ -91,7 +92,7 @@ test("a session is spawned, read, sent to, and closed", async (t) => {
   assert.equal(afterClose.value.error.code, "session_closed");
 });
 
-test("unknown and bogus session ids are rejected clearly", async (t) => {
+test("unknown ids are rejected and unique prefixes resolve", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -109,7 +110,7 @@ test("unknown and bogus session ids are rejected clearly", async (t) => {
   assert.equal(prefix.code, 0);
 });
 
-test("human output includes the session and a cursor hint", async (t) => {
+test("human read output orders the thought before the answer", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 

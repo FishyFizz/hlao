@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Harness, type ListValue, type RunResult } from "./harness.js";
+import { readLock } from "../../src/lock.js";
+import {
+  Harness,
+  waitFor,
+  type ListValue,
+  type RunResult,
+} from "./harness.js";
 
 test("shutdown during a slow spawn does not leave a session behind", async (t) => {
   const harness = new Harness();
@@ -13,7 +19,10 @@ test("shutdown during a slow spawn does not leave a session behind", async (t) =
     "FAKE_STARTUP_DELAY_MS=1500",
   ]);
 
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  // The lock proves the supervisor is up; give the spawn client one scheduling
+  // beat to reach it, without guessing at the adapter's startup delay.
+  await waitFor(() => readLock(harness.home) !== null, "supervisor lock");
+  await new Promise((resolve) => setTimeout(resolve, 100));
   const down = await harness.run(["down", "--force"], { timeoutMs: 20_000 });
   assert.equal(down.code, 0);
 

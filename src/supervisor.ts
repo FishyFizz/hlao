@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, statSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
 import {
   configFingerprint,
   loadConfig,
@@ -21,6 +20,8 @@ import {
 } from "./lock.js";
 import { Logger } from "./logger.js";
 import { ensureHome, isWindows, lockPath, supervisorEndpoint } from "./paths.js";
+import { resolveSession } from "./supervisor/resolve.js";
+import { actor, delay, failure, pathKey } from "./supervisor/util.js";
 import { SKILL_VERSION, ensureHomeSkill, homeSkillPath } from "./skill.js";
 import {
   FrameTooLargeError,
@@ -86,17 +87,8 @@ import {
   type WaitResult,
   type WaitTargetResult,
 } from "./protocol.js";
+import { isTerminalStatus } from "./protocol.js";
 import { Session } from "./session.js";
-
-function actor(caller: string | null): string {
-  return caller ?? "operator";
-}
-
-/** Windows paths are case-insensitive; `--cwd` must agree with `--cwd-prefix`. */
-function pathKey(value: string): string {
-  const normalized = resolve(value);
-  return isWindows() ? normalized.toLowerCase() : normalized;
-}
 
 /** A persistent connection may have this many requests in flight. */
 const MAX_INFLIGHT_REQUESTS = 64;
@@ -133,7 +125,7 @@ interface ConnectionState {
   early: string[];
 }
 
-export class AlreadyRunningError extends Error {
+class AlreadyRunningError extends Error {
   override readonly name = "AlreadyRunningError";
   constructor(readonly lock: LockInfo) {
     super(`another HLAO supervisor is already running (pid ${lock.pid})`);
@@ -146,7 +138,7 @@ export interface SupervisorOptions {
   version: string;
 }
 
-export class SupervisorServer {
+class SupervisorServer {
   readonly endpoint: string;
   readonly token: string;
 
@@ -960,7 +952,7 @@ export class SupervisorServer {
       const snapshot = (index: number): WaitTargetResult => {
         const target = targets[index]!;
         const view = target.view();
-        const terminal = view.status === "closed" || view.status === "failed";
+        const terminal = isTerminalStatus(view.status);
         switch (params.until) {
           case "idle":
             return view.status === "idle"
@@ -1228,42 +1220,7 @@ export class SupervisorServer {
    * attribution, not scope: there is no visibility filter here (ADR 0008).
    */
   #resolve(token: string): Session {
-    const all = [...this.#sessions.values()];
-    const exact = this.#sessions.get(token);
-    if (exact) return exact;
-
-    const nameMatches = all.filter((session) => session.name === token);
-    if (nameMatches.length === 1) return nameMatches[0]!;
-    if (nameMatches.length > 1) {
-      throw new HlaoError(
-        "ambiguous_id",
-        `session name "${token}" matches ${nameMatches.length} sessions`,
-        {
-          candidates: nameMatches.map((session) => {
-            const view = session.view();
-            return { id: view.id, name: view.name, status: view.status };
-          }),
-        },
-      );
-    }
-
-    const matches = all.filter((session) => session.id.startsWith(token));
-    if (matches.length === 0) {
-      throw new HlaoError("not_found", `no session matching "${token}"`);
-    }
-    if (matches.length > 1) {
-      throw new HlaoError(
-        "ambiguous_id",
-        `session prefix "${token}" matches ${matches.length} sessions`,
-        {
-          candidates: matches.map((session) => {
-            const view = session.view();
-            return { id: view.id, name: view.name, status: view.status };
-          }),
-        },
-      );
-    }
-    return matches[0]!;
+    return resolveSession(this.#sessions, token);
   }
 
   #waitForInflightSpawns(timeoutMs: number): Promise<void> {
@@ -1501,24 +1458,6 @@ export class SupervisorServer {
   }
 }
 
-function failure(id: number, error: unknown): ResponseEnvelope {
-  const converted = toHlaoError(error);
-  return {
-    id,
-    ok: false,
-    error: {
-      code: converted.code,
-      message: converted.message,
-      ...(converted.details !== undefined ? { details: converted.details } : {}),
-    },
-  };
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 
 export async function runSupervisor(
   home: string,

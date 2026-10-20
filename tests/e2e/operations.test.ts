@@ -7,25 +7,11 @@ import { readLock } from "../../src/lock.js";
 import {
   FAKE_AGENT,
   Harness,
+  type DoctorValue,
   type JsonError,
   type ReadValue,
   type SpawnValue,
 } from "./harness.js";
-
-interface DoctorValue {
-  ok: boolean;
-  checks: { name: string; status: "ok" | "warn" | "fail"; detail: string }[];
-}
-
-function rewriteConfig(
-  harness: Harness,
-  mutate: (config: Record<string, unknown>) => void,
-): void {
-  const file = join(harness.home, "config.json");
-  const config = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-  mutate(config);
-  writeFileSync(file, JSON.stringify(config, null, 2));
-}
 
 test("agents and doctor inspect configuration without starting a supervisor", async (t) => {
   const harness = new Harness();
@@ -95,7 +81,7 @@ test("status probes without autostart and --start launches the supervisor", asyn
   assert.equal(running.value.running, true);
 });
 
-test("logs reads the supervisor log directly, without a supervisor", async (t) => {
+test("logs reads the supervisor log directly", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -124,7 +110,7 @@ test("logs reads the supervisor log directly, without a supervisor", async (t) =
 test("config can be inspected locally and validates", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
-  rewriteConfig(harness, (config) => {
+  harness.updateConfig((config) => {
     const backends = config.backends as Record<
       string,
       Record<string, unknown>
@@ -184,7 +170,7 @@ test("reload applies new config only to new spawns and is operator-only", async 
   assert.equal(first.value.session.permissionPolicy, "allow");
   const firstId = first.value.session.id;
 
-  rewriteConfig(harness, (config) => {
+  harness.updateConfig((config) => {
     config.permissionPolicy = "ask";
   });
 

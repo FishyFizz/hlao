@@ -1,3 +1,4 @@
+import { isTerminalStatus } from "../../protocol.js";
 import type { ListResult, EventType, EventView, ReadResult } from "../../protocol.js";
 import { EVENT_TYPES } from "../../protocol.js";
 import {
@@ -62,7 +63,7 @@ export async function cmdFind(args: string[]): Promise<number> {
       ? list.sessions
       : list.sessions.filter(
           (session) =>
-            session.status !== "closed" && session.status !== "failed",
+            !isTerminalStatus(session.status),
         );
 
   const matches: { sessionId: string; event: EventView }[] = [];

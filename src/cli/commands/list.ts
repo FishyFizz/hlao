@@ -1,6 +1,5 @@
 import { resolve } from "node:path";
 import type { SupervisorConnection } from "../../client.js";
-import { HlaoError } from "../../errors.js";
 import type { ListResult, SessionView } from "../../protocol.js";
 import {
   booleanOption,
@@ -23,6 +22,11 @@ import {
 } from "../context.js";
 import { helpRequested } from "../help.js";
 import { renderSessionTable } from "../render.js";
+import {
+  displayStatus,
+  isTerminal,
+  resolveInList,
+} from "./session-view.js";
 
 interface ListFilters {
   statuses?: string[];
@@ -261,13 +265,7 @@ function filterSessions(
   let result = [...sessions];
   if (filters.statuses) {
     const allowed = new Set(filters.statuses);
-    result = result.filter((session) =>
-      allowed.has(
-        session.status === "idle" && session.queued > 0
-          ? "busy"
-          : session.status,
-      ),
-    );
+    result = result.filter((session) => allowed.has(displayStatus(session)));
   }
   if (filters.backend !== undefined) {
     const backend = filters.backend.toLowerCase();
@@ -324,38 +322,6 @@ function normalizePath(value: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
-export function resolveInList(sessions: SessionView[], token: string): SessionView {
-  const exact = sessions.find((session) => session.id === token);
-  if (exact) return exact;
-  const named = sessions.filter((session) => session.name === token);
-  if (named.length === 1) return named[0]!;
-  if (named.length > 1) {
-    throw ambiguousSession(token, named);
-  }
-  const prefixed = sessions.filter((session) => session.id.startsWith(token));
-  if (prefixed.length === 1) return prefixed[0]!;
-  if (prefixed.length > 1) {
-    throw ambiguousSession(`prefix "${token}"`, prefixed);
-  }
-  throw new HlaoError("not_found", `no session matching "${token}"`);
-}
-
-function ambiguousSession(
-  what: string,
-  sessions: SessionView[],
-): HlaoError {
-  return new HlaoError(
-    "ambiguous_id",
-    `session ${what} matches ${sessions.length} sessions`,
-    {
-      candidates: sessions.map((session) => ({
-        id: session.id,
-        name: session.name,
-        status: session.status,
-      })),
-    },
-  );
-}
 
 function sortSessions(
   sessions: SessionView[],
@@ -382,15 +348,6 @@ function sortSessions(
   return sorted;
 }
 
-function isTerminal(session: SessionView): boolean {
-  return session.status === "closed" || session.status === "failed";
-}
-
-function displayStatus(session: SessionView): string {
-  return session.status === "idle" && session.queued > 0
-    ? "busy"
-    : session.status;
-}
 
 function applyDisplayFilter(
   sessions: SessionView[],

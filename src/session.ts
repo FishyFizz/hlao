@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { client, ndJsonStream } from "@agentclientprotocol/sdk";
 import type {
@@ -8,9 +8,7 @@ import type {
   PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
   SessionNotification,
-  SessionUpdate,
 } from "@agentclientprotocol/sdk";
 import type { BackendManifest } from "./config.js";
 import { HlaoError, describeError } from "./errors.js";
@@ -22,10 +20,8 @@ import type {
   EventType,
   EventView,
   PermissionPolicy,
-  PermissionView,
   QueueItemView,
   SessionConfigOptionView,
-  SessionConfigValueView,
   SessionModes,
   SessionStatus,
   SessionUsageView,
@@ -33,7 +29,36 @@ import type {
   StopReason,
   WaitUntil,
 } from "./protocol.js";
-import { ACP_PROTOCOL_VERSION, MAX_PROMPT_CHARS } from "./protocol.js";
+import { ACP_PROTOCOL_VERSION, MAX_PROMPT_CHARS, isTerminalStatus } from "./protocol.js";
+import { raceWithTimeout, withTimeout } from "./session/async.js";
+import {
+  cancelledResponse,
+  chooseByPolicy,
+  pickAllowOption,
+  selectedResponse,
+  type PendingPermission,
+} from "./session/permissions.js";
+import {
+  killProcessTree,
+  signalProcessGroup,
+  waitForExit,
+} from "./session/process.js";
+import {
+  eventTitle,
+  previewText,
+  projectUpdate,
+  queueItemView,
+  skillPointer,
+  toConfigOptionViews,
+  toPermissionView,
+} from "./session/projection.js";
+import {
+  createQueueItem,
+  type PromptCompletion,
+  type QueueItem,
+} from "./session/queue.js";
+
+export type { PromptCompletion } from "./session/queue.js";
 
 const MAX_QUEUED_PROMPTS = 1_000;
 
@@ -67,14 +92,6 @@ export interface SpawnOptions {
   log: (line: string) => void;
 }
 
-export interface PromptCompletion {
-  ok: boolean;
-  turn: number | null;
-  stopReason?: StopReason;
-  text: string;
-  cancelledBeforeStart?: boolean;
-  error?: { code: string; message: string };
-}
 
 export interface SendResult {
   messageId: string;
@@ -114,24 +131,6 @@ export interface WaitResult {
   waitedMs: number;
 }
 
-interface QueueItem {
-  id: string;
-  text: string;
-  from: string;
-  enqueuedAt: number;
-  turn: number | null;
-  wasQueued: boolean;
-  settled: boolean;
-  settle: (completion: PromptCompletion) => void;
-  promise: Promise<PromptCompletion>;
-}
-
-interface PendingPermission {
-  requestId: string;
-  requestedAt: string;
-  request: RequestPermissionRequest;
-  resolve: (response: RequestPermissionResponse) => void;
-}
 
 /**
  * One ACP-backed session. One adapter process, one ACP session, one serialized
@@ -244,7 +243,7 @@ export class Session {
   }
 
   get isTerminal(): boolean {
-    return this.#status === "closed" || this.#status === "failed";
+    return isTerminalStatus(this.#status);
   }
 
   view(): SessionView {
@@ -1624,426 +1623,4 @@ export class Session {
       }
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// pure helpers
-// ---------------------------------------------------------------------------
-
-function createQueueItem(id: string, text: string, from: string): QueueItem {
-  let settle!: (completion: PromptCompletion) => void;
-  const promise = new Promise<PromptCompletion>((resolve) => {
-    settle = resolve;
-  });
-  return {
-    id,
-    text,
-    from,
-    enqueuedAt: Date.now(),
-    turn: null,
-    wasQueued: false,
-    settled: false,
-    settle,
-    promise,
-  };
-}
-
-function raceWithTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-): Promise<{ timedOut: false; value: T } | { timedOut: true }> {
-  if (timeoutMs <= 0) {
-    return promise.then((value) => ({ timedOut: false as const, value }));
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
-    timer.unref?.();
-    promise.then((value) => {
-      clearTimeout(timer);
-      resolve({ timedOut: false as const, value });
-    });
-  });
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
-  if (timeoutMs <= 0) return promise;
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new HlaoError("timeout", `${what} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    timer.unref?.();
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
-/**
- * Signal the adapter's process group on POSIX. The adapter is spawned detached
- * so it leads the group; `-pid` reaches it and everything it started. Falls
- * back to the direct child when the group is already gone.
- */
-function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (pid !== undefined) {
-    try {
-      process.kill(-pid, signal);
-      return;
-    } catch {
-      // No such group (or no permission); fall through to the direct child.
-    }
-  }
-  try {
-    child.kill(signal);
-  } catch {
-    // Already gone.
-  }
-}
-
-/**
- * Hard termination. On Windows, `ChildProcess.kill` terminates only the adapter
- * and leaves tool processes running; taskkill /T takes the tree with it. On
- * POSIX the adapter's process group is signaled instead.
- */
-function killProcessTree(child: ChildProcess): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  if (process.platform === "win32") {
-    try {
-      execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      return;
-    } catch {
-      // Fall through to the direct kill.
-    }
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // Already gone.
-    }
-    return;
-  }
-  signalProcessGroup(child, "SIGKILL");
-}
-
-function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off("exit", onExit);
-      resolve(false);
-    }, timeoutMs);
-    timer.unref?.();
-    const onExit = (): void => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once("exit", onExit);
-  });
-}
-
-function cancelledResponse(): RequestPermissionResponse {
-  return { outcome: { outcome: "cancelled" } };
-}
-
-function selectedResponse(optionId: string): RequestPermissionResponse {
-  return { outcome: { outcome: "selected", optionId } };
-}
-
-function pickAllowOption(options: PermissionOption[]): PermissionOption | undefined {
-  return (
-    options.find((option) => option.kind === "allow_once") ??
-    options.find((option) => option.kind === "allow_always")
-  );
-}
-
-function chooseByPolicy(
-  options: PermissionOption[],
-  policy: PermissionPolicy,
-): PermissionOption | "cancelled" | null {
-  if (policy === "ask") return null;
-  if (policy === "allow") {
-    return pickAllowOption(options) ?? "cancelled";
-  }
-  const reject =
-    options.find((option) => option.kind === "reject_once") ??
-    options.find((option) => option.kind === "reject_always");
-  return reject ?? "cancelled";
-}
-
-const TEXT_PREVIEW_CHARS = 200;
-
-function previewText(text: string): string {
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > TEXT_PREVIEW_CHARS
-    ? `${oneLine.slice(0, TEXT_PREVIEW_CHARS)}…`
-    : oneLine;
-}
-
-function skillPointer(path: string): string {
-  return [
-    `HLAO skill: read "${path}" (or run "hlao skill") before acting.`,
-    "Context is whatever this prompt says, verbatim or by reference; do not invent it.",
-    "HLAO carries orchestration text, not file payloads; reference paths and use your own tools.",
-  ].join("\n");
-}
-
-const EVENT_TITLE_CHARS = 120;
-
-/**
- * A bounded, one-line projection of an event for fleet views. It is not
- * sanitized here: the wire carries text, and every renderer sanitizes it.
- */
-function eventTitle(
-  type: EventType,
-  data: Record<string, unknown>,
-): string | null {
-  const text = (value: unknown): string | null => {
-    if (typeof value !== "string") return null;
-    const oneLine = value.replace(/\s+/g, " ").trim();
-    if (oneLine.length === 0) return null;
-    return oneLine.length > EVENT_TITLE_CHARS
-      ? `${oneLine.slice(0, EVENT_TITLE_CHARS)}…`
-      : oneLine;
-  };
-
-  switch (type) {
-    case "agent.message":
-    case "user.message":
-    case "prompt.sent":
-    case "prompt.queued":
-      return text(data.text);
-    case "tool.call":
-    case "tool.update":
-      return text(data.title) ?? text(data.name);
-    case "permission.requested":
-      return text(data.title);
-    case "turn.ended":
-      return text(data.stopReason);
-    case "session.created":
-      return text(data.backend) ?? "session created";
-    case "session.closed":
-    case "session.failed":
-      return text(data.reason) ?? text(data.message);
-    case "error":
-      return text(data.message);
-    case "notice":
-      return text(data.title) ?? text(data.severity);
-    case "plan":
-    case "plan.update": {
-      const entries = data.entries;
-      return Array.isArray(entries)
-        ? `${entries.length} plan entr${entries.length === 1 ? "y" : "ies"}`
-        : "plan updated";
-    }
-    case "usage": {
-      const used = data.used;
-      const size = data.size;
-      return typeof used === "number" && typeof size === "number"
-        ? `${used}/${size} tokens`
-        : "usage updated";
-    }
-    default:
-      return null;
-  }
-}
-
-function queueItemView(item: QueueItem, position: number | null): QueueItemView {
-  return {
-    id: item.id,
-    position,
-    textPreview: previewText(item.text),
-    textLength: item.text.length,
-    from: item.from,
-    queuedMs: Math.max(0, Date.now() - item.enqueuedAt),
-    turn: item.turn,
-  };
-}
-
-function toConfigOptionViews(
-  options: SessionConfigOption[] | null | undefined,
-): SessionConfigOptionView[] | null {
-  if (!options) return null;
-  return options.map((option) => {
-    const values: SessionConfigValueView[] = [];
-    if (option.type === "select") {
-      for (const entry of option.options) {
-        if ("group" in entry) {
-          for (const value of entry.options) {
-            values.push({
-              value: value.value,
-              name: value.name,
-              ...(value.description ? { description: value.description } : {}),
-              group: entry.name,
-            });
-          }
-        } else {
-          values.push({
-            value: entry.value,
-            name: entry.name,
-            ...(entry.description ? { description: entry.description } : {}),
-          });
-        }
-      }
-    }
-    return {
-      id: option.id,
-      name: option.name,
-      ...(option.description ? { description: option.description } : {}),
-      ...(option.category ? { category: option.category } : {}),
-      type: option.type,
-      currentValue: option.currentValue,
-      values,
-    };
-  });
-}
-
-function toPermissionView(
-  requestId: string,
-  requestedAt: string,
-  request: RequestPermissionRequest,
-): PermissionView {
-  return {
-    requestId,
-    toolCallId: request.toolCall.toolCallId ?? null,
-    title: request.toolCall.title ?? "",
-    kind: request.toolCall.kind ?? null,
-    options: request.options.map((option) => ({
-      optionId: option.optionId,
-      name: option.name,
-      kind: option.kind,
-    })),
-    requestedAt,
-  };
-}
-
-function projectUpdate(update: SessionUpdate): {
-  type: EventType;
-  data: Record<string, unknown>;
-  textDelta?: string;
-} {
-  switch (update.sessionUpdate) {
-    case "agent_message_chunk": {
-      const text = contentText(update.content);
-      return {
-        type: "agent.message",
-        data: {
-          text,
-          messageId: update.messageId ?? null,
-          contentType: update.content.type,
-        },
-        textDelta: text,
-      };
-    }
-    case "agent_thought_chunk": {
-      return {
-        type: "agent.thought",
-        data: {
-          text: contentText(update.content),
-          messageId: update.messageId ?? null,
-        },
-      };
-    }
-    case "user_message_chunk": {
-      return {
-        type: "user.message",
-        data: { text: contentText(update.content), messageId: update.messageId ?? null },
-      };
-    }
-    case "tool_call": {
-      return {
-        type: "tool.call",
-        data: {
-          toolCallId: update.toolCallId,
-          title: update.title,
-          name: update.name ?? null,
-          kind: update.kind ?? null,
-          status: update.status ?? null,
-          locations: update.locations ?? [],
-          rawInput: update.rawInput,
-        },
-      };
-    }
-    case "tool_call_update": {
-      return {
-        type: "tool.update",
-        data: {
-          toolCallId: update.toolCallId,
-          title: update.title ?? null,
-          name: update.name ?? null,
-          kind: update.kind ?? null,
-          status: update.status ?? null,
-          content: update.content ?? null,
-          rawOutput: update.rawOutput,
-        },
-      };
-    }
-    case "plan": {
-      return { type: "plan", data: { entries: update.entries } };
-    }
-    case "plan_update": {
-      return { type: "plan.update", data: { update: update } };
-    }
-    case "plan_removed": {
-      return { type: "plan.update", data: { removed: true } };
-    }
-    case "available_commands_update": {
-      return { type: "commands", data: { commands: update.availableCommands } };
-    }
-    case "current_mode_update": {
-      return { type: "mode", data: { currentModeId: update.currentModeId } };
-    }
-    case "config_option_update": {
-      return { type: "config", data: { configOptions: update.configOptions } };
-    }
-    case "session_info_update": {
-      return {
-        type: "session.info",
-        data: { title: update.title ?? null, updatedAt: update.updatedAt ?? null },
-      };
-    }
-    case "usage_update": {
-      return {
-        type: "usage",
-        data: { used: update.used, size: update.size, cost: update.cost ?? null },
-      };
-    }
-    case "notice": {
-      return {
-        type: "notice",
-        data: {
-          severity: update.severity,
-          title: update.title,
-          description: update.description ?? null,
-        },
-      };
-    }
-    case "compaction_update":
-    case "compaction_summary_chunk": {
-      return { type: "compaction", data: {} };
-    }
-    case "subagent_update": {
-      return { type: "subagent", data: {} };
-    }
-    case "session_message":
-    case "session_message_chunk": {
-      return { type: "raw", data: {} };
-    }
-    default: {
-      return { type: "raw", data: {} };
-    }
-  }
-}
-
-function contentText(content: { type: string; text?: string }): string {
-  return content.type === "text" && typeof content.text === "string" ? content.text : "";
 }

@@ -1,3 +1,4 @@
+import { isTerminalStatus } from "../protocol.js";
 import type {
   AgentView,
   EventView,
@@ -130,7 +131,7 @@ export function renderSessionTable(
   );
 }
 
-export function formatTokens(value: number): string {
+function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "?";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
@@ -163,7 +164,7 @@ function exitDetail(session: SessionView): string {
 }
 
 export function renderSessionHeader(session: SessionView, style: Style): string {
-  const terminal = session.status === "closed" || session.status === "failed";
+  const terminal = isTerminalStatus(session.status);
   const parts = [
     style.bold(session.id),
     session.name ? style.cyan(oneLine(session.name)) : null,
@@ -678,7 +679,7 @@ export function styleStatus(status: SessionStatus, style: Style): string {
   }
 }
 
-export function formatAge(iso: string): string {
+function formatAge(iso: string): string {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "—";
   const delta = Math.max(0, Date.now() - then);

@@ -2,16 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   Harness,
+  occurrences,
   type JsonError,
   type ReadValue,
   type SendValue,
   type SpawnValue,
   type WaitValue,
 } from "./harness.js";
-
-function occurrences(haystack: string, needle: string): number {
-  return haystack.split(needle).length - 1;
-}
 
 test("a unique name addresses a session and rename changes the handle", async (t) => {
   const harness = new Harness();
@@ -266,7 +263,7 @@ test("human list marks the caller and reports the instance", async (t) => {
   assert.doesNotMatch(operator.stdout, /SELF/);
 });
 
-test("send accepts --prompt and warns about an inert --timeout", async (t) => {
+test("send accepts --prompt, and inert flags warn on stderr", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 

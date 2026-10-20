@@ -1,4 +1,4 @@
-export const ERROR_CODES = [
+const ERROR_CODES = [
   "bad_request",
   "unauthorized",
   "version_mismatch",
@@ -33,10 +33,6 @@ export class HlaoError extends Error {
   ) {
     super(message);
   }
-}
-
-export function isHlaoError(value: unknown): value is HlaoError {
-  return value instanceof HlaoError;
 }
 
 export function toHlaoError(value: unknown): HlaoError {

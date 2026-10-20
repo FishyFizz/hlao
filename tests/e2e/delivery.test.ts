@@ -1,51 +1,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { QueueDropResult, QueueResult } from "../../src/protocol.js";
 import {
   Harness,
+  waitFor,
   type ListValue,
   type ReadValue,
   type SendValue,
   type SpawnValue,
 } from "./harness.js";
 
-interface QueueValue {
-  session: { id: string; queued: number };
-  active: { id: string; textPreview: string } | null;
-  queue: {
-    id: string;
-    position: number | null;
-    textPreview: string;
-  }[];
-}
-
-interface QueueDropValue {
-  session: { id: string; queued: number };
-  dropped: { id: string; position: number | null; textPreview: string };
-  discarded: number;
-}
+type QueueValue = QueueResult;
+type QueueDropValue = QueueDropResult;
 
 const MESSAGE_ID = /^msg-[0-9abcdefghjkmnpqrstvwxyz]{8}$/;
-
-async function waitForBusy(harness: Harness, id: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const read = await harness.json<ReadValue>(["read", id]);
-    if (read.value.session.status === "busy") return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`session ${id} never became busy`);
-}
 
 async function waitForQueue(
   harness: Harness,
   id: string,
   length: number,
 ): Promise<QueueValue> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const listed = await harness.json<QueueValue>(["queue", id]);
-    if (listed.value.queue.length === length) return listed.value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`session ${id} never reached a queue length of ${length}`);
+  let latest: QueueValue | null = null;
+  await waitFor(async () => {
+    latest = (await harness.json<QueueValue>(["queue", id])).value;
+    return latest.queue.length === length;
+  }, `session ${id} reaching queue length ${length}`);
+  return latest!;
 }
 
 test("message ids are stable, idempotent, and droppable by id", async (t) => {
@@ -123,7 +103,7 @@ test("a queued message cancelled before it runs reports cancelled", async (t) =>
   const id = spawned.value.session.id;
 
   await harness.json<SendValue>(["send", id, "active"]);
-  await waitForBusy(harness, id);
+  await harness.waitForSession(id, "busy");
   const waiting = harness.json<SendValue>(["send", id, "queued", "--wait"]);
   await waitForQueue(harness, id, 1);
 

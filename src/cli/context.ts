@@ -237,14 +237,6 @@ export function writeJsonFailure(error: {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-export function jsonEnvelopeEnabled(): boolean {
-  return jsonEnvelope;
-}
-
-export function jsonCommandName(): string {
-  return jsonCommand;
-}
-
 export function styleHint(ctx: CommandContext, text: string): string {
   return ctx.style.dim(`next: ${text}`);
 }

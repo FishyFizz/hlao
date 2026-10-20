@@ -312,7 +312,14 @@ test("a legacy connection still carries exactly one request", async () => {
       })}\n`,
     );
 
-    await closedPromise;
+    const closedInTime = await Promise.race([
+      closedPromise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 5_000);
+        timer.unref?.();
+      }),
+    ]);
+    assert.equal(closedInTime, true, "the legacy stream did not close");
     assert.equal(closed, true);
     assert.equal(frames.length, 1);
     assert.equal(frames[0]?.id, 1);

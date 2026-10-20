@@ -28,7 +28,7 @@ export function pathTarget(path: string): StreamTarget {
   return { kind: "path", path };
 }
 
-export function describeTarget(target: StreamTarget): string {
+function describeTarget(target: StreamTarget): string {
   return target.kind === "path" ? target.path : `${target.host}:${target.port}`;
 }
 
