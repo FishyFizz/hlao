@@ -113,9 +113,10 @@ handling should be exercised against a slow/stalled consumer before it is truste
    do not build a second semantic protocol. The network transport policy (TLS, credentials,
    WebSocket) is not shipped; local IPC is the supported dashboard transport today.
 8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
-   `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`, and the 0.11
-   provider-state capabilities when they appear. A missing capability means "render the old
-   view", not "fail the dashboard".
+   `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`, and the 2.5
+   provider-state capabilities (`session.compaction`, `session.notices`, `session.plan`,
+   `session.title`, `session.agent`, `session.messages`). A missing capability means "render
+   the old view", not "fail the dashboard".
 
 ## Known gaps and how to handle them now
 
@@ -123,11 +124,11 @@ handling should be exercised against a slow/stalled consumer before it is truste
   above. The 100-id-per-subscription limit is fine for a single-screen dashboard; a very large
   fleet needs multiple subscriptions or a selected-session view. A fleet event scope is a
   candidate for the fleet-observation milestone (R-15/0.12), not a blocker.
-- **Provider-native state is lossy today.** Compaction is stored as `{}`, plan deltas render as
-  bare `plan.update`, provider titles are not in `SessionView`, provider agent name/version are
-  not in the view, and ACP inter-session messages become `raw`. A dashboard can ship the basic
-  session/transcript view now; 0.11 is planned to make these first-class (R-10–R-13).
-  Leave optional UI slots for them rather than parsing `raw`.
+- **Provider-native state is first-class as of 0.11.** Compaction, plans, titles, agent
+  identity, and ACP session messages are projected into `SessionView` and structured events.
+  Gate them on the `session.compaction`, `session.notices`, `session.plan`, `session.title`,
+  `session.agent`, and `session.messages` capabilities; an older supervisor simply lacks the
+  fields, so render the basic view. Leave no dependency on `raw`.
 - **No wire `logs`/`config show`/`find`/`usage` aggregation.** These are CLI-local or client
   assemblies. A dashboard that needs supervisor logs must read the file locally (as `hlao logs`
   does) or wait for a wire method; do not infer them from events. Usage per session is in
@@ -152,8 +153,9 @@ handling should be exercised against a slow/stalled consumer before it is truste
 - [ ] `truncated` is surfaced in the transcript, not hidden.
 - [ ] Unknown event types and fields have a generic fallback.
 - [ ] The token never reaches a browser origin.
-- [ ] The UI has optional slots for compaction, plan, title, and agent identity.
+- [ ] The UI has optional slots for compaction, plan, title, and agent identity, gated on the
+      2.5 capabilities.
 
 **Conclusion:** the dashboard can start now against wire major 2 with capability detection.
-0.11's provider-state additions are additive and will enrich the same views; they do not require
-a protocol break or a second surface.
+0.11's provider-state additions are in wire 2.5 and are additive; a 2.4 client ignores them, so
+the same view can grow without a protocol break or a second surface.

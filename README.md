@@ -88,12 +88,12 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 |---|---|
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
-| `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. |
+| `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
 | `hlao export <id> [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. |
-| `hlao get [<id>]` | One session's orchestration state without reading events. |
+| `hlao get [<id>]` | One session's orchestration state without reading events, including provider title, agent/version, plan, compaction, usage, pending permission, and lineage. |
 | `hlao find TEXT` | Search events across sessions (`list` + paged `read --grep`); `--all` includes retained histories. |
 | `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `settled`, `permission`, `exit`, or a filtered `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3 (for `settled`, termination is a valid completion). |
-| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/requester/model/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
+| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/requester/model/agent/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
@@ -131,9 +131,11 @@ Inside a session, `hlao read` is enough.
 
 Human reads show `HH:MM:SS` cursors (`--timestamps` switches to ISO), coalesce a streamed
 message into one block and start a new block when the adapter's message id changes, and strip
-ANSI/control sequences from agent-provided text. A tail read that lost history says how many
-events were evicted. `hlao list` marks the caller with `*` and reports the instance session
-count.
+ANSI/control sequences from agent-provided text. Provider-native updates are rendered directly:
+`compaction › status · summary`, `plan › 2/5 done · current: …`, `from <sender> › text` for ACP
+session messages, and `user › text`. A tail read that lost history says how many events were
+evicted. `hlao list` marks the caller with `*` and reports the instance session count; a
+provider title is used as a dim display fallback when the operator gave no name.
 
 ### Watching and operating a supervisor
 
@@ -144,7 +146,7 @@ owns no timer. `read --out FILE` writes the current page as JSON while normal ou
 it is the supported export path before `down`.
 
 `hlao list --watch` redraws the visible sessions every `--interval` (default 2s) and never
-starts a supervisor timer. `--wide` adds busy time, policy, requester, model, mode,
+starts a supervisor timer. `--wide` adds busy time, policy, requester, model, agent, mode,
 pending-permission title, and exit detail; `--tree` indents by lineage. Filters (`--status`,
 `--backend`, `--root`, `--name`, `--pending`, `--cwd` exact, `--cwd-prefix` subtree) run over
 the instance list, so they only narrow the local view. Human output sorts by recent activity
@@ -239,6 +241,15 @@ settings. `hlao option <id>` lists them and `hlao option <id> model opus` sets o
 `spawn --model opus` and `spawn --config key=value` apply them before the first prompt. They
 come from ACP `session/new` and `config_option_update`; a backend that advertises none shows
 nothing here.
+
+Provider-native session state is a fourth layer: compaction, plans, titles, agent identity,
+notices, and ACP inter-session messages. HLAO advertises the ACP capabilities for compaction,
+notices, and plans, and projects the updates into `read`, `get`, `list`, and the JSON session
+view. It does not advertise `subagents`: provider subagent sessions are out of scope, and a
+compliant adapter therefore will not send ACP session-directed messages. If one does, HLAO
+still records and renders the message rather than hiding its content behind `raw`. Context
+pressure is derived from usage updates and surfaced as a notice at 75% and 90%; there is no
+timer.
 
 ## Using it from an agent
 

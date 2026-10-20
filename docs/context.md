@@ -7,18 +7,19 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.10.0, built 2026-10-20 on `milestone/0.10-truth-pass`
-  (truth before features; protocol 2.4 additive).
+- **Version:** 0.11.0, built 2026-10-20 on `milestone/0.11-provider-state`
+  (provider-native state; protocol 2.5 additive).
 - **Status:** the primitive surface, supervisor, CLI, tests, and the four acceptance
   assemblies are implemented and green. The socket is a public client contract: the bundled
   CLI, a future dashboard/TUI, and an MCP server are interchangeable clients (ADR 0007).
   Every session in an HLAO instance is addressable by every caller; isolation is another
-  instance.
-- **Verification:** `npm test` runs 191 tests: 189 pass, 2 skipped (POSIX-only process-group
+  instance. Provider-native state (compaction, plans, titles, agent identity, notices, and
+  inter-session messages) is projected into `SessionView` and first-class events.
+- **Verification:** `npm test` runs 195 tests: 193 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
   ACP agent, including the acceptance assemblies and a raw-NDJSON conformance test that never
   invokes the CLI.
-- **Next:** 0.11 provider-native state is planned in `docs/milestones/0.11.md`; the dashboard
+- **Next:** fleet observation and bulk operations are the next ledger track; the dashboard
   wire-readiness assessment is `docs/protocol-stability.md`.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through

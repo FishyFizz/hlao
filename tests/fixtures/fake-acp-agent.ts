@@ -24,6 +24,7 @@ let nextSession = 0;
 let cancelActive: (() => void) | null = null;
 let currentMode = "default";
 let promptCount = 0;
+let clientCaps: unknown = null;
 let configValues: Record<string, string | boolean> = {
   model: "sonnet",
   verbose: false,
@@ -65,6 +66,7 @@ const app = agent({ name: "fake-acp" })
     if (mode === "crash-start") {
       process.exit(3);
     }
+    clientCaps = params.clientCapabilities ?? null;
     const startupDelay = Number(process.env.FAKE_STARTUP_DELAY_MS ?? 0);
     if (startupDelay > 0) {
       await new Promise((resolve) => setTimeout(resolve, startupDelay));
@@ -239,6 +241,90 @@ const app = agent({ name: "fake-acp" })
           // The supervisor cancels the pending request when the turn fails.
         });
       throw new Error("provider failed before the permission was answered");
+    }
+
+    if (mode === "signal") {
+      await send({
+        sessionUpdate: "session_info_update",
+        title: "Provider Session",
+        updatedAt: new Date().toISOString(),
+      });
+      await send({
+        sessionUpdate: "plan",
+        entries: [
+          { content: "inspect", priority: "high", status: "completed" },
+          { content: "implement", priority: "high", status: "in_progress" },
+          { content: "verify", priority: "medium", status: "pending" },
+        ],
+      });
+      await send({
+        sessionUpdate: "plan_update",
+        plan: {
+          type: "items",
+          planId: "plan-1",
+          entries: [
+            { content: "inspect", priority: "high", status: "completed" },
+            { content: "implement", priority: "high", status: "completed" },
+            { content: "verify", priority: "medium", status: "in_progress" },
+          ],
+        },
+      });
+      const planForm = process.env.FAKE_SIGNAL_PLAN;
+      if (planForm === "file") {
+        await send({
+          sessionUpdate: "plan_update",
+          plan: { type: "file", planId: "plan-file", uri: "file:///plan.md" },
+        });
+      } else if (planForm === "markdown") {
+        await send({
+          sessionUpdate: "plan_update",
+          plan: {
+            type: "markdown",
+            planId: "plan-md",
+            content: "# markdown plan\n\n1. one\n2. two",
+          },
+        });
+      } else if (planForm === "remove") {
+        await send({ sessionUpdate: "plan_removed", planId: "plan-1" });
+      }
+      await send({
+        sessionUpdate: "compaction_update",
+        compactionId: "cmp-1",
+        status: "in_progress",
+      });
+      await send({
+        sessionUpdate: "compaction_summary_chunk",
+        compactionId: "cmp-1",
+        content: { type: "text", text: "Summary of earlier work" },
+      });
+      await send({
+        sessionUpdate: "compaction_update",
+        compactionId: "cmp-1",
+        status: "completed",
+      });
+      await send({
+        sessionUpdate: "session_message",
+        messageId: "sms-1",
+        senderSessionId: "sibling",
+        recipientSessionId: "self",
+        content: [{ type: "text", text: "provider message" }],
+      });
+      await send({
+        sessionUpdate: "session_message_chunk",
+        messageId: "sms-2",
+        senderSessionId: "sibling",
+        recipientSessionId: "self",
+        content: { type: "text", text: "streamed provider message" },
+      });
+      await send({
+        sessionUpdate: "user_message_chunk",
+        messageId: "usr-1",
+        content: { type: "text", text: "provider user line" },
+      });
+      await send({ sessionUpdate: "usage_update", used: 150_000, size: 200_000 });
+      await send({ sessionUpdate: "usage_update", used: 185_000, size: 200_000 });
+      await message(`caps: ${JSON.stringify(clientCaps)}`);
+      return { stopReason: "end_turn" };
     }
 
     if (mode === "spawn-child") {

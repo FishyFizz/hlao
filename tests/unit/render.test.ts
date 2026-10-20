@@ -389,8 +389,67 @@ test("prompt, queue, and lifecycle events render their actor", () => {
   assert.match(output, /session closed \(by abc999\)/);
 });
 
-test("notice severity and raw payload state are visible", () => {
-  const notices = renderEvents(
+test("provider messages and compaction chunks coalesce", () => {
+  const output = renderEvents(
+    [
+      event(1, "session.message", {
+        messageId: "m1",
+        senderSessionId: "s1",
+        recipientSessionId: "self",
+        text: "hello ",
+        chunk: true,
+      }),
+      event(2, "session.message", {
+        messageId: "m1",
+        senderSessionId: "s1",
+        recipientSessionId: "self",
+        text: "world",
+        chunk: true,
+      }),
+      event(3, "user.message", { messageId: "u1", text: "line one " }),
+      event(4, "user.message", { messageId: "u1", text: "line two" }),
+      event(5, "compaction", { compactionId: "c1", text: "summary ", chunk: true }),
+      event(6, "compaction", { compactionId: "c1", text: "text", chunk: true }),
+      event(7, "compaction", { compactionId: "c1", status: "completed" }),
+    ],
+    style,
+    "abc123",
+  ).join("\n");
+
+  assert.match(output, /from s1 › hello world/);
+  assert.match(output, /user › line one line two/);
+  assert.match(output, /compaction › summary text/);
+  assert.match(output, /compaction › completed/);
+});
+
+test("plan deltas render a compact count and removal", () => {
+  const output = renderEvents(
+    [
+      event(1, "plan.update", {
+        planId: "p1",
+        kind: "items",
+        entries: [
+          { content: "a", status: "completed" },
+          { content: "b", status: "in_progress" },
+        ],
+      }),
+      event(2, "plan.update", { removed: true, planId: "p1" }),
+      event(3, "plan.update", {
+        planId: "p2",
+        kind: "file",
+        uri: "file:///p.md",
+      }),
+    ],
+    style,
+    "abc123",
+  ).join("\n");
+
+  assert.match(output, /plan › 1\/2 done · current: b/);
+  assert.match(output, /plan › removed p1/);
+  assert.match(output, /plan › file file:\/\/\/p\.md/);
+});
+
+test("notice severity and raw payload state are visible", () => {  const notices = renderEvents(
     [
       event(1, "notice", { severity: "warning", title: "careful" }),
       event(2, "notice", { severity: "error", title: "bad" }),

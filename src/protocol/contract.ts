@@ -39,6 +39,7 @@ export const EVENT_TYPES = [
   "agent.message",
   "agent.thought",
   "user.message",
+  "session.message",
   "tool.call",
   "tool.update",
   "plan",
@@ -106,6 +107,34 @@ export interface SessionUsageView {
   at: string;
 }
 
+/** The latest provider compaction, projected from ACP compaction updates. */
+export interface SessionCompactionView {
+  id: string;
+  status: string;
+  summary: string | null;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface SessionPlanEntryView {
+  content: string;
+  priority: string;
+  status: string;
+}
+
+/**
+ * The latest provider plan. A full ACP `plan` update has no plan ID, so
+ * `planId` is null for that form; deltas and removals carry the provider ID.
+ */
+export interface SessionPlanView {
+  planId: string | null;
+  kind: "items" | "file" | "markdown";
+  entries?: SessionPlanEntryView[];
+  uri?: string;
+  content?: string;
+  updatedAt: string;
+}
+
 export interface SessionView {
   id: string;
   name: string | null;
@@ -145,6 +174,15 @@ export interface SessionView {
   configOptions: SessionConfigOptionView[] | null;
   /** Latest provider usage snapshot, or null when the adapter reported none. */
   usage: SessionUsageView | null;
+  /** Latest provider compaction, or null when none was reported (2.5). */
+  compaction?: SessionCompactionView | null;
+  /** Latest provider plan, or null when none is current (2.5). */
+  plan?: SessionPlanView | null;
+  /** Provider session title from ACP `session_info_update` (2.5). */
+  title?: string | null;
+  /** Provider agent identity from ACP initialize (2.5). */
+  agentName?: string | null;
+  agentVersion?: string | null;
 }
 
 export interface EventView {

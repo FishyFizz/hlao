@@ -21,8 +21,11 @@ import type {
   EventView,
   PermissionPolicy,
   QueueItemView,
+  SessionCompactionView,
   SessionConfigOptionView,
   SessionModes,
+  SessionPlanEntryView,
+  SessionPlanView,
   SessionStatus,
   SessionUsageView,
   SessionView,
@@ -44,6 +47,8 @@ import {
   waitForExit,
 } from "./session/process.js";
 import {
+  contentBlocksText,
+  contentText,
   eventTitle,
   previewText,
   projectUpdate,
@@ -168,6 +173,12 @@ export class Session {
   #pending: PendingPermission | null = null;
   #lastStopReason: StopReason | null = null;
   #usage: SessionUsageView | null = null;
+  #compaction: SessionCompactionView | null = null;
+  #plan: SessionPlanView | null = null;
+  #title: string | null = null;
+  #agentName: string | null = null;
+  #agentVersion: string | null = null;
+  #contextPressure = { warn75: false, warn90: false };
   #lastActivityAt: string;
   #endedAt: string | null = null;
   #exit: { code: number | null; signal: string | null } | null = null;
@@ -293,6 +304,18 @@ export class Session {
             cost: this.#usage.cost ? { ...this.#usage.cost } : null,
           }
         : null,
+      compaction: this.#compaction ? { ...this.#compaction } : null,
+      plan: this.#plan
+        ? {
+            ...this.#plan,
+            ...(this.#plan.entries
+              ? { entries: this.#plan.entries.map((entry) => ({ ...entry })) }
+              : {}),
+          }
+        : null,
+      title: this.#title,
+      agentName: this.#agentName,
+      agentVersion: this.#agentVersion,
     };
   }
 
@@ -1357,7 +1380,14 @@ export class Session {
             // Boolean config options are optional in ACP; advertising support
             // lets an adapter include them and accept boolean set requests.
             configOptions: { boolean: {} },
+            // Provider-native context state. A compliant adapter only sends
+            // compaction updates and live notices when these are advertised.
+            compaction: {},
+            notices: {},
           },
+          // Experimental plan deltas/removals. Full plan replacements remain
+          // valid for an adapter that does not opt into the experimental form.
+          plan: {},
         },
         clientInfo: { name: "hlao", version: VERSION },
       }),
@@ -1372,6 +1402,8 @@ export class Session {
       );
     }
     this.#caps = init.agentCapabilities ?? {};
+    this.#agentName = init.agentInfo?.name ?? null;
+    this.#agentVersion = init.agentInfo?.version ?? null;
 
     const created = await withTimeout(
       this.#conn.agent.request("session/new", {
@@ -1429,6 +1461,7 @@ export class Session {
       if (messageId !== null) this.#lastMessageId = messageId;
     }
     const mapped = projectUpdate(update);
+    this.#applyProviderState(update);
     if (
       mapped.type === "config" &&
       update.sessionUpdate === "config_option_update"
@@ -1451,6 +1484,137 @@ export class Session {
     );
     if (mapped.type === "tool.update" && event.data.status === "failed") {
       this.#lastActivityAt = nowIso();
+    }
+    if (update.sessionUpdate === "usage_update") {
+      this.#checkContextPressure(update.used, update.size);
+    }
+  }
+
+  /** Project the provider's own session state into the view. */
+  #applyProviderState(update: SessionNotification["update"]): void {
+    const at = nowIso();
+    switch (update.sessionUpdate) {
+      case "compaction_update": {
+        const same = this.#compaction?.id === update.compactionId;
+        const summary =
+          update.summary === undefined
+            ? same
+              ? this.#compaction!.summary
+              : null
+            : update.summary === null
+              ? null
+              : contentBlocksText(update.summary);
+        const error =
+          update.error === undefined
+            ? same
+              ? this.#compaction!.error
+              : null
+            : update.error;
+        this.#compaction = {
+          id: update.compactionId,
+          status: update.status,
+          summary,
+          error,
+          updatedAt: at,
+        };
+        break;
+      }
+      case "compaction_summary_chunk": {
+        const text = contentText(update.content);
+        if (this.#compaction?.id === update.compactionId) {
+          this.#compaction = {
+            ...this.#compaction,
+            summary: `${this.#compaction.summary ?? ""}${text}`,
+            updatedAt: at,
+          };
+        } else {
+          this.#compaction = {
+            id: update.compactionId,
+            status: "in_progress",
+            summary: text,
+            error: null,
+            updatedAt: at,
+          };
+        }
+        break;
+      }
+      case "plan": {
+        this.#plan = {
+          planId: null,
+          kind: "items",
+          entries: planEntries(update.entries),
+          updatedAt: at,
+        };
+        break;
+      }
+      case "plan_update": {
+        const plan = update.plan;
+        if (plan.type === "items") {
+          this.#plan = {
+            planId: plan.planId,
+            kind: "items",
+            entries: planEntries(plan.entries),
+            updatedAt: at,
+          };
+        } else if (plan.type === "file") {
+          this.#plan = {
+            planId: plan.planId,
+            kind: "file",
+            uri: plan.uri,
+            updatedAt: at,
+          };
+        } else {
+          this.#plan = {
+            planId: plan.planId,
+            kind: "markdown",
+            content: plan.content,
+            updatedAt: at,
+          };
+        }
+        break;
+      }
+      case "plan_removed": {
+        if (
+          this.#plan !== null &&
+          (this.#plan.planId === null || this.#plan.planId === update.planId)
+        ) {
+          this.#plan = null;
+        }
+        break;
+      }
+      case "session_info_update": {
+        if (update.title !== undefined) this.#title = update.title;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /** Derive context-pressure notices from provider usage; no timer. */
+  #checkContextPressure(used: number, size: number): void {
+    if (!(size > 0) || !Number.isFinite(used)) return;
+    const ratio = used / size;
+    if (ratio < 0.7) {
+      this.#contextPressure = { warn75: false, warn90: false };
+      return;
+    }
+    const percent = Math.round(ratio * 100);
+    if (ratio >= 0.75 && !this.#contextPressure.warn75) {
+      this.#contextPressure.warn75 = true;
+      this.#emit("notice", {
+        severity: "warning",
+        title: "context pressure",
+        description: `${used}/${size} tokens (${percent}%)`,
+      });
+    }
+    if (ratio >= 0.9 && !this.#contextPressure.warn90) {
+      this.#contextPressure.warn90 = true;
+      this.#emit("notice", {
+        severity: "error",
+        title: "context pressure",
+        description: `${used}/${size} tokens (${percent}%)`,
+      });
     }
   }
 
@@ -1652,4 +1816,15 @@ export class Session {
       }
     }
   }
+}
+
+/** Strip provider `_meta` and keep the plan-entry fields HLAO displays. */
+function planEntries(
+  entries: Array<{ content: string; priority: string; status: string }>,
+): SessionPlanEntryView[] {
+  return entries.map(({ content, priority, status }) => ({
+    content,
+    priority,
+    status,
+  }));
 }

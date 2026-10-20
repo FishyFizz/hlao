@@ -1,7 +1,7 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-20 after milestone 0.10. The additive 0.10 review was merged here and
+**Updated:** 2026-10-20 after milestone 0.11. The additive 0.10 review was merged here and
 deleted after its resolved findings were removed.
 **Scope:** unresolved findings only. This is the long-standing ledger. The 0.1–0.4 review, the
 0.5 review, and the 0.10 review were merged here; resolved items were removed. Shipped fixes
@@ -27,9 +27,12 @@ text or references, never payloads.
 exit semantics (R-03, R-31), the `get` state block (R-04), `list --cwd` counts (R-05),
 fail-fast config startup (R-06), crash signalling (R-07), the worker-loop deadlock and pointer
 audit (R-08, R-09), message ids in human output (R-26), release metadata (R-28), the selected
-R-30 polish, the documentation half of R-14, and P2-0.5-18. Those entries were removed. The
-residual R-13 provider identity item, R-14's mechanism, and every other open 0.10 finding are
-below.
+R-30 polish, the documentation half of R-14, and P2-0.5-18. Those entries were removed.
+
+0.11 resolved provider-native state: compaction and notices (R-10), plans and titles (R-11),
+ACP session messages and user-message chunks (R-12), and the residual agent identity (R-13).
+Those sections were removed; the wire is now 2.5. `docs/protocol-stability.md` records the
+dashboard readiness assessment. R-14's mechanism and every other open finding are below.
 
 ---
 
@@ -140,88 +143,6 @@ caller-owned `wait --until permission` notification loop the documented pattern.
 
 **Effort:** S/M.
 
-### Provider-native state (from the 0.10 review)
-
-This is the largest feature-shaped gap. The wire carries ACP signals, but HLAO both fails to ask
-for the interesting ones and then throws away their structure. It is the only remaining pass
-that changes ACP client capability advertisement.
-
-#### R-10. Context compaction is invisible by construction — P1
-
-HLAO's ACP `initialize` advertises only `session.configOptions.boolean`. It does not advertise
-`session.compaction`, `session.notices`, or `plan`, so a compliant adapter is told not to send
-the signals an operator needs on a long job. When a custom agent sent valid compaction updates
-anyway, HLAO stored `{"type":"compaction","data":{}}` and human `read` printed a bare
-`compaction` line. Default JSON drops the private payload; `SessionView` has no compaction
-field, `get`/`list` show nothing, and there is no context-pressure warning. The only context
-signal is the latest `usage` snapshot.
-
-**Why it matters.** Long-running jobs are exactly where an agent hits its context limit.
-Compaction is the moment its memory changes; an operator who cannot see it cannot tell why a
-previously reliable agent started forgetting the task.
-
-**Fix shape.** Advertise `session.compaction` (and `session.notices`) and project
-`compactionId`, status, summary/error into first-class event data. Add `SessionView.compaction`
-and a `context` summary; render `compaction › started/completed · summary`; add a
-context-pressure warning as an event/notice, not a timer. Add `wait --until compaction` only if
-the event is reliable; otherwise document a caller loop over usage. Do not implement a
-scheduler.
-
-**Effort:** M.
-
-#### R-11. Plan deltas and provider session titles never reach the session view — P1
-
-A valid `plan_update` produced JSON with the whole plan under `data.update.plan`, but human
-`read` printed only `plan.update`; `plan_removed` loses `planId`. The initial `plan` event is
-rendered well; only deltas are invisible. `session_info_update` is rendered as `session › title`
-but the title is not stored in `SessionView`, so `get`/`list` cannot show it. HLAO also does not
-advertise the experimental `plan` capability, so a compliant adapter may never send deltas.
-
-**Why it matters.** The current plan is the closest thing to "what is the agent doing next?"
-and a title is the cheapest way to distinguish ten sessions. Both are already on the wire and
-both are missing from the state view.
-
-**Fix shape.** Project the latest plan into `SessionView.plan` (entries plus updatedAt) and the
-latest title into `SessionView.title`; render plan changes as diffs or a compact
-`plan › 2/5 done · current: …`; use the provider title as a fallback label in `list` (operator
-name wins). Advertise `plan` if deltas are wanted, and document that experimental updates are
-opt-in. Keep `plan_removed` carrying `planId`.
-
-**Effort:** M.
-
-#### R-12. ACP inter-session messages and user-message chunks are dropped or hidden — P1
-
-A valid `session_message` and `session_message_chunk` were projected as generic `raw` with
-`data:{}`; the ACP fields (`messageId`, `senderSessionId`, `recipientSessionId`, `content`)
-survive only under `--raw`. Separately, `user_message_chunk` maps to `user.message` with
-text/messageId, but the human renderer has a bare `break`, so filtering `read --type
-user.message` prints a header and no events.
-
-**Why it matters.** ACP's experimental `session_message` is a protocol-level version of HLAO's
-own inter-session messaging. If a provider adapter starts using it, HLAO's default JSON and
-human transcript show `raw`/nothing. `user_message_chunk` is a standard way to surface a user
-line. The default wire contract should not require `--raw` to see message content.
-
-**Fix shape.** Add first-class event types/fields for ACP session messages, render them like
-`prompt.sent` with the real sender, and render `user.message` (possibly coalesced) instead of
-ignoring it. If these are intentionally out of scope, document that HLAO ignores ACP's
-inter-session channel and stop exposing `raw` as a usable projection. Update the event-type
-filter help to say which types have no human rendering.
-
-**Effort:** M.
-
-#### R-13 (residual). Provider agent name and version are not in the session view — P2
-
-0.10 added MODEL and REQUESTER to `list --wide`, `createdBy` to the spawn/read views, and model
-and requester to `get`. The remaining gap is provider identity: `session.initialized` JSON
-carries `agentName` and `agentVersion`, but `SessionView` has neither, so `get`/`list` cannot
-show which adapter and version produced the state.
-
-**Fix shape.** Add `agentName`/`agentVersion` to `SessionView` in the provider-state pass and
-show them in `get`'s state block and an `AGENT`/`VERSION` column or `--fields` projection.
-
-**Effort:** S.
-
 ### Fleet observation (from the 0.10 review)
 
 #### R-15. There is no fleet-level live event stream or merged timeline — P1
@@ -277,7 +198,7 @@ complements P2-0.5-9.
 | `hlao init` / `config init` | Scaffold user or project config | Hand-write JSON | Write an example config with validation |
 | `hlao restart` | Upgrade/clean restart | `down`, then the next command | Explicit command with a loss warning |
 | `doctor --cwd DIR` | Check a project config | Uses the process cwd | Add the flag |
-| Adapter versions | Diagnose drift | Doctor shows the supervisor version; `agents` shows command paths | Adapter package versions and protocol version (see R-13 residual) |
+| Adapter versions | Diagnose drift | Doctor shows the supervisor version; `agents` shows command paths; per-session agent name/version is in `get`/`list --wide` | Adapter package versions and protocol version |
 | Project policy/timeouts | Per-repo gating | Project schema accepts only `backends` | Extend the project schema deliberately |
 | Per-backend defaults | A backend may imply cwd/mode/policy | All per spawn | Manifest defaults with CLI override |
 | Env interpolation | Portable configs | Literal strings only | `${VAR}` and `~` expansion with explicit rules |
@@ -395,9 +316,8 @@ The remaining work is grouped so each milestone has one design decision:
 2. **0.9 — maintenance.** Shipped.
 3. **0.10 — truth before features.** Shipped; resolved the truth pass and merged its review
    here. See `docs/milestones/0.10.md`.
-4. **0.11 — provider-native state.** R-10..R-12 and the R-13 residual: advertise and project
-   ACP compaction, notices, plans, titles, and inter-session messages. This is the only
-   remaining ACP-capability decision. See `docs/milestones/0.11.md`.
+4. **0.11 — provider-native state.** Shipped; resolved R-10..R-13 (compaction, notices, plans,
+   titles, agent identity, and ACP session messages). See `docs/milestones/0.11.md`.
 5. **0.12 — fleet observation and bulk operations.** R-15, R-17, R-18, R-21, R-22, R-23, R-25,
    R-29.
 6. **Safety and policy.** N-08 enforcement, N-10, N-11, and R-14's mechanism. This may move
@@ -420,7 +340,7 @@ the answer is recorded as an event.
 
 ## Note
 
-Everything above remains outside the implemented 0.10 surface. The implementation and its tests
+Everything above remains outside the implemented 0.11 surface. The implementation and its tests
 are described in `README.md`, `contracts/`, and `docs/milestones/0.2.md` through
-`docs/milestones/0.10.md`. 0.10 resolved the truth pass, then merged the 0.10 review into this
-ledger and deleted `FEATURE-REVIEW-0.10.md`.
+`docs/milestones/0.11.md`. 0.11 resolved provider-native state (R-10..R-13), then merged the
+0.10 review into this ledger and deleted `FEATURE-REVIEW-0.10.md`.

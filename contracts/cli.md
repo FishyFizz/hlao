@@ -104,7 +104,7 @@ still discards the queue.
 caller's root subtree, from `HLAO_ROOT_ID` or `HLAO_SESSION_ID`), `--name`
 (substring), `--pending`, `--cwd DIR` (exact working directory), and `--cwd-prefix DIR`
 (subtree). Filters never change the instance counts in the footer. `--wide` adds BUSY,
-POLICY, REQUESTER, MODEL, MODE, PENDING, and EXIT; `--tree` groups by root and indents by
+POLICY, REQUESTER, MODEL, AGENT, MODE, PENDING, and EXIT; `--tree` groups by root and indents by
 depth. Human output defaults to `--sort activity`; JSON preserves supervisor order unless
 `--sort activity` is explicit. `--watch` is a caller-owned redraw loop: one full result per
 line under `--json`, or a cleared screen in a TTY. It never changes supervisor state.
@@ -149,8 +149,9 @@ per-session failures without stopping the others. `policy --root SESSION allow` 
 policy to the set.
 
 `get [<id>]` prints one session's state without events (`sessions.get`): status, turn, queue,
-settlement, policy, modes, config options, usage, pending permission, lineage, exit, and cwd.
-`--brief` prints only the standard header. `find TEXT [--all] [--type T]... [--max N]` scans
+settlement, provider title, agent name/version, plan, compaction, policy, modes, config
+options, usage, pending permission, lineage, exit, and cwd. `--brief` prints only the standard
+header. `find TEXT [--all] [--type T]... [--max N]` scans
 live sessions (retained too with `--all`) by paging `read --grep`; it is capped at 20 pages per
 session and reports when a scan was capped.
 
@@ -166,6 +167,12 @@ before the condition (or `--fail-if-failed` saw a failure), and `0` otherwise.
 totals cost per currency and says "context: latest per session"; token snapshots are not
 additive and are not summed. The JSON session view always carries `usage`, whether or not
 `--usage` is passed.
+
+Human `read` renders provider-native state directly (2.5): compaction updates and coalesced
+summary chunks, compact plan deltas and removals, `session.message` as
+`from <sender> › text`, and `user.message` as `user › text`. Provider titles are used as a
+display-only fallback in `list` when no operator name exists, and `list --wide` shows the agent
+as `name@version`.
 
 `list` always fetches the full table and reports `{sessions, counts: {live, retained, total}}`
 in JSON. Human output hides `closed` by default; `--all`, `--tree`, or `--status closed` show

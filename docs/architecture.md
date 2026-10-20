@@ -69,6 +69,9 @@ Three modules have focused submodules. `protocol.ts` is a barrel over `protocol/
 (wire constants and capabilities), `protocol/contract.ts` (types and method names), and
 `protocol/parse.ts` (boundary validation). `session.ts` keeps the `Session` state machine;
 `session/{queue,async,process,permissions,projection}.ts` hold its pure helpers.
+`session/projection.ts` also maps ACP provider updates (agent/thought chunks, tools, plans,
+compaction, notices, titles, and inter-session messages) into first-class events; the session
+keeps the latest provider state in `SessionView`.
 `supervisor.ts` keeps the server; `supervisor/{util,resolve}.ts` hold helpers and token
 resolution. Submodules never import their own barrel.
 

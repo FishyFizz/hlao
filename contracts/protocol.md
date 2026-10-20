@@ -113,7 +113,9 @@ The token is the instance boundary.
   be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
   `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`, `wait.settled`,
   `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
-  `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`.
+  `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
+  `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
+  `session.messages`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -132,6 +134,11 @@ The token is the instance boundary.
   answering) and `prompt.sent.data.injected` (the skill version, path, and block count for
   the first prompt). Capabilities: `supervisor.lastCrash`, `prompt.injected`. Both are
   optional; a client that ignores them is unaffected.
+- **2.5** adds optional provider-native fields to `SessionView` (`compaction`, `plan`, `title`,
+  `agentName`, `agentVersion`), the `session.message` event type, normalized `plan.update`
+  data, and structured `compaction` data. Capabilities: `session.compaction`,
+  `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`.
+  A client that ignores the fields and event type is unaffected.
 
 ## Methods
 
@@ -635,7 +642,7 @@ type EventType =
   | "session.closed" | "session.failed"
   | "prompt.sent" | "prompt.queued" | "prompt.discarded"
   | "turn.started" | "turn.ended" | "cancel.requested"
-  | "agent.message" | "agent.thought" | "user.message"
+  | "agent.message" | "agent.thought" | "user.message" | "session.message"
   | "tool.call" | "tool.update" | "plan" | "plan.update"
   | "permission.requested" | "permission.resolved" | "policy.changed"
   | "notice" | "usage" | "mode" | "config" | "commands" | "session.info"
@@ -660,6 +667,25 @@ Actor fields are explicit:
   mode/config option.
 - `permission.resolved` with `optionId: null` also carries `reason` (for example `"cancel"`,
   `"close"`, `"turn-ended"`).
+
+Provider-native events (2.5) are structured; `raw` is not required to read them:
+
+- `compaction` carries `compactionId`, and either a `status` plus optional `summary`/`error`
+  (`compaction_update`) or `text` with `chunk: true` (`compaction_summary_chunk`). Later
+  updates with the same id patch the entity; chunks append to its summary.
+- `plan.update` keeps the ACP `update` object for compatibility and adds `planId`, `kind`
+  (`items`/`file`/`markdown`), and the matching `entries`, `uri`, or `content`. A removal is
+  `{ removed: true, planId }`.
+- `session.message` carries `messageId`, `senderSessionId`, `recipientSessionId`, `text`, and
+  `chunk`. It is the first-class projection of ACP `session_message`/
+  `session_message_chunk`; the raw ACP content remains under `raw`. ACP gates these updates
+  on the experimental `subagents` capability, which HLAO deliberately does not advertise; a
+  compliant adapter will not send them, and HLAO still projects them if a custom adapter does.
+- `session.info` carries the provider `title`; `session.initialized` carries `agentName` and
+  `agentVersion`.
+- A `notice` may be derived from a `usage` update at 75% and 90% of the context size; the
+  notice severity is `warning` then `error`, and the thresholds reset below 70%. This is
+  derived state, not a timer.
 
 ## Session view
 
@@ -712,6 +738,24 @@ type SessionView = {
     cost: { amount: number; currency: string } | null; // amount in minor units
     at: string;                                       // usage event timestamp
   } | null;
+  compaction?: {                 // latest provider compaction (2.5)
+    id: string;
+    status: string;
+    summary: string | null;
+    error: string | null;
+    updatedAt: string;
+  } | null;
+  plan?: {                       // latest provider plan (2.5)
+    planId: string | null;       // null for a full ACP plan without an ID
+    kind: "items" | "file" | "markdown";
+    entries?: { content: string; priority: string; status: string }[];
+    uri?: string;
+    content?: string;
+    updatedAt: string;
+  } | null;
+  title?: string | null;         // provider session title (2.5)
+  agentName?: string | null;     // provider agent identity (2.5)
+  agentVersion?: string | null;
 };
 
 type PermissionView = {

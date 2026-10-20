@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.11.0 — unreleased
+
+### Added
+
+- HLAO advertises ACP `session.compaction`, `session.notices`, and the experimental `plan`
+  capability. Provider-native session state is now first-class: compaction updates and
+  summaries, plan updates/removals, provider titles, agent name/version, and ACP inter-session
+  messages.
+- `SessionView` adds optional `compaction`, `plan`, `title`, `agentName`, and `agentVersion`.
+  `get` shows them; `list` uses a provider title only as a display fallback; `list --wide` adds
+  an `AGENT` column.
+- Human `read` renders compaction summaries, plan deltas/removals, ACP session messages
+  (`from <sender> › text`), and `user.message` lines instead of bare event names.
+- Context pressure emits a warning notice at 75% and an error notice at 90% of the provider's
+  context size, derived from usage events. There is no new timer.
+- Protocol 2.5 (additive): new event type `session.message`; new capabilities
+  `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
+  and `session.messages`.
+
+### Changed
+
+- `plan_update` keeps its existing `update` field and adds normalized `planId`, `kind`,
+  `entries`, `uri`, and `content`; `plan_removed` carries `planId`.
+- `subagents` remains deliberately unadvertised. ACP session-directed messages are gated by
+  that capability, so a compliant adapter will not send them; HLAO still projects them
+  defensively if a custom adapter does. Provider subagent sessions are out of scope.
+
 ## 0.10.0 — unreleased
 
 ### Added

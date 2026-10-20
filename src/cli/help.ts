@@ -252,9 +252,9 @@ advance past non-matching events. Tool payloads are omitted unless
     get: `hlao get [<id>] [--brief]
 
 Print one session's orchestration state without reading events: status, turn,
-queue, settlement, policy, modes, config options, usage, pending permission,
-and lineage. --brief prints only the header. Inside a session, omit
-<id> or pass --self.`,
+queue, settlement, provider title, agent name/version, plan, compaction, policy,
+modes, config options, usage, pending permission, and lineage. --brief prints
+only the header. Inside a session, omit <id> or pass --self.`,
     find: `hlao find TEXT [--all] [--type TYPE]... [--max N]
 
 Search events across sessions. It is a bounded client loop: list sessions, then
@@ -334,9 +334,9 @@ Filters: --status S[,S], --backend NAME, --root SESSION, --mine (the caller's
 own root subtree, from HLAO_ROOT_ID/HLAO_SESSION_ID), --name TEXT, --pending,
 --cwd DIR (exact working directory), and --cwd-prefix DIR (subtree). Filters
 never change the instance counts in the footer. --sort created|activity (human
-default: activity). --wide adds BUSY, POLICY, REQUESTER, MODEL, MODE, PENDING,
-and EXIT; --usage adds USAGE/COST and a per-currency footer total; --tree groups
-and indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
+default: activity). --wide adds BUSY, POLICY, REQUESTER, MODEL, AGENT, MODE,
+PENDING, and EXIT; --usage adds USAGE/COST and a per-currency footer total; --tree
+groups and indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
 emits one result per line) until Ctrl-C.`,
     cancel: `hlao cancel [<id>] [--keep-queue] [--wait]
 

@@ -69,7 +69,7 @@ export function renderSessionTable(
     const base = [
       ...(showSelf ? [session.id === selfId ? "*" : ""] : []),
       `${indent}${session.id}`,
-      oneLine(session.name ?? "—"),
+      displayName(session, style),
       session.backend,
       styleStatus(
         session.status === "idle" && session.queued > 0
@@ -92,6 +92,7 @@ export function renderSessionTable(
         session.permissionPolicy,
         session.createdBy ? oneLine(session.createdBy) : "—",
         modelLabel(session),
+        agentLabel(session),
         session.modes?.currentModeId ?? "—",
         session.pendingPermission
           ? truncateRight(oneLine(session.pendingPermission.title), 30)
@@ -130,6 +131,7 @@ export function renderSessionTable(
             "POLICY",
             "REQUESTER",
             "MODEL",
+            "AGENT",
             "MODE",
             "PENDING",
             "EXIT",
@@ -184,11 +186,61 @@ function modelLabel(session: SessionView): string {
   return model ? oneLine(String(model.currentValue)) : "—";
 }
 
+/** Provider agent identity as one compact cell. */
+function agentLabel(session: SessionView): string {
+  const name = session.agentName ? oneLine(session.agentName) : null;
+  const version = session.agentVersion ? oneLine(session.agentVersion) : null;
+  if (name === null) return "—";
+  return version ? `${name}@${version}` : name;
+}
+
+/**
+ * Operator names win. A provider title is a display-only fallback, marked dim
+ * so it is not mistaken for an addressable name.
+ */
+function displayName(session: SessionView, style: Style): string {
+  if (session.name) return oneLine(session.name);
+  if (session.title) return style.dim(oneLine(session.title));
+  return "—";
+}
+
+function planLabel(session: SessionView): string {
+  const plan = session.plan;
+  if (!plan) return "—";
+  if (plan.kind === "items") {
+    const entries = plan.entries ?? [];
+    const done = entries.filter((entry) => entry.status === "completed").length;
+    const current =
+      entries.find((entry) => entry.status === "in_progress") ??
+      entries.find((entry) => entry.status === "pending");
+    return (
+      `${done}/${entries.length} done` +
+      (current ? ` · current: ${oneLine(current.content)}` : "")
+    );
+  }
+  if (plan.kind === "file") return `file ${oneLine(plan.uri ?? "")}`;
+  return `markdown · ${truncateRight(oneLine(plan.content ?? ""), 80)}`;
+}
+
+function compactionLabel(session: SessionView): string {
+  const compaction = session.compaction;
+  if (!compaction) return "—";
+  const detail = compaction.error ?? compaction.summary;
+  return (
+    compaction.status +
+    (detail ? ` · ${truncateRight(oneLine(detail), 100)}` : "")
+  );
+}
+
 export function renderSessionHeader(session: SessionView, style: Style): string {
   const terminal = isTerminalStatus(session.status);
   const parts = [
     style.bold(session.id),
-    session.name ? style.cyan(oneLine(session.name)) : null,
+    session.name
+      ? style.cyan(oneLine(session.name))
+      : session.title
+        ? style.dim(oneLine(session.title))
+        : null,
     session.backend,
     styleStatus(session.status, style),
   ].filter((part): part is string => part !== null);
@@ -228,7 +280,11 @@ export function renderSessionState(
   const terminal = isTerminalStatus(session.status);
   const head = [
     style.bold(session.id),
-    session.name ? style.cyan(oneLine(session.name)) : null,
+    session.name
+      ? style.cyan(oneLine(session.name))
+      : session.title
+        ? style.dim(oneLine(session.title))
+        : null,
     session.backend,
     styleStatus(session.status, style),
   ]
@@ -283,6 +339,10 @@ export function renderSessionState(
   return [
     head,
     style.dim(`state    ${state}`),
+    style.dim(`title    ${session.title ? oneLine(session.title) : "—"}`),
+    style.dim(`agent    ${agentLabel(session)}`),
+    style.dim(`plan     ${planLabel(session)}`),
+    style.dim(`compaction ${compactionLabel(session)}`),
     style.dim(`policy   ${session.permissionPolicy} · mode ${mode}`),
     style.dim(`config   ${config}`),
     style.dim(`usage    ${usage}`),
@@ -389,6 +449,22 @@ export function renderEvents(
   let lastDay = "";
   let agentDay = false;
   let thoughtDay = false;
+  let userText = "";
+  let userSeq = 0;
+  let userAt = "";
+  let userMessageId: string | null = null;
+  let userDay = false;
+  let providerText = "";
+  let providerSeq = 0;
+  let providerAt = "";
+  let providerMessageId: string | null = null;
+  let providerSender: string | null = null;
+  let providerDay = false;
+  let compactionText = "";
+  let compactionSeq = 0;
+  let compactionAt = "";
+  let compactionId: string | null = null;
+  let compactionDay = false;
 
   const dayKey = (at: string): string => {
     const date = new Date(at);
@@ -419,9 +495,38 @@ export function renderEvents(
       thoughtDay = false;
     }
   };
+  const flushUser = (): void => {
+    if (userText.length > 0) {
+      lines.push(`${cursor(userSeq, userAt, style, full, userDay)}${style.bold("user")} › ${indent(userText)}`);
+      userText = "";
+      userMessageId = null;
+      userDay = false;
+    }
+  };
+  const flushProvider = (): void => {
+    if (providerText.length > 0) {
+      const who = providerSender ? `from ${providerSender}` : "message";
+      lines.push(`${cursor(providerSeq, providerAt, style, full, providerDay)}${style.bold(who)} › ${indent(providerText)}`);
+      providerText = "";
+      providerMessageId = null;
+      providerSender = null;
+      providerDay = false;
+    }
+  };
+  const flushCompaction = (): void => {
+    if (compactionText.length > 0) {
+      lines.push(`${cursor(compactionSeq, compactionAt, style, full, compactionDay)}${style.magenta("compaction")} › ${indent(compactionText)}`);
+      compactionText = "";
+      compactionId = null;
+      compactionDay = false;
+    }
+  };
   const flush = (): void => {
     flushAgent();
     flushThought();
+    flushUser();
+    flushProvider();
+    flushCompaction();
   };
 
   for (const event of events) {
@@ -430,6 +535,9 @@ export function renderEvents(
     switch (event.type) {
       case "agent.message": {
         flushThought();
+        flushUser();
+        flushProvider();
+        flushCompaction();
         const messageId = typeof data.messageId === "string" ? data.messageId : null;
         if (agentMessageId !== null && messageId !== null && messageId !== agentMessageId) {
           flushAgent();
@@ -445,6 +553,9 @@ export function renderEvents(
       }
       case "agent.thought": {
         flushAgent();
+        flushUser();
+        flushProvider();
+        flushCompaction();
         if (thoughtText.length === 0) {
           thoughtSeq = event.seq;
           thoughtAt = event.at;
@@ -453,8 +564,54 @@ export function renderEvents(
         thoughtText += typeof data.text === "string" ? data.text : "";
         break;
       }
-      case "user.message":
+      case "user.message": {
+        flushAgent();
+        flushThought();
+        flushProvider();
+        flushCompaction();
+        const messageId = typeof data.messageId === "string" ? data.messageId : null;
+        if (userMessageId !== null && messageId !== null && messageId !== userMessageId) {
+          flushUser();
+        }
+        if (userText.length === 0) {
+          userSeq = event.seq;
+          userAt = event.at;
+          userDay = dayChanged;
+        }
+        if (messageId !== null) userMessageId = messageId;
+        userText += typeof data.text === "string" ? data.text : "";
         break;
+      }
+      case "session.message": {
+        flushAgent();
+        flushThought();
+        flushUser();
+        flushCompaction();
+        const messageId = typeof data.messageId === "string" ? data.messageId : null;
+        if (
+          providerMessageId !== null &&
+          messageId !== null &&
+          messageId !== providerMessageId
+        ) {
+          flushProvider();
+        }
+        if (providerText.length === 0) {
+          providerSeq = event.seq;
+          providerAt = event.at;
+          providerDay = dayChanged;
+        }
+        if (messageId !== null) providerMessageId = messageId;
+        if (typeof data.senderSessionId === "string") {
+          providerSender = data.senderSessionId;
+        }
+        providerText +=
+          typeof data.text === "string"
+            ? data.text
+            : typeof data.content === "string"
+              ? data.content
+              : "";
+        break;
+      }
       case "prompt.sent": {
         flush();
         const text = typeof data.text === "string" ? data.text : "";
@@ -600,7 +757,18 @@ export function renderEvents(
       }
       case "session.initialized": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim("ACP session ready")}`);
+        const name =
+          typeof data.agentName === "string" ? oneLine(data.agentName) : "";
+        const version =
+          typeof data.agentVersion === "string"
+            ? oneLine(data.agentVersion)
+            : "";
+        const agent = name ? ` · ${name}${version ? ` ${version}` : ""}` : "";
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `ACP session ready${agent}`,
+          )}`,
+        );
         break;
       }
       case "session.closed": {
@@ -718,11 +886,100 @@ export function renderEvents(
         lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(`session › ${oneLine(data.title ?? "")}`)}`);
         break;
       }
-      case "plan.update":
-      case "compaction":
+      case "plan.update": {
+        flush();
+        if (data.removed === true) {
+          const id = typeof data.planId === "string" ? oneLine(data.planId) : "";
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.cyan("plan")} › ${
+              id ? `removed ${id}` : "removed"
+            }`,
+          );
+          break;
+        }
+        const kind = typeof data.kind === "string" ? data.kind : null;
+        if (kind === "items" && Array.isArray(data.entries)) {
+          const entries = data.entries as {
+            status?: string;
+            content?: string;
+          }[];
+          const done = entries.filter((entry) => entry.status === "completed").length;
+          const current =
+            entries.find((entry) => entry.status === "in_progress") ??
+            entries.find((entry) => entry.status === "pending");
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.cyan("plan")} › ${done}/${entries.length} done` +
+              (current
+                ? style.dim(` · current: ${oneLine(current.content ?? "")}`)
+                : ""),
+          );
+          break;
+        }
+        if (kind === "file") {
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.cyan("plan")} › file ${oneLine(data.uri ?? "")}`,
+          );
+          break;
+        }
+        if (kind === "markdown") {
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.cyan("plan")} › markdown ${style.dim(
+              truncateRight(oneLine(data.content ?? ""), 100),
+            )}`,
+          );
+          break;
+        }
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.cyan("plan")} › updated`,
+        );
+        break;
+      }
+      case "compaction": {
+        const id =
+          typeof data.compactionId === "string" ? data.compactionId : null;
+        const text = typeof data.text === "string" ? data.text : "";
+        const chunk = data.chunk === true || text.length > 0;
+        if (chunk) {
+          flushAgent();
+          flushThought();
+          flushUser();
+          flushProvider();
+          if (compactionId !== null && id !== null && compactionId !== id) {
+            flushCompaction();
+          }
+          if (compactionText.length === 0) {
+            compactionSeq = event.seq;
+            compactionAt = event.at;
+            compactionDay = dayChanged;
+          }
+          if (id !== null) compactionId = id;
+          compactionText += text;
+          break;
+        }
+        flush();
+        const status =
+          typeof data.status === "string" ? oneLine(data.status) : "updated";
+        const detail =
+          typeof data.summary === "string"
+            ? data.summary
+            : typeof data.error === "string"
+              ? `error: ${data.error}`
+              : "";
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("compaction")} › ${status}` +
+            (detail
+              ? style.dim(` · ${truncateRight(oneLine(detail), 120)}`)
+              : ""),
+        );
+        break;
+      }
       case "subagent": {
         flush();
-        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(event.type)}`);
+        if (verbose) {
+          lines.push(
+            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim("subagent")}`,
+          );
+        }
         break;
       }
       case "raw": {
