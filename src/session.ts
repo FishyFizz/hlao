@@ -101,6 +101,8 @@ export interface SpawnOptions {
 export interface SendResult {
   messageId: string;
   queued: boolean;
+  /** On a duplicate: true when the original message is still active or queued. */
+  pending?: boolean;
   turn: number | null;
   completed: boolean;
   timedOut: boolean;
@@ -367,12 +369,15 @@ export class Session {
       const existing = this.#idempotency.get(key);
       if (existing !== undefined) {
         const active = this.#active?.id === existing.messageId;
-        const queued =
+        const pending =
           active ||
           this.#queue.some((item) => item.id === existing.messageId);
         return {
           messageId: existing.messageId,
-          queued,
+          // This retry enqueued nothing. `pending` describes the original
+          // message, so a consumer cannot mistake a duplicate for new work.
+          queued: false,
+          pending,
           turn: active ? this.#active!.turn : null,
           completed: false,
           timedOut: false,

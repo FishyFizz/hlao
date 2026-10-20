@@ -49,39 +49,54 @@ export async function cmdLogs(args: string[]): Promise<number> {
   }
   if (!follow) return 0;
 
-  if (!exists) {
-    if (!ctx.json) out(ctx.style.dim(`waiting for ${file}…`));
-    while (!existsSync(file)) await sleepMs(250);
-    exists = true;
-  }
+  // A follow loop must stop on a signal even in a non-tty pipeline. Install
+  // handlers only for this loop so every other command keeps Node's default.
+  let stopped = false;
+  const stop = (): void => {
+    stopped = true;
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    if (!exists) {
+      if (!ctx.json) out(ctx.style.dim(`waiting for ${file}…`));
+      while (!existsSync(file) && !stopped) await sleepMs(250);
+      exists = true;
+    }
 
-  let offset = exists ? byteLength(content) : 0;
-  for (;;) {
-    await sleepMs(400);
-    let size: number;
-    try {
-      size = statSync(file).size;
-    } catch {
-      continue;
-    }
-    if (size < offset) offset = 0;
-    if (size === offset) continue;
-    let chunk: string;
-    try {
-      const length = size - offset;
-      const buffer = Buffer.alloc(length);
-      const handle = openSync(file, "r");
+    let offset = exists ? byteLength(content) : 0;
+    while (!stopped) {
+      await sleepMs(400);
+      if (stopped) break;
+      let size: number;
       try {
-        readSync(handle, buffer, 0, length, offset);
-      } finally {
-        closeSync(handle);
+        size = statSync(file).size;
+      } catch {
+        continue;
       }
-      chunk = buffer.toString("utf8");
-    } catch {
-      continue;
+      if (size < offset) offset = 0;
+      if (size === offset) continue;
+      let chunk: string;
+      try {
+        const length = size - offset;
+        const buffer = Buffer.alloc(length);
+        const handle = openSync(file, "r");
+        try {
+          readSync(handle, buffer, 0, length, offset);
+        } finally {
+          closeSync(handle);
+        }
+        chunk = buffer.toString("utf8");
+      } catch {
+        continue;
+      }
+      offset = size;
+      emitLogLines(ctx, splitLines(chunk), file, true, raw);
     }
-    offset = size;
-    emitLogLines(ctx, splitLines(chunk), file, true, raw);
+    return 0;
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
   }
 }
 

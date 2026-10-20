@@ -21,6 +21,11 @@ test("verbose tool payloads are omitted by default and rendered on request", asy
   const call = plain.value.events.find((event) => event.type === "tool.call");
   assert.ok(call);
   assert.equal(call.data.rawInput, undefined);
+  const plainUpdate = plain.value.events.find(
+    (event) => event.type === "tool.update" && event.data.status === "completed",
+  );
+  assert.ok(plainUpdate);
+  assert.equal(plainUpdate.data.rawInput, undefined);
 
   const raw = await harness.json<ReadValue>([
     "read",
@@ -31,6 +36,11 @@ test("verbose tool payloads are omitted by default and rendered on request", asy
   ]);
   const rawCall = raw.value.events.find((event) => event.type === "tool.call");
   assert.deepEqual(rawCall?.data.rawInput, { prompt: "verbose payload" });
+  // claude-style adapters carry the real input on the update, not the call.
+  const rawUpdate = raw.value.events.find(
+    (event) => event.type === "tool.update" && event.data.status === "completed",
+  );
+  assert.deepEqual(rawUpdate?.data.rawInput, { command: "echo prompt" });
 
   const quiet = await harness.run(["read", id, "--since", "0"], {
     json: false,
@@ -42,6 +52,7 @@ test("verbose tool payloads are omitted by default and rendered on request", asy
     { json: false },
   );
   assert.match(verbose.stdout, /"prompt": "verbose payload"/);
+  assert.match(verbose.stdout, /"command": "echo prompt"/);
   assert.match(verbose.stdout, /"ok": true/);
 });
 

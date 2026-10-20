@@ -84,7 +84,7 @@ export async function cmdSend(args: string[]): Promise<number> {
   if (result.duplicate) {
     out(
       `already sent ${sanitize(result.messageId)} to ${sessionLabel(ctx, result.session)}` +
-        (result.queued ? ctx.style.dim(" (still queued)") : ""),
+        (result.pending ? ctx.style.dim(" (still active or queued)") : ""),
     );
     return 0;
   }

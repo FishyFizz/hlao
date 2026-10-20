@@ -680,11 +680,19 @@ export function renderEvents(
       }
       case "tool.update": {
         flush();
-        const status = typeof data.status === "string" ? data.status : "updated";
+        const status = typeof data.status === "string" ? data.status : null;
+        const finished = status === "completed" || status === "failed";
         const title = oneLine(data.title ?? data.toolCallId ?? "tool");
-        if (status !== "completed" && status !== "failed") break;
+        // The real input often arrives here, not on tool.call. Render it even
+        // while the status is still pending so --verbose can show the command.
+        const input = verbose ? renderPayload(data.rawInput, style) : [];
+        if (!finished && input.length === 0) break;
         const colour = status === "failed" ? style.red : style.dim;
-        lines.push(`${cursor(event.seq, event.at, style, full, dayChanged)}${style.yellow("tool")} › ${title} ${colour(`→ ${status}`)}`);
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.yellow("tool")} › ${title}` +
+            (finished ? ` ${colour(`→ ${status}`)}` : ""),
+        );
+        lines.push(...input);
         if (verbose) lines.push(...renderPayload(data.rawOutput, style));
         break;
       }
@@ -1227,6 +1235,14 @@ const PAYLOAD_PREVIEW_CHARS = 2_000;
 
 function renderPayload(value: unknown, style: Style): string[] {
   if (value === undefined || value === null) return [];
+  // An empty object/array/string is what several adapters send before the real
+  // payload arrives; printing "{}" adds noise without information.
+  if (
+    (typeof value === "object" && value !== null && Object.keys(value).length === 0) ||
+    value === ""
+  ) {
+    return [];
+  }
   let text: string;
   try {
     text =

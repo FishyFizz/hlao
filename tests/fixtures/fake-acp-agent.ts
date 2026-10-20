@@ -436,6 +436,7 @@ const app = agent({ name: "fake-acp" })
       toolCallId: "call-echo",
       status: "completed",
       title: "Read the prompt",
+      rawInput: { command: "echo prompt" },
       rawOutput: { ok: true },
     });
     if (mode === "chunks") {

@@ -95,6 +95,67 @@ test("wait and get select whole sets without collecting ids", async (t) => {
   assert.match(human.stdout, /idle/);
 });
 
+test("--root refuses a child id and --tree selects a real subtree", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const root = await spawn(harness, ["spawn", "fake", "root", "--wait"]);
+  const child = await spawn(harness, ["spawn", "fake", "child", "--wait"], {
+    HLAO_SESSION_ID: root,
+  });
+  const grandchild = await spawn(
+    harness,
+    ["spawn", "fake", "grandchild", "--wait"],
+    { HLAO_SESSION_ID: child },
+  );
+  const sibling = await spawn(harness, ["spawn", "fake", "sibling", "--wait"], {
+    HLAO_SESSION_ID: root,
+  });
+
+  // A child token used to widen silently to the whole job, including siblings
+  // and (inside an agent) the caller. It is now refused with both alternatives.
+  const refused = await harness.run(
+    ["close", "--root", child, "--dry-run"],
+    { json: false },
+  );
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /--root expects the job root/);
+  assert.match(refused.stderr, new RegExp(root));
+  assert.match(refused.stderr, new RegExp(`--tree ${child}`));
+
+  const subtree = await harness.json<WaitValue>([
+    "wait",
+    "--tree",
+    child,
+    "--all",
+    "--until",
+    "settled",
+    "--timeout",
+    "15s",
+  ]);
+  assert.equal(subtree.code, 0);
+  assert.deepEqual(
+    new Set(subtree.value.results.map((result) => result.session.id)),
+    new Set([child, grandchild]),
+  );
+
+  const job = await harness.json<WaitValue>([
+    "wait",
+    "--root",
+    root,
+    "--all",
+    "--until",
+    "settled",
+    "--timeout",
+    "15s",
+  ]);
+  assert.equal(job.code, 0);
+  assert.deepEqual(
+    new Set(job.value.results.map((result) => result.session.id)),
+    new Set([root, child, grandchild, sibling]),
+  );
+});
+
 test("cancel --root --wait stops a whole set and confirms settlement", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());

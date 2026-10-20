@@ -272,6 +272,7 @@ export async function cmdRead(args: string[]): Promise<number> {
   }
 
   if (jsonl) {
+    if (jsonlPage) process.stdout.write(jsonlPageLine(result));
     for (const event of result.events) {
       process.stdout.write(`${JSON.stringify(event)}\n`);
     }
@@ -309,6 +310,21 @@ interface FollowOptions {
   filtered: boolean;
 }
 
+/** The one-line `--jsonl-page` metadata record, shared by page and follow. */
+function jsonlPageLine(result: ReadResult): string {
+  return `${JSON.stringify({
+    page: {
+      sessionId: result.session.id,
+      earliestRetainedSeq: result.earliestRetainedSeq,
+      lastSeq: result.lastSeq,
+      nextSeq: result.nextSeq,
+      nextBefore: result.nextBefore,
+      hasMore: result.hasMore,
+      truncated: result.truncated,
+    },
+  })}\n`;
+}
+
 /**
  * A caller-owned watch loop: read a page, then one-shot wait for a change.
  * The supervisor owns no timer; closing the CLI aborts the pending wait.
@@ -334,19 +350,7 @@ async function followRead(
 
     if (options.jsonl) {
       if (options.jsonlPage) {
-        process.stdout.write(
-          `${JSON.stringify({
-            page: {
-              sessionId: result.session.id,
-              earliestRetainedSeq: result.earliestRetainedSeq,
-              lastSeq: result.lastSeq,
-              nextSeq: result.nextSeq,
-              nextBefore: result.nextBefore,
-              hasMore: result.hasMore,
-              truncated: result.truncated,
-            },
-          })}\n`,
-        );
+        process.stdout.write(jsonlPageLine(result));
       }
       for (const event of result.events) {
         process.stdout.write(`${JSON.stringify(event)}\n`);

@@ -132,6 +132,19 @@ test("read hints at older history, names filtered-empty, and can emit page metad
 
   // A terminal session lets --follow return immediately after the first page.
   await harness.json(["close", id]);
+  const page = await harness.run(
+    ["read", id, "--since", "0", "--limit", "3", "--jsonl", "--jsonl-page"],
+    { json: false },
+  );
+  assert.equal(page.code, 0);
+  const pageLines = page.stdout.trimEnd().split("\n");
+  const metadata = JSON.parse(pageLines[0]!) as {
+    page: { sessionId: string; nextSeq: number; hasMore: boolean };
+  };
+  assert.equal(metadata.page.sessionId, id);
+  assert.equal(metadata.page.hasMore, true);
+  assert.equal(pageLines.length, 4, "one metadata line plus three events");
+
   const jsonl = await harness.run(
     ["read", id, "--follow", "--jsonl", "--jsonl-page"],
     { json: false },

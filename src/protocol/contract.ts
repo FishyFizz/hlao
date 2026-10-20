@@ -370,6 +370,11 @@ export interface FirstTurnResult {
 }
 export interface SpawnResult {
   session: SessionView;
+  /**
+   * The cursor to pass as `since` to read from the session's beginning; always
+   * 0. This is not read's `nextSeq` page cursor (the name predates that
+   * distinction and is preserved for wire compatibility).
+   */
   nextSeq: number;
   firstTurn?: FirstTurnResult;
   /** The first prompt's message id, when a prompt was sent. */
@@ -406,7 +411,10 @@ export interface SendParams {
 export interface SendResult {
   session: SessionView;
   messageId: string;
+  /** True when this call placed the message behind a running turn. */
   queued: boolean;
+  /** On a duplicate: true when the original message is still active or queued. */
+  pending?: boolean;
   turn: number | null;
   completed: boolean;
   timedOut: boolean;

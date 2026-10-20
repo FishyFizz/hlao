@@ -8,7 +8,7 @@ import { COMMON, connect, contextFrom, out, resolveTarget, sessionLabel, writeJs
 import { helpRequested } from "../help.js";
 import { renderTable, sanitize, styleStatus } from "../render.js";
 import { parseStatuses } from "./list.js";
-import { resolveInList } from "./session-view.js";
+import { collectSubtree, resolveJobRoot } from "./selectors.js";
 
 export async function cmdClose(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
@@ -207,8 +207,8 @@ async function closeBulk(
   });
   let targets = list.sessions;
   if (options.rootToken !== undefined) {
-    const root = resolveInList(list.sessions, options.rootToken);
-    targets = targets.filter((session) => session.rootId === root.rootId);
+    const root = resolveJobRoot(list.sessions, options.rootToken);
+    targets = targets.filter((session) => session.rootId === root.id);
   }
   if (options.statuses.size > 0) {
     // `status: idle` with a queued prompt is still work; surface it as busy so
@@ -326,23 +326,4 @@ async function closeBulk(
     `closed ${closed.length} · forgot ${forgotten.length} · skipped ${skipped}`,
   );
   return 0;
-}
-
-function collectSubtree(target: SessionView, sessions: SessionView[]): SessionView[] {
-  const allowed = new Set<string>([target.id]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const session of sessions) {
-      if (
-        session.parentId !== null &&
-        allowed.has(session.parentId) &&
-        !allowed.has(session.id)
-      ) {
-        allowed.add(session.id);
-        changed = true;
-      }
-    }
-  }
-  return sessions.filter((session) => allowed.has(session.id));
 }

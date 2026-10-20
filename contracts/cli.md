@@ -121,13 +121,16 @@ that still has retained descendants is an error, so forget descendants first.
 
 `read` filters are sent to the supervisor and applied before the page limit: `--type TYPE`
 (repeatable), `--turn N`, and `--grep TEXT` (case-insensitive literal over the event type and
-data JSON; private payloads require `--raw`). `--before N` pages backward and is mutually
-exclusive with `--since`. A tail page reports `nextBefore`; pass it to `--before` for the next
-older page. `--jsonl` writes one event object per line instead of one page object; it cannot be
-combined with `--json` or `--out`. `--jsonl-page` adds a leading `{"page":{...}}` line per
-page, so a stdout-only consumer can see cursors and eviction. With `--follow`, `--jsonl`
-streams events and re-arms a one-shot `wait --until change`; `--fail-on-error` makes a failed
-session exit 3. An empty page with filters says "no matching events".
+data JSON; private payloads require `--raw`). Grep matches one event at a time; agent text is
+streamed as chunks, so a phrase split across two `agent.message` events is not a match (union
+them per `messageId` first). `--before N` pages backward and is mutually exclusive with
+`--since`. A tail page reports `nextBefore`; pass it to `--before` for the next older page.
+`--jsonl` writes one event object per line instead of one page object; it cannot be combined
+with `--json` or `--out`. `--jsonl-page` adds a leading `{"page":{...}}` line, so a
+stdout-only consumer can see cursors and eviction; it works with and without `--follow`.
+With `--follow`, `--jsonl` streams events and re-arms a one-shot `wait --until change`;
+`--fail-on-error` makes a failed session exit 3. An empty page with filters says
+"no matching events".
 
 `export [<id>]` pages forward until `hasMore` is false and returns `{session, events,
 earliestRetainedSeq, lastSeq, count, truncated}`. `--out FILE` writes that object (or one
@@ -141,12 +144,14 @@ that does not currently satisfy when the aggregate resolves is `pending`. `--sin
 valid with one id. `--type`/`--grep` filter the event that satisfies `--until change`.
 
 `wait`, `cancel`, `permit`, and `policy` accept the `close` selector grammar: `--root SESSION`
-(whole tree), `--tree <id>` (shorthand), `--status S[,S]`, `--idle DUR`, and `--except-self`.
-They are client assemblies over `sessions.list`; a selector takes no positional id, and `wait`
-is limited to 100 targets by the wire. `cancel --wait` waits for the selected sessions to
-settle and exits 2 on timeout. `permit --all-pending` answers every pending request, reporting
-per-session failures without stopping the others. `policy --root SESSION allow` applies one
-policy to the set.
+(the whole job; SESSION must be that job's root), `--tree <id>` (the session and its
+descendants), `--status S[,S]`, `--idle DUR`, and `--except-self`. A child token passed to
+`--root` is refused rather than widened to the job, because that silently includes the caller
+and unrelated siblings. They are client assemblies over `sessions.list`; apart from
+`--tree <id>`, a selector takes no positional id, and `wait` is limited to 100 targets by the
+wire. `cancel --wait` waits for the selected sessions to settle and exits 2 on timeout.
+`permit --all-pending` answers every pending request, reporting per-session failures without
+stopping the others. `policy --root SESSION allow` applies one policy to the set.
 
 `get [<id>]` prints one session's state without events (`sessions.get`): status, turn, queue,
 settlement, provider title, agent name/version, plan, compaction, policy, modes, config

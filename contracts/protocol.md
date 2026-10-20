@@ -445,13 +445,18 @@ Result:
 ```ts
 {
   session: SessionView;
-  nextSeq: number;               // pass as --since to read from the beginning
+  nextSeq: number;               // always 0: pass as `since` to read from the beginning
+                                 // (not a page cursor; see sessions.read nextSeq)
   firstTurn?: { stopReason: StopReason; text: string; timedOut: boolean };
   messageId?: string;            // the first prompt's id, when one was sent (2.3)
   duplicate?: boolean;           // the idempotency key matched an existing session (2.3)
   createdBy?: string;            // same value as session.createdBy (2.3)
 }
 ```
+
+`spawn.nextSeq` is a start-of-history cursor, not the page cursor that `sessions.read`
+returns. It is always `0` so `read --since 0` returns the session's whole transcript,
+including `session.created` and the first turn. The name is kept for wire compatibility.
 
 The call resolves once `initialize` and `session/new` both succeed. If `prompt` is present
 and `wait` is true, it also waits for the first turn (bounded by `sendWaitTimeoutMs`). A
@@ -518,7 +523,7 @@ Result:
 {
   session: SessionView;
   messageId: string;             // msg-…, stable across retries (2.3)
-  queued: boolean;               // true when the session was busy
+  queued: boolean;               // true when this call put the message behind a running turn
   turn: number | null;           // null when not yet dispatched
   completed: boolean;
   timedOut: boolean;
@@ -526,6 +531,7 @@ Result:
   text?: string;                 // accumulated agent text; partial on timeout (2.3)
   outcome?: "completed" | "cancelled" | "timed_out"; // (2.3)
   duplicate?: boolean;           // the idempotency key matched an earlier send (2.3)
+  pending?: boolean;             // on a duplicate: the original is still active or queued
 }
 ```
 
@@ -534,7 +540,8 @@ Result:
 cancelled before it runs reports `completed: true`, `outcome: "cancelled"`, and a null `turn`.
 
 An `idempotencyKey` is remembered for one hour (256 keys, oldest evicted). A repeat returns
-the original `messageId` and the item's current queued/active state without enqueuing again.
+the original `messageId` with `queued: false` and `duplicate: true` — this call accepted no new
+work — plus `pending`, which says whether the original message is still active or queued.
 
 ### `sessions.read`
 
@@ -843,6 +850,15 @@ type EventType =
 
 Event ordering per session is total and monotonic. An event is appended before any waiter
 that depends on it is notified.
+
+Message text is streamed as deltas, not one record per message. `agent.message`,
+`agent.thought`, and `user.message` each project one ACP chunk; `session.message` marks its
+chunks with `chunk: true`. Concatenate chunks in `seq` order per `messageId` (which may be
+`null`) when the full text matters; there is no separate assembled-message event. Human
+`read` output joins adjacent chunks for display, but `read --grep`, `find`, and
+`wait --until change --grep` match one event at a time, so a phrase split across chunks is
+not found by a text filter. Wait on a state (`settled`, `turn.ended`) or assemble chunks
+client-side instead.
 
 Actor fields are explicit:
 

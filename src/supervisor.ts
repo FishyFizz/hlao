@@ -910,6 +910,7 @@ class SupervisorServer {
       session: session.view(),
       messageId: sent.messageId,
       queued: sent.queued,
+      ...(sent.pending !== undefined ? { pending: sent.pending } : {}),
       turn: sent.turn,
       completed: sent.completed,
       timedOut: sent.timedOut,

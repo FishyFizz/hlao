@@ -7,7 +7,7 @@ import { COMMON, connect, contextFrom, out, resolveTarget, sessionLabel, writeJs
 import { helpRequested } from "../help.js";
 import { sanitize, styleStatus } from "../render.js";
 import { parseStatuses } from "./list.js";
-import { isTerminal, selectSessions, selectorsUsed } from "./selectors.js";
+import { isTerminal, selectSessions, selectorsUsed, type SelectorFlags } from "./selectors.js";
 
 export async function cmdPermit(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
@@ -47,7 +47,7 @@ export async function cmdPermit(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
 
-  const selectorFlags = {
+  const selectorFlags: SelectorFlags = {
     root: stringOption(parsed, "root"),
     statuses: parseStatuses(stringOption(parsed, "status")),
     idle: numberOption(parsed, "idle"),
@@ -61,7 +61,7 @@ export async function cmdPermit(args: string[]): Promise<number> {
     if (parsed.positionals.length !== 1) {
       throw usageError("permit: --tree takes exactly one session id");
     }
-    selectorFlags.root = parsed.positionals[0]!;
+    selectorFlags.tree = parsed.positionals[0]!;
   }
   const allPending = booleanOption(parsed, "all-pending") === true;
 

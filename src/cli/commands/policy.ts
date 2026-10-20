@@ -7,7 +7,7 @@ import { COMMON, connect, contextFrom, out, sessionLabel, writeJson } from "../c
 import { helpRequested } from "../help.js";
 
 import { parseStatuses } from "./list.js";
-import { isTerminal, selectSessions, selectorsUsed } from "./selectors.js";
+import { isTerminal, selectSessions, selectorsUsed, type SelectorFlags } from "./selectors.js";
 
 export async function cmdPolicy(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
@@ -26,7 +26,7 @@ export async function cmdPolicy(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
 
-  const selectorFlags = {
+  const selectorFlags: SelectorFlags = {
     root: stringOption(parsed, "root"),
     statuses: parseStatuses(stringOption(parsed, "status")),
     idle: numberOption(parsed, "idle"),
@@ -40,7 +40,7 @@ export async function cmdPolicy(args: string[]): Promise<number> {
     if (positionals.length !== 2) {
       throw usageError("policy: --tree takes a session id and a policy");
     }
-    selectorFlags.root = positionals[0]!;
+    selectorFlags.tree = positionals[0]!;
   }
 
   if (selectorsUsed(selectorFlags)) {

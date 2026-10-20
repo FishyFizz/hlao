@@ -29,7 +29,7 @@ import {
   sanitize,
   styleStatus,
 } from "../render.js";
-import { selectSessions, selectorsUsed } from "./selectors.js";
+import { selectSessions, selectorsUsed, type SelectorFlags } from "./selectors.js";
 
 // Wait: one-shot awaits over one session or a selected set.
 export async function cmdWait(args: string[]): Promise<number> {
@@ -61,7 +61,7 @@ export async function cmdWait(args: string[]): Promise<number> {
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
 
-  const selectorFlags = {
+  const selectorFlags: SelectorFlags = {
     root: stringOption(parsed, "root"),
     statuses: parseStatuses(stringOption(parsed, "status")),
     idle: numberOption(parsed, "idle"),
@@ -74,7 +74,7 @@ export async function cmdWait(args: string[]): Promise<number> {
     if (parsed.positionals.length !== 1) {
       throw usageError("wait: --tree takes exactly one session id");
     }
-    selectorFlags.root = parsed.positionals[0]!;
+    selectorFlags.tree = parsed.positionals[0]!;
   }
 
   let ids: string[];

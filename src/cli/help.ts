@@ -233,7 +233,7 @@ Options:
   --limit N              page size, 1..1000 (default 100)
   --type TYPE            keep only this event type; repeatable
   --turn N               keep only this turn
-  --grep TEXT            case-insensitive literal over type and data JSON
+  --grep TEXT            case-insensitive literal over one event's type and data
   --fail-on-error        with --follow, exit 3 when the session failed
   --verbose              human mode: include bounded tool input/output
   --raw                  with --json, include original ACP payloads; in human
@@ -242,13 +242,16 @@ Options:
   --follow               keep reading, then one-shot wait, until the session
                          ends or you press Ctrl-C; --json emits one page per line
   --jsonl                emit one event object per line (not with --json/--out)
-  --jsonl-page           with --jsonl, emit a page metadata line first
+  --jsonl-page           with --jsonl, emit a page metadata line before events
   --out FILE             also write this page's JSON result to FILE
 
 The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
 hasMore, and truncated. Filters are applied before the page limit, and cursors
 advance past non-matching events. Tool payloads are omitted unless
---raw/--verbose; --grep does not search private payloads without --raw.`,
+--raw/--verbose; --grep does not search private payloads without --raw.
+
+Agent text is streamed as chunks. Human output joins adjacent chunks, but grep
+matches one event at a time, so a phrase split across chunks will not match.`,
     get: `hlao get [<id>] [--brief]
 
 Print one session's orchestration state without reading events: status, turn,
@@ -296,14 +299,15 @@ Options:
   --grep TEXT            with "change": wake only on a matching event
   --timeout DUR          bound; default from config (30m), 0 = no bound
   --fail-if-failed       exit 3 when a waited session ended failed
-  --root SESSION         wait on that session's whole tree
-  --tree <id>            shorthand for --root <id>
+  --root SESSION         wait on that job's sessions (SESSION must be the root)
+  --tree <id>            wait on this session's subtree (it and descendants)
   --status S[,S]         wait on sessions in these states
   --idle DUR             wait on sessions settled for at least DUR
   --except-self          exclude this shell's session from a selector
 
-Selector flags are a client assembly over list + wait; they take no positional
-ids and are limited to 100 targets by the wire.
+Selector flags are a client assembly over list + wait; apart from the
+--tree <id> form they take no positional ids, and a wait is limited to 100
+targets by the wire.
 
 Conditions:
   idle        the historical completion condition: no runnable turn. It resolves
@@ -346,8 +350,9 @@ queued message run. The session survives. Inside a session, omit <id> or pass
 --self. --wait then waits for the cancelled sessions to settle (exit 2 on
 timeout).
 
-Bulk mode uses the same selectors as close: --root SESSION, --tree <id>,
---status S[,S], --idle DUR, --except-self. Selector flags take no positional id.`,
+Bulk mode uses the same selectors as close: --root SESSION (the job root),
+--tree <id> (that session and descendants), --status S[,S], --idle DUR,
+--except-self. Apart from --tree <id>, selector flags take no positional id.`,
     close: `hlao close [<id>] [--force] [--tree] [--forget]
 hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run] [--forget]
 
@@ -358,7 +363,8 @@ session, omit <id> or pass --self.
 
 Bulk mode selects sessions instead of naming one: --idle matches idle sessions
 whose last activity is older than DUR; --status matches states; --root matches
-a whole job; --except-self excludes the caller. --dry-run prints the targets
+a whole job and must name the job root (a child id is refused; use --tree for
+its subtree); --except-self excludes the caller. --dry-run prints the targets
 and actions without changing anything. --forget removes a terminal session from
 the table (retention is otherwise one hour); a session with retained
 descendants must have them forgotten first. Closing discards queued messages
@@ -373,8 +379,9 @@ later provider requests are answered automatically. When the provider offers an
 allow-always option it is preferred, which can stop the provider from asking at
 all for matching commands. Inside a session, omit <id> or pass --self.
 
---all-pending answers every pending request in the instance; --root, --tree,
---status, --idle, and --except-self narrow the set. Selector flags take no
+--all-pending answers every pending request in the instance; --root SESSION (the
+job root), --tree <id> (that session and descendants), --status, --idle, and
+--except-self narrow the set. Apart from --tree <id>, selector flags take no
 positional id. A session with no matching option is reported and does not stop
 the others.`,
     mode: `hlao mode [<id>] [modeId]
@@ -396,8 +403,10 @@ use --self <policy> to set it; any caller in the instance may set any
 session's policy. Changing the policy also answers a parked request when the
 new policy implies an answer.
 
-Bulk mode: "policy --root SESSION allow", "policy --tree <id> deny", or
---status/--idle with one policy. Selector flags take no positional id.
+Bulk mode: "policy --root SESSION allow" (SESSION must be the job root),
+"policy --tree <id> deny" (that session and descendants), or --status/--idle
+with one policy. Apart from --tree <id>, selector flags take no positional id.
+A child id passed to --root is refused instead of widening to the job.
 
 permit --always is equivalent to answering the current request and setting the
 policy to allow.`,

@@ -27,6 +27,24 @@
   that capability, so a compliant adapter will not send them; HLAO still projects them
   defensively if a custom adapter does. Provider subagent sessions are out of scope.
 
+### Fixed
+
+- Piping `read --jsonl` or `export --jsonl` to a reader that exits early (`| head`) no longer
+  crashes with an unhandled EPIPE; the CLI ends output quietly.
+- `read --jsonl --jsonl-page` now emits its page metadata line without requiring `--follow`.
+- An idempotent `send` repeat reports `queued: false` and `duplicate: true` (no new work was
+  accepted) plus `pending` for the original message's active/queued state.
+- `tool.update` projects the adapter's `rawInput`, so `read --verbose` shows the command, path,
+  or content that claude-style adapters send only on the update. Empty `{}` payloads are hidden.
+- `--root` now requires the job root. Passing a child id is refused with the resolved root and
+  the `--tree <id>` alternative instead of silently widening close/policy/permit/cancel/wait
+  to the whole job (including the caller and unrelated siblings). `--tree <id>` selects that
+  session's actual subtree.
+- `logs --follow` exits promptly and quietly on SIGINT/SIGTERM in a non-tty pipeline.
+- Documented that `agent.message`/`agent.thought`/`user.message` are streaming deltas: consumers
+  assemble per `messageId`, and `--grep` cannot match text split across chunks. Also documented
+  that `spawn.nextSeq` is a start-of-history cursor, not the same field as `read.nextSeq`.
+
 ## 0.10.0 — unreleased
 
 ### Added

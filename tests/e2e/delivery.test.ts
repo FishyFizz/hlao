@@ -61,6 +61,8 @@ test("message ids are stable, idempotent, and droppable by id", async (t) => {
   ]);
   assert.equal(retry.code, 0);
   assert.equal(retry.value.duplicate, true);
+  assert.equal(retry.value.queued, false, "a retry enqueued nothing");
+  assert.equal(retry.value.pending, true, "the original message is still active");
   assert.equal(retry.value.messageId, first.value.messageId);
 
   const afterRetry = await waitForQueue(harness, id, 0);

@@ -235,6 +235,10 @@ export function projectUpdate(update: SessionUpdate): {
           kind: update.kind ?? null,
           status: update.status ?? null,
           content: update.content ?? null,
+          // Some adapters (claude-agent-acp) send the real input only on the
+          // first update, leaving `tool_call.rawInput` empty. Project it here
+          // too, or `read --verbose` can never show the command/path.
+          rawInput: update.rawInput,
           rawOutput: update.rawOutput,
         },
       };
