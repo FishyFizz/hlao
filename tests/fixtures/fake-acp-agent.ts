@@ -323,6 +323,10 @@ const app = agent({ name: "fake-acp" })
       });
       await send({ sessionUpdate: "usage_update", used: 150_000, size: 200_000 });
       await send({ sessionUpdate: "usage_update", used: 185_000, size: 200_000 });
+      // Drop below the reset threshold and cross 75% again: the warning is
+      // re-armed rather than staying latched.
+      await send({ sessionUpdate: "usage_update", used: 100_000, size: 200_000 });
+      await send({ sessionUpdate: "usage_update", used: 160_000, size: 200_000 });
       await message(`caps: ${JSON.stringify(clientCaps)}`);
       return { stopReason: "end_turn" };
     }

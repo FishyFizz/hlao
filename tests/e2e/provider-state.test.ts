@@ -114,6 +114,14 @@ test("provider-native state is projected into events, views, and human output", 
         String(event.data.description).includes("185000/200000"),
     ),
   );
+  assert.ok(
+    notices.some(
+      (event) =>
+        event.data.severity === "warning" &&
+        String(event.data.description).includes("160000/200000"),
+    ),
+    "a drop below 70% re-arms the 75% warning",
+  );
 
   const get = await harness.json<GetValue>(["get", id]);
   assert.equal(get.code, 0);
