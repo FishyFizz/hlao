@@ -25,6 +25,7 @@ import {
 import { helpRequested } from "../help.js";
 import { parseStatuses } from "./list.js";
 import {
+  renderElicitation,
   renderPermission,
   sanitize,
   styleStatus,
@@ -234,12 +235,23 @@ export async function cmdWait(args: string[]): Promise<number> {
           ? exitDetail(entry.session)
           : entry.reason === "permission" && entry.session.pendingPermission
             ? entry.session.pendingPermission.title
-            : null;
+            : entry.reason === "permission" && entry.session.pendingElicitation
+              ? entry.session.pendingElicitation.message
+              : null;
       out(
         `${entryLabel}: ${reason}` + (detail ? ctx.style.dim(` · ${sanitize(detail)}`) : ""),
       );
       if (entry.reason === "permission" && entry.session.pendingPermission) {
         out(renderPermission(entry.session.id, entry.session.pendingPermission, ctx.style));
+      }
+      if (entry.reason === "permission" && entry.session.pendingElicitation) {
+        out(
+          renderElicitation(
+            entry.session.id,
+            entry.session.pendingElicitation,
+            ctx.style,
+          ),
+        );
       }
     } else if (entry.reason === "pending") {
       out(`${entryLabel}: still ${styleStatus(entry.session.status, ctx.style)}`);
@@ -277,6 +289,21 @@ function renderSingleWait(
       out(`${label} is idle (waited ${waited})`);
       return code;
     case "permission":
+      if (entry.session.pendingElicitation) {
+        if (until === "permission") {
+          out(`${label} needs input (waited ${waited})`);
+        } else {
+          out(`${label} settled (question) · waited ${waited}`);
+        }
+        out(
+          renderElicitation(
+            entry.session.id,
+            entry.session.pendingElicitation,
+            ctx.style,
+          ),
+        );
+        return code;
+      }
       if (until === "permission") {
         out(`${label} needs permission (waited ${waited})`);
       } else {

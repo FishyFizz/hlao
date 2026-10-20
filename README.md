@@ -90,13 +90,14 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
 | `hlao export <id> [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. |
-| `hlao get [<id>]` | One session's orchestration state without reading events, including provider title, agent/version, plan, compaction, usage, pending permission, and lineage. |
+| `hlao get [<id>]` | One session's orchestration state without reading events, including provider title, agent/version, plan, compaction, usage, pending permission or question, and lineage. |
 | `hlao find TEXT` | Search events across sessions (`list` + paged `read --grep`); `--all` includes retained histories. |
 | `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `settled`, `permission`, `exit`, or a filtered `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3 (for `settled`, termination is a valid completion). |
 | `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/requester/model/agent/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
+| `hlao elicit [<id>]` | Show a pending provider question (ACP form elicitation), then answer it with `--accept key=value ...`, `--decline`, or `--cancel`. |
 | `hlao mode [<id>] [modeId]` | Read or switch the provider's native permission mode (Manual, Auto, Accept edits, ...). |
 | `hlao policy [<id>] [allow\|ask\|deny]` | Read or set the live HLAO permission policy. |
 | `hlao option [<id>] [key value]` | Read or set provider config options such as model and reasoning effort. |
@@ -380,6 +381,11 @@ operator / agent shell
   `wait --until permission`; `hlao permit` answers it. The default policy answers
   automatically, and `permit --always` removes the gate from a live session. Provider modes
   are exposed through `hlao mode` so the provider can stop asking at the source.
+- **Provider questions are state, not permissions.** HLAO advertises ACP form elicitation, so
+  Claude Code's AskUserQuestion and MCP elicitation reach the operator. A pending question
+  appears as `pendingElicitation` and parks the session (`waiting_permission`); `hlao elicit`
+  accepts schema-shaped content, declines, or cancels. The permission policy never answers a
+  question.
 - **No client-side filesystem or terminal capabilities are advertised**, and provider
   subagents are not surfaced. The leaf stays the leaf.
 
@@ -401,7 +407,9 @@ have gated it. Answer once with `hlao permit <id> --allow`, remove the gate with
 
 **A session is stuck in `waiting_permission`.** `hlao read <id>` shows the tool and its
 options; `hlao permit <id> --option <id>` answers exactly, `--deny` rejects, and `hlao cancel
-<id>` abandons the turn.
+<id>` abandons the turn. If the header reports `question: …` instead, it is a provider
+elicitation: `hlao elicit <id>` shows the form and `--accept`, `--decline`, or `--cancel`
+answers it.
 
 **History has gaps.** The event log is bounded by count and bytes; `read` reports `truncated`
 and the first retained sequence. Export anything you need with `hlao export <id> --out

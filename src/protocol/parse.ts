@@ -579,6 +579,56 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         always: optBoolean(object, "always", what),
       } as ParamsByMethod[M];
     }
+    case "sessions.respond_elicitation": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["sessionId", "requestId", "action", "content"], what);
+      const action = reqEnum(object, "action", what, [
+        "accept",
+        "decline",
+        "cancel",
+      ] as const);
+      let content:
+        | Record<string, string | number | boolean | string[]>
+        | undefined;
+      const rawContent = object.content;
+      if (rawContent !== undefined && rawContent !== null) {
+        if (typeof rawContent !== "object" || Array.isArray(rawContent)) {
+          throw new HlaoError("bad_request", `${what}.content must be an object`);
+        }
+        content = {};
+        for (const [key, value] of Object.entries(rawContent)) {
+          if (
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean"
+          ) {
+            content[key] = value;
+          } else if (
+            Array.isArray(value) &&
+            value.every((item) => typeof item === "string")
+          ) {
+            content[key] = value;
+          } else {
+            throw new HlaoError(
+              "bad_request",
+              `${what}.content.${key} must be a string, number, boolean, or string array`,
+            );
+          }
+        }
+      }
+      if (action !== "accept" && content !== undefined) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.content requires action "accept"`,
+        );
+      }
+      return {
+        sessionId: reqString(object, "sessionId", what, 1, 64),
+        requestId: optString(object, "requestId", what, 200),
+        action,
+        content,
+      } as ParamsByMethod[M];
+    }
     case "sessions.set_mode": {
       const object = asObject(raw, what);
       checkKeys(object, ["sessionId", "modeId"], what);

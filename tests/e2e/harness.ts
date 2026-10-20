@@ -11,6 +11,7 @@ import type {
   ListResult,
   PermitResult,
   ReadResult,
+  RespondElicitationResult,
   SendResult,
   SessionView,
   SpawnResult,
@@ -239,5 +240,6 @@ export type SendValue = SendResult;
 export type WaitValue = WaitResult & { session: SessionView };
 export type CloseValue = CloseResult;
 export type PermitValue = PermitResult;
+export type ElicitValue = RespondElicitationResult;
 export type CancelValue = CancelResult;
 export type GetValue = GetResult;

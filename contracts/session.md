@@ -173,7 +173,10 @@ export class Session {
    outside a prompt turn (an autonomous cycle); such a request is surfaced and answered the
    same way, and its events carry `turn: null` and `data.outsideTurn: true`. The policy is
    `allow` by default, `ask` opt-in, and `permit(..., always)` can switch a live session to
-   `allow`.
+   `allow`. A provider question (ACP elicitation) is separate state:
+   `pendingElicitation`, `elicitation.requested`/`elicitation.resolved`, and
+   `hlao elicit`. The permission policy never answers it, because a form answer
+   cannot be inferred from `allow` or `deny`.
 6. **Provider modes and config options are data.** `view().modes` and `view().configOptions`
    report what the adapter advertises; setters change them and record the actor.
 7. **Names are labels.** `setName` changes `name` and emits an event; the handle, addressing,

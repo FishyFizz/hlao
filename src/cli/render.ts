@@ -1,6 +1,7 @@
 import { isTerminalStatus } from "../protocol.js";
 import type {
   AgentView,
+  ElicitationView,
   EventView,
   PermissionView,
   ReadResult,
@@ -96,7 +97,9 @@ export function renderSessionTable(
         session.modes?.currentModeId ?? "—",
         session.pendingPermission
           ? truncateRight(oneLine(session.pendingPermission.title), 30)
-          : "—",
+          : session.pendingElicitation
+            ? truncateRight(`Q: ${oneLine(session.pendingElicitation.message)}`, 30)
+            : "—",
         exitDetail(session),
       );
     }
@@ -325,7 +328,11 @@ export function renderSessionState(
     ? `${oneLine(session.pendingPermission.title)} (requested ${formatAge(
         session.pendingPermission.requestedAt,
       )}) — ${commandPrefix} permit ${session.id} --allow`
-    : "—";
+    : session.pendingElicitation
+      ? `question: ${oneLine(session.pendingElicitation.message)} (requested ${formatAge(
+          session.pendingElicitation.requestedAt,
+        )}) — ${commandPrefix} elicit ${session.id}`
+      : "—";
   const exit = terminal
     ? session.exit
       ? session.exit.signal
@@ -363,6 +370,7 @@ export function renderReadResult(
 ): string {
   const lines: string[] = [renderSessionHeader(result.session, style)];
   const pending = result.session.pendingPermission;
+  const question = result.session.pendingElicitation;
 
   if (pending) {
     const hasRequest = result.events.some(
@@ -379,6 +387,31 @@ export function renderReadResult(
       );
     } else {
       lines.push(renderPermission(result.session.id, pending, style, commandPrefix));
+    }
+  }
+
+  if (question) {
+    const hasRequest = result.events.some(
+      (event) =>
+        event.type === "elicitation.requested" &&
+        event.data.requestId === question.requestId,
+    );
+    lines.push("");
+    if (hasRequest) {
+      lines.push(
+        style.dim(
+          `pending question: ${oneLine(question.message)} — ${commandPrefix} elicit ${result.session.id}`,
+        ),
+      );
+    } else {
+      lines.push(
+        renderElicitation(
+          result.session.id,
+          question,
+          style,
+          commandPrefix,
+        ),
+      );
     }
   }
 
@@ -1060,6 +1093,88 @@ export function renderPermission(
     );
   }
   return lines.join("\n");
+}
+
+export function renderElicitation(
+  sessionId: string,
+  elicitation: ElicitationView,
+  style: Style,
+  commandPrefix = "hlao",
+): string {
+  const lines = [
+    `${style.magenta("question")} › ${oneLine(elicitation.message || "(no message)")}`,
+    style.dim(
+      `request ${elicitation.requestId} · mode ${elicitation.mode}` +
+        (elicitation.toolCallId ? ` · tool ${elicitation.toolCallId}` : "") +
+        ` · requested ${elicitation.requestedAt}`,
+    ),
+  ];
+  if (elicitation.mode === "url") {
+    lines.push(`  ${style.dim("url:")} ${oneLine(elicitation.url ?? "—")}`);
+  }
+  const schema = elicitation.requestedSchema as
+    | {
+        properties?: Record<string, ElicitationSchemaProperty>;
+        required?: string[];
+      }
+    | undefined;
+  const properties = schema?.properties ?? {};
+  const required = new Set(schema?.required ?? []);
+  for (const [key, property] of Object.entries(properties)) {
+    const kind = typeof property.type === "string" ? property.type : "string";
+    const flags = required.has(key) ? `${kind}, required` : kind;
+    lines.push(
+      `  ${style.dim(flags.padEnd(16))} ${oneLine(key)}` +
+        (property.title ? `: ${oneLine(property.title)}` : ""),
+    );
+    if (property.description) {
+      lines.push(`    ${style.dim(oneLine(property.description))}`);
+    }
+    const options = elicitationOptions(property);
+    if (options.length > 0) {
+      lines.push(`    ${style.dim(`options: ${options.join(" | ")}`)}`);
+    }
+  }
+  if (Object.keys(properties).length === 0 && elicitation.mode === "form") {
+    lines.push(style.dim("  (no form fields)"));
+  }
+  lines.push(
+    `  ${style.dim(`accept: ${commandPrefix} elicit ${sessionId} --accept key=value ...`)}`,
+  );
+  lines.push(
+    `  ${style.dim(
+      `decline: ${commandPrefix} elicit ${sessionId} --decline · ` +
+        `cancel: ${commandPrefix} elicit ${sessionId} --cancel`,
+    )}`,
+  );
+  return lines.join("\n");
+}
+
+interface ElicitationSchemaProperty {
+  type?: unknown;
+  title?: unknown;
+  description?: unknown;
+  enum?: unknown[];
+  oneOf?: { const?: unknown }[];
+  anyOf?: { const?: unknown }[];
+  items?: { enum?: unknown[] };
+}
+
+function elicitationOptions(property: ElicitationSchemaProperty): string[] {
+  const values: unknown[] = [];
+  if (Array.isArray(property.enum)) values.push(...property.enum);
+  for (const branch of property.oneOf ?? []) {
+    if (branch.const !== undefined) values.push(branch.const);
+  }
+  for (const branch of property.anyOf ?? []) {
+    if (branch.const !== undefined) values.push(branch.const);
+  }
+  if (Array.isArray(property.items?.enum)) values.push(...property.items.enum);
+  return [
+    ...new Set(
+      values.filter((value): value is string => typeof value === "string"),
+    ),
+  ];
 }
 
 export function renderAgentTable(agents: AgentView[], style: Style): string {

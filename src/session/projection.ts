@@ -64,6 +64,10 @@ export function eventTitle(
       return text(data.title) ?? text(data.name);
     case "permission.requested":
       return text(data.title);
+    case "elicitation.requested":
+      return text(data.message);
+    case "elicitation.resolved":
+      return text(data.action);
     case "turn.ended":
       return text(data.stopReason);
     case "session.created":

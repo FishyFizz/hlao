@@ -281,7 +281,11 @@ function filterSessions(
     );
   }
   if (filters.pending === true) {
-    result = result.filter((session) => session.pendingPermission !== null);
+    result = result.filter(
+      (session) =>
+        session.pendingPermission !== null ||
+        session.pendingElicitation !== null,
+    );
   }
   if (filters.cwd !== undefined) {
     const cwd = normalizePath(filters.cwd);

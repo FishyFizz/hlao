@@ -12,6 +12,7 @@ import {
 import {
   cmdCancel,
   cmdClose,
+  cmdElicit,
   cmdGet,
   cmdMode,
   cmdOption,
@@ -138,6 +139,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdClose(args);
       case "permit":
         return await cmdPermit(args);
+      case "elicit":
+        return await cmdElicit(args);
       case "mode":
         return await cmdMode(args);
       case "policy":

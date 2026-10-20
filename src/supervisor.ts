@@ -57,6 +57,8 @@ import {
   type NotificationFrame,
   type PermitParams,
   type PermitResult,
+  type RespondElicitationParams,
+  type RespondElicitationResult,
   type QueueDropParams,
   type QueueDropResult,
   type QueueParams,
@@ -592,6 +594,11 @@ class SupervisorServer {
         return this.#close(params as CloseParams, caller);
       case "sessions.permit":
         return this.#permit(params as PermitParams, caller);
+      case "sessions.respond_elicitation":
+        return this.#respondElicitation(
+          params as RespondElicitationParams,
+          caller,
+        );
       case "sessions.set_mode":
         return this.#setMode(params as SetModeParams, caller);
       case "sessions.set_policy":
@@ -1139,6 +1146,25 @@ class SupervisorServer {
       session: session.view(),
       requestId: resolved.requestId,
       optionId: resolved.optionId,
+      by: actor(caller),
+    };
+  }
+
+  #respondElicitation(
+    params: RespondElicitationParams,
+    caller: string | null,
+  ): RespondElicitationResult {
+    const session = this.#resolve(params.sessionId);
+    const resolved = session.respondElicitation(
+      params.action,
+      params.content,
+      params.requestId,
+      actor(caller),
+    );
+    return {
+      session: session.view(),
+      requestId: resolved.requestId,
+      action: resolved.action,
       by: actor(caller),
     };
   }

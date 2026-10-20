@@ -18,11 +18,22 @@
 - Protocol 2.5 (additive): new event type `session.message`; new capabilities
   `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
   and `session.messages`.
+- Provider elicitation is now a first-class session surface. HLAO advertises ACP
+  `elicitation.form`, handles `elicitation/create`, exposes `SessionView.pendingElicitation`,
+  emits `elicitation.requested`/`elicitation.resolved`, adds the
+  `sessions.respond_elicitation` method, and adds `hlao elicit`. Claude Code's
+  AskUserQuestion and MCP elicitations now reach the operator. A question is user input, not
+  a permission: `permissionPolicy` never answers it.
+- Protocol 2.6 (additive): new capability `session.elicitation`; new event types
+  `elicitation.requested` and `elicitation.resolved`; new method
+  `sessions.respond_elicitation`; optional `SessionView.pendingElicitation`.
 
 ### Changed
 
 - `plan_update` keeps its existing `update` field and adds normalized `planId`, `kind`,
   `entries`, `uri`, and `content`; `plan_removed` carries `planId`.
+- `waiting_permission` and `wait --until permission` also cover a pending provider question;
+  `read`, `get`, and `wait` label it as a question and point at `hlao elicit`.
 - `subagents` remains deliberately unadvertised. ACP session-directed messages are gated by
   that capability, so a compliant adapter will not send them; HLAO still projects them
   defensively if a custom adapter does. Provider subagent sessions are out of scope.

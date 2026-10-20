@@ -41,6 +41,8 @@ Usage:
   hlao close [<id>] [--force] [--tree]         end a session
   hlao close --idle DUR | --status S | --root S [--dry-run] [--forget]
   hlao permit [<id>] --allow|--deny|--option ID  answer a permission request
+  hlao elicit [<id>] [--accept key=value ... | --decline | --cancel]
+                                             answer a provider question
   hlao mode [<id>] [modeId]                    read or switch a provider mode
   hlao policy [<id>] [allow|ask|deny]          read or set the live permission policy
   hlao option [<id>] [key value]               read or set provider config options
@@ -91,6 +93,7 @@ Examples:
   hlao read --since 42
   hlao wait --until permission --timeout 10m
   hlao permit a1b2c3 --allow --always
+  hlao elicit a1b2c3 --accept question_0="Build"
   hlao mode a1b2c3 auto
   hlao rename a1b2c3 builder
   hlao list --json`;
@@ -154,6 +157,7 @@ const COMMAND_HELP_NAMES = new Set([
   "cancel",
   "close",
   "permit",
+  "elicit",
   "mode",
   "policy",
   "option",
@@ -315,13 +319,15 @@ Conditions:
               A session that ends before it becomes idle is unsatisfied (exit 3).
   settled     the explicit completion condition: settled, permission, or exit.
               Termination counts as completion (exit 0).
-  permission  a permission request is pending; answer it with permit.
+  permission  operator input is pending: a permission request (answer with
+              permit) or a provider question (answer with elicit).
   exit        the session is terminal.
   change      a new event matches --since/--type/--grep.
 
-A permission stop is an actionable completion for idle and settled: there is
-no runnable turn, and the output names "settled (permission)". Use
---until permission when the gate itself is the event you want.
+An input stop is an actionable completion for idle and settled: there is no
+runnable turn, and the output names "settled (permission)" with the pending
+permission or question. Use --until permission when the gate itself is the
+event you want.
 
 With several ids, the JSON result includes per-target results in request order;
 a target still waiting when the wait resolves is reported as "pending". A
@@ -384,6 +390,20 @@ job root), --tree <id> (that session and descendants), --status, --idle, and
 --except-self narrow the set. Apart from --tree <id>, selector flags take no
 positional id. A session with no matching option is reported and does not stop
 the others.`,
+    elicit: `hlao elicit [<id>] [--accept key=value ... | --decline | --cancel]
+
+Answer a provider question (ACP form elicitation), such as Claude Code's
+AskUserQuestion. Without an action flag, print the pending question and its
+form fields; a session with no pending question is an error.
+
+--accept sends schema-shaped content. Each positional is key=value; values
+parse as JSON when possible, so strings, numbers, booleans, and string arrays
+work ("question_1=[\\"a\\",\\"b\\"]"). --decline answers with no content, and
+--cancel withdraws the question (the provider aborts the tool call). An
+elicitation is not a permission: the session's permission policy never answers
+it, so it always waits for an operator or a delegated session. Inside a
+session, omit <id> or pass --self.`,
+
     mode: `hlao mode [<id>] [modeId]
 
 Read or switch the provider's native permission mode. This is the same switch a

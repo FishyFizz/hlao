@@ -43,6 +43,7 @@ hlao send <id> "..."            # prompt another session
 hlao wait --until permission --timeout 10m
 hlao queue                      # what is queued behind the active turn
 hlao permit <id> --allow        # answer a pending permission request
+hlao elicit <id> --accept k=v   # answer a provider question (--decline/--cancel)
 hlao get <id>                   # state only, no events
 hlao list --mine                # the sessions in your job's root subtree
 ```
@@ -86,8 +87,10 @@ provider is waiting for an answer; `exit` means the session ended.
 
 - A pending request is visible in `read` and in `list --pending`. The operator, or another
   session (normally the parent), answers it with `hlao permit <id> --allow`, `--deny`, or
-  `--option <id>`. A session parked on a permission request cannot run a command to answer
-  itself; leave a clear blocker and let the operator or parent answer.
+  `--option <id>`. A provider question is separate and never auto-answered: `hlao elicit <id>`
+  shows it, and `--accept key=value`, `--decline`, or `--cancel` answers it. A session parked
+  on either gate cannot run a command to answer itself; leave a clear blocker and let the
+  operator or parent answer.
 - The operator owns the permission gate. Do not change your own or another session's policy to
   remove it; report the blocker instead.
 - The instance token is the real authority. `ask` makes a request visible; it is not

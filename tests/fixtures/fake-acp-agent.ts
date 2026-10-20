@@ -214,6 +214,84 @@ const app = agent({ name: "fake-acp" })
       return { stopReason: stop };
     }
 
+    if (mode === "elicitation") {
+      const caps = clientCaps as
+        | { elicitation?: { form?: unknown } }
+        | null
+        | undefined;
+      await message(
+        `capability: ${caps?.elicitation?.form !== undefined ? "form" : "none"}`,
+      );
+      await send({
+        sessionUpdate: "tool_call",
+        toolCallId: "call-ask",
+        title: "Ask the user",
+        kind: "ask",
+        status: "pending",
+      });
+      const response = await client.request("elicitation/create", {
+        mode: "form",
+        sessionId,
+        toolCallId: "call-ask",
+        message: "Choose a build",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            question_0: {
+              type: "string",
+              title: "Which build?",
+              oneOf: [
+                { const: "build-a", title: "Build A" },
+                { const: "build-b", title: "Build B" },
+              ],
+            },
+            question_1_custom: {
+              type: "string",
+              title: "Other",
+            },
+          },
+          required: ["question_0"],
+        },
+      });
+      if (response.action === "accept") {
+        await message(
+          `elicitation: accept ${JSON.stringify(response.content ?? {})}`,
+          "m2",
+        );
+      } else {
+        await message(`elicitation: ${response.action}`, "m2");
+      }
+      return { stopReason: "end_turn" };
+    }
+
+    if (mode === "elicitation-withdrawn") {
+      const controller = new AbortController();
+      const response = client
+        .request(
+          "elicitation/create",
+          {
+            mode: "form",
+            sessionId,
+            message: "A question nobody will answer",
+            requestedSchema: {
+              type: "object",
+              properties: { question_0: { type: "string", title: "Anything" } },
+            },
+          },
+          { cancellationSignal: controller.signal },
+        )
+        .catch(() => null);
+      setTimeout(() => controller.abort(), 500);
+      const settled = await response;
+      await message(
+        settled?.action === "accept"
+          ? "elicitation: accept"
+          : "elicitation: withdrawn",
+        "m2",
+      );
+      return { stopReason: "end_turn" };
+    }
+
     if (mode === "permission-after-turn") {
       // Model work that outlives the prompt: an autonomous cycle (a
       // background-task notification, a peer message) still runs tool calls

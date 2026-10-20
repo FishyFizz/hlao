@@ -238,6 +238,7 @@ The token is the instance boundary.
 | `session_closed` | session is closed or failed |
 | `session_not_ready` | session exists but has no ACP session yet |
 | `no_pending_permission` | `sessions.permit` with nothing pending |
+| `no_pending_elicitation` | `sessions.respond_elicitation` with nothing pending |
 | `bad_option` | permission option id not offered by the request |
 | `config_invalid` | user or project config is invalid; the message names the file |
 | `session_failed` | a prompt turn failed for a reason the adapter reported |
@@ -262,7 +263,7 @@ The token is the instance boundary.
   `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
   `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
   `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
-  `session.messages`.
+  `session.messages`, `session.elicitation`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -328,6 +329,7 @@ Method index:
 | `sessions.cancel` | `{ sessionId, keepQueue? }` | `{ session, discarded }` |
 | `sessions.close` | `{ sessionId, force? }` | `{ session, killed, wasTerminal }` |
 | `sessions.permit` | `{ sessionId, optionId?, requestId?, always? }` | `{ session, requestId, optionId, by }` |
+| `sessions.respond_elicitation` | `{ sessionId, requestId?, action, content? }` | `{ session, requestId, action, by }` |
 | `sessions.set_mode` | `{ sessionId, modeId }` | `{ session }` |
 | `sessions.set_policy` | `{ sessionId, permissionPolicy }` | `{ session }` |
 | `sessions.set_config_option` | `{ sessionId, configId, value }` | `{ session }` |
@@ -676,6 +678,20 @@ With no `optionId`, the first `allow_once`/`allow_always` option is chosen; with
 `always: true` also sets the session's `permissionPolicy` to `allow` and appends a
 `policy.changed` event. Errors: `no_pending_permission`, `bad_option`.
 
+### `sessions.respond_elicitation`
+
+Params: `{ sessionId: string; requestId?: string; action: "accept" | "decline" | "cancel";
+content?: Record<string, string | number | boolean | string[]> }`.
+
+Result: `{ session: SessionView; requestId: string; action: "accept" | "decline" | "cancel";
+by: "operator" }`.
+
+Answers a provider question (ACP `elicitation/create`) exposed as
+`SessionView.pendingElicitation`. `accept` carries schema-shaped content; `decline` answers
+with no content; `cancel` withdraws the question and the provider aborts the tool call. An
+elicitation is user input, not a permission: the session's `permissionPolicy` never answers
+it. Errors: `no_pending_elicitation` when nothing is pending or `requestId` does not match.
+
 ### `sessions.set_mode`
 
 Params: `{ sessionId: string; modeId: string }`. Result: `{ session: SessionView }`.
@@ -843,7 +859,8 @@ type EventType =
   | "turn.started" | "turn.ended" | "cancel.requested"
   | "agent.message" | "agent.thought" | "user.message" | "session.message"
   | "tool.call" | "tool.update" | "plan" | "plan.update"
-  | "permission.requested" | "permission.resolved" | "policy.changed"
+  | "permission.requested" | "permission.resolved"
+  | "elicitation.requested" | "elicitation.resolved" | "policy.changed"
   | "notice" | "usage" | "mode" | "config" | "commands" | "session.info"
   | "compaction" | "subagent" | "stderr" | "error" | "raw";
 ```
@@ -922,6 +939,7 @@ type SessionView = {
     at: string;
   } | null;
   pendingPermission: PermissionView | null;
+  pendingElicitation?: ElicitationView | null; // 2.6
   lastStopReason: StopReason | null;
   agentSessionId: string | null; // exposed for diagnostics only
   processId: number | null;
@@ -972,6 +990,17 @@ type PermissionView = {
   title: string;
   kind: string | null;
   options: { optionId: string; name: string; kind: string }[];
+  requestedAt: string;
+};
+
+type ElicitationView = {          // 2.6
+  requestId: string;
+  toolCallId: string | null;
+  message: string;
+  mode: string;                   // "form" (requestedSchema) or "url" (url)
+  requestedSchema?: Record<string, unknown>; // JSON Schema object
+  url?: string;
+  elicitationId?: string;
   requestedAt: string;
 };
 ```

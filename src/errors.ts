@@ -13,6 +13,7 @@ const ERROR_CODES = [
   "session_failed",
   "session_not_ready",
   "no_pending_permission",
+  "no_pending_elicitation",
   "bad_option",
   "timeout",
   "supervisor_unavailable",

@@ -46,6 +46,8 @@ export const EVENT_TYPES = [
   "plan.update",
   "permission.requested",
   "permission.resolved",
+  "elicitation.requested",
+  "elicitation.resolved",
   "policy.changed",
   "notice",
   "usage",
@@ -68,6 +70,22 @@ export interface PermissionView {
   title: string;
   kind: string | null;
   options: { optionId: string; name: string; kind: string }[];
+  requestedAt: string;
+}
+
+/** A provider request for structured user input (form or URL). */
+export interface ElicitationView {
+  requestId: string;
+  toolCallId: string | null;
+  message: string;
+  /** `"form"` for a `requestedSchema`, `"url"` for a URL elicitation. */
+  mode: string;
+  /** Form mode: a JSON Schema object describing the fields to render. */
+  requestedSchema?: Record<string, unknown>;
+  /** URL mode: where the user must go. */
+  url?: string;
+  /** URL mode: the provider's identifier for this elicitation. */
+  elicitationId?: string;
   requestedAt: string;
 }
 
@@ -165,6 +183,8 @@ export interface SessionView {
     at: string;
   } | null;
   pendingPermission: PermissionView | null;
+  /** A provider question awaiting an operator answer (2.6). */
+  pendingElicitation?: ElicitationView | null;
   lastStopReason: StopReason | null;
   agentSessionId: string | null;
   processId: number | null;
@@ -266,6 +286,7 @@ const METHODS = [
   "sessions.cancel",
   "sessions.close",
   "sessions.permit",
+  "sessions.respond_elicitation",
   "sessions.set_mode",
   "sessions.set_policy",
   "sessions.set_config_option",
@@ -514,6 +535,19 @@ export interface PermitResult {
   optionId: string;
   by: string;
 }
+export interface RespondElicitationParams {
+  sessionId: string;
+  requestId?: string;
+  action: "accept" | "decline" | "cancel";
+  /** Present with `accept`; values must match the requested form schema. */
+  content?: Record<string, string | number | boolean | string[]>;
+}
+export interface RespondElicitationResult {
+  session: SessionView;
+  requestId: string;
+  action: "accept" | "decline" | "cancel";
+  by: string;
+}
 export interface SetPolicyParams {
   sessionId: string;
   permissionPolicy: PermissionPolicy;
@@ -605,6 +639,7 @@ export type ParamsByMethod = {
   "sessions.cancel": CancelParams;
   "sessions.close": CloseParams;
   "sessions.permit": PermitParams;
+  "sessions.respond_elicitation": RespondElicitationParams;
   "sessions.set_mode": SetModeParams;
   "sessions.set_policy": SetPolicyParams;
   "sessions.set_config_option": SetConfigOptionParams;

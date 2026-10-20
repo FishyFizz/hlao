@@ -5,6 +5,8 @@ import type {
   AgentCapabilities,
   ClientConnection,
   ContentBlock,
+  CreateElicitationRequest,
+  CreateElicitationResponse,
   PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -35,10 +37,16 @@ import type {
 import { ACP_PROTOCOL_VERSION, MAX_PROMPT_CHARS, isTerminalStatus } from "./protocol.js";
 import { raceWithTimeout, withTimeout } from "./session/async.js";
 import {
+  cancelledElicitation,
   cancelledResponse,
   chooseByPolicy,
+  elicitationResponse,
   pickAllowOption,
   selectedResponse,
+  toElicitationView,
+  type ElicitationAction,
+  type ElicitationContent,
+  type PendingElicitation,
   type PendingPermission,
 } from "./session/permissions.js";
 import {
@@ -173,6 +181,7 @@ export class Session {
   #turnText = "";
   #lastMessageId: string | null = null;
   #pending: PendingPermission | null = null;
+  #pendingElicitation: PendingElicitation | null = null;
   #lastStopReason: StopReason | null = null;
   #usage: SessionUsageView | null = null;
   #compaction: SessionCompactionView | null = null;
@@ -259,8 +268,14 @@ export class Session {
     return isTerminalStatus(this.#status);
   }
 
+  /** Operator input of either kind blocks the session the same way. */
+  get #awaitingInput(): boolean {
+    return this.#pending !== null || this.#pendingElicitation !== null;
+  }
+
   view(): SessionView {
     const pending = this.#pending;
+    const elicitation = this.#pendingElicitation;
     return {
       id: this.id,
       name: this.name,
@@ -282,6 +297,13 @@ export class Session {
       lastEvent: this.#lastEvent ? { ...this.#lastEvent } : null,
       pendingPermission: pending
         ? toPermissionView(pending.requestId, pending.requestedAt, pending.request)
+        : null,
+      pendingElicitation: elicitation
+        ? toElicitationView(
+            elicitation.requestId,
+            elicitation.requestedAt,
+            elicitation.request,
+          )
         : null,
       lastStopReason: this.#lastStopReason,
       agentSessionId: this.#agentSessionId,
@@ -556,6 +578,7 @@ export class Session {
         this.#cancelling = false;
         this.#lastStopReason = stopReason;
         this.#clearPending("cancel");
+        this.#clearPendingElicitation("cancel");
         this.#settleItem(item, {
           ok: true,
           turn,
@@ -580,6 +603,7 @@ export class Session {
       } else {
         const message = describeError(error);
         this.#clearPending("prompt-failed");
+        this.#clearPendingElicitation("prompt-failed");
         this.#emit("error", { message, phase: "prompt" }, turn);
         this.#settleItem(item, {
           ok: false,
@@ -592,8 +616,8 @@ export class Session {
       this.#active = null;
       this.#turnText = "";
       if (!this.isTerminal) {
-        this.#status = this.#pending ? "waiting_permission" : "idle";
-        if (!this.#pending) this.#turnStartedAt = null;
+        this.#status = this.#awaitingInput ? "waiting_permission" : "idle";
+        if (!this.#awaitingInput) this.#turnStartedAt = null;
         this.#changed();
         void this.#pump();
       }
@@ -605,6 +629,7 @@ export class Session {
     const text = this.#turnText;
     this.#cancelling = false;
     this.#clearPending("turn-ended");
+    this.#clearPendingElicitation("turn-ended");
     this.#lastStopReason = stopReason;
     this.#emit("turn.ended", { turn, stopReason, textLength: text.length }, turn);
     this.#settleItem(item, { ok: true, turn, stopReason, text });
@@ -691,13 +716,13 @@ export class Session {
             // an actionable stop, and idle alone is not enough while the queue
             // still has work.
             if (this.isTerminal) finish(true, "exit");
-            else if (this.#pending) finish(true, "permission");
+            else if (this.#awaitingInput) finish(true, "permission");
             else if (this.#status === "idle" && this.#queue.length === 0) {
               finish(true, "idle");
             }
             return;
           case "permission":
-            if (this.#pending) finish(true, "permission");
+            if (this.#awaitingInput) finish(true, "permission");
             else if (this.isTerminal) finish(false, "exit");
             return;
           case "exit":
@@ -751,6 +776,7 @@ export class Session {
     if (this.isTerminal) return { discarded: 0 };
     const discarded = keepQueue ? 0 : this.#discardQueue("cancel", by);
     this.#clearPending("cancel", by);
+    this.#clearPendingElicitation("cancel", by);
     if (this.#active) {
       this.#cancelling = true;
       this.#emit("cancel.requested", {
@@ -778,6 +804,7 @@ export class Session {
     this.#closingBy = by;
     this.#discardQueue("close", by);
     this.#clearPending("close", by);
+    this.#clearPendingElicitation("close", by);
 
     if (!force && this.#conn && this.#agentSessionId) {
       const canClose = this.#caps.sessionCapabilities?.close !== undefined &&
@@ -933,7 +960,11 @@ export class Session {
     if (!pending) return;
     this.#pending = null;
     if (!this.isTerminal) {
-      this.#status = this.#active ? "busy" : "idle";
+      this.#status = this.#pendingElicitation
+        ? "waiting_permission"
+        : this.#active
+          ? "busy"
+          : "idle";
     }
     this.#emit("permission.resolved", {
       requestId: pending.requestId,
@@ -1254,12 +1285,151 @@ export class Session {
     });
   }
 
+  #onElicitation(
+    params: CreateElicitationRequest,
+    requestId: string,
+    signal: AbortSignal,
+  ): Promise<CreateElicitationResponse> {
+    if (
+      this.isTerminal ||
+      this.#closing ||
+      this.#cancelling ||
+      signal.aborted
+    ) {
+      return Promise.resolve(cancelledElicitation());
+    }
+    if (this.#pendingElicitation) {
+      this.#emit("error", {
+        message: "a second elicitation arrived while one was pending",
+        requestId,
+      });
+      return Promise.resolve(cancelledElicitation());
+    }
+    // Elicitation is user input, not a permission: no policy may answer it.
+    // Even `allow` would have to invent form content, so the request always
+    // parks until an operator responds, declines, or cancels.
+    this.#emit("elicitation.requested", {
+      requestId,
+      sessionId:
+        "sessionId" in params && typeof params.sessionId === "string"
+          ? params.sessionId
+          : null,
+      toolCallId:
+        "toolCallId" in params && typeof params.toolCallId === "string"
+          ? params.toolCallId
+          : null,
+      message: params.message,
+      mode: params.mode,
+      ...(params.mode === "form"
+        ? { requestedSchema: params.requestedSchema }
+        : {}),
+      ...(params.mode === "url"
+        ? { url: params.url, elicitationId: params.elicitationId }
+        : {}),
+      outsideTurn: this.#active === null,
+    });
+
+    return new Promise<CreateElicitationResponse>((resolve) => {
+      // The provider can withdraw a question it no longer needs. The ACP
+      // connection aborts this signal on `$/cancel_request`; clearing the
+      // pending state keeps the session from parking on a dead request.
+      const onWithdraw = (): void => {
+        if (this.#pendingElicitation?.requestId !== requestId) return;
+        this.#clearPendingElicitation("withdrawn", "agent");
+      };
+      const settle = (response: CreateElicitationResponse): void => {
+        signal.removeEventListener("abort", onWithdraw);
+        resolve(response);
+      };
+      this.#pendingElicitation = {
+        requestId,
+        requestedAt: nowIso(),
+        request: params,
+        resolve: settle,
+      };
+      signal.addEventListener("abort", onWithdraw, { once: true });
+      if (signal.aborted) {
+        this.#clearPendingElicitation("withdrawn", "agent");
+        return;
+      }
+      // `waiting_permission` is HLAO's single "blocked on operator input"
+      // status; `pendingElicitation` says which kind it is.
+      this.#status = "waiting_permission";
+      this.#changed();
+    });
+  }
+
+  /** Answer a pending provider question. Accept carries schema-shaped content. */
+  respondElicitation(
+    action: ElicitationAction,
+    content: ElicitationContent | undefined,
+    requestId: string | undefined,
+    by = "operator",
+  ): { requestId: string; action: ElicitationAction } {
+    const pending = this.#pendingElicitation;
+    if (!pending) {
+      throw new HlaoError(
+        "no_pending_elicitation",
+        `session ${this.id} has no pending elicitation`,
+      );
+    }
+    if (requestId !== undefined && requestId !== pending.requestId) {
+      throw new HlaoError(
+        "no_pending_elicitation",
+        `no pending elicitation with request id ${requestId}`,
+        { requestId: pending.requestId },
+      );
+    }
+    this.#pendingElicitation = null;
+    if (!this.isTerminal) {
+      this.#status = this.#pending
+        ? "waiting_permission"
+        : this.#active
+          ? "busy"
+          : "idle";
+    }
+    this.#emit("elicitation.resolved", {
+      requestId: pending.requestId,
+      action,
+      ...(content !== undefined ? { content } : {}),
+      by,
+    });
+    pending.resolve(elicitationResponse(action, content));
+    this.#changed();
+    return { requestId: pending.requestId, action };
+  }
+
+  #clearPendingElicitation(reason: string, by = "system"): void {
+    const pending = this.#pendingElicitation;
+    if (!pending) return;
+    this.#pendingElicitation = null;
+    if (this.#status === "waiting_permission" && !this.isTerminal) {
+      this.#status = this.#pending
+        ? "waiting_permission"
+        : this.#active
+          ? "busy"
+          : "idle";
+    }
+    this.#emit("elicitation.resolved", {
+      requestId: pending.requestId,
+      action: "cancel",
+      by,
+      reason,
+    });
+    pending.resolve(cancelledElicitation());
+    this.#changed();
+  }
+
   #clearPending(reason: string, by = "system"): void {
     const pending = this.#pending;
     if (!pending) return;
     this.#pending = null;
     if (this.#status === "waiting_permission" && !this.isTerminal) {
-      this.#status = this.#active ? "busy" : "idle";
+      this.#status = this.#pendingElicitation
+        ? "waiting_permission"
+        : this.#active
+          ? "busy"
+          : "idle";
     }
     this.#emit("permission.resolved", {
       requestId: pending.requestId,
@@ -1399,6 +1569,9 @@ export class Session {
       })
       .onRequest("session/request_permission", ({ params, requestId, signal }) =>
         this.#onPermission(params, String(requestId), signal),
+      )
+      .onRequest("elicitation/create", ({ params, requestId, signal }) =>
+        this.#onElicitation(params, String(requestId), signal),
       );
 
     this.#conn = app.connect(stream);
@@ -1423,6 +1596,12 @@ export class Session {
           // Experimental plan deltas/removals. Full plan replacements remain
           // valid for an adapter that does not opt into the experimental form.
           plan: {},
+          // Form elicitation. Adapters gate AskUserQuestion and MCP
+          // elicitation on this; without it the model never sees the question
+          // tools. URL mode is deliberately not advertised: HLAO has no URL
+          // surface, and the adapter then declines URL requests instead of
+          // leaving them unanswerable.
+          elicitation: { form: {} },
         },
         clientInfo: { name: "hlao", version: VERSION },
       }),
@@ -1703,6 +1882,7 @@ export class Session {
     };
 
     this.#clearPending(status, by);
+    this.#clearPendingElicitation(status, by);
 
     if (this.#active) {
       const active = this.#active;
