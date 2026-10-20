@@ -158,9 +158,12 @@ never printed by `agents` or `config show`.
 
 ## Client contract
 
-The supervisor listens on a per-user named pipe (Windows) or Unix socket, speaks NDJSON, and
-is the only boundary a client needs. The bundled CLI is the reference client; a dashboard,
-TUI, or MCP server is another client and can talk to the same wire without private access.
+The supervisor listens on a per-user named pipe (Windows) or Unix socket and is the only
+boundary a client needs. The wire is defined over framed JSON messages, not over that socket:
+`contracts/stream.md` is the transport contract and `src/stream.ts` is the adapter seam, so a
+TCP or other transport can carry the same frames. The bundled CLI is the reference client; a
+dashboard, TUI, or MCP server is another client and can talk to the same wire without private
+access.
 
 ```
 human  -> dashboard / TUI  --\
@@ -309,7 +312,7 @@ operator / agent shell
           │  hlao <command> --json
           ▼
    CLI (stateless, one request per command)
-          │  NDJSON over a per-user named pipe / Unix socket
+          │  framed JSON over a pluggable stream (named pipe / Unix socket today)
           ▼
  supervisor (one per HLAO_HOME, detached)
           │  ACP v1 over stdio, one adapter process per session

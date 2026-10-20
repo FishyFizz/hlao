@@ -19,7 +19,8 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
    │                       │
  dashboard / TUI        CLI / MCP
    └──────────┬────────────┘
-              │  NDJSON over a per-user named pipe / Unix socket (the client contract)
+              │  framed JSON over a pluggable stream (the client contract)
+              │  named pipe / Unix socket today; TCP and other adapters are additions
               ▼
    supervisor (one per HLAO_HOME, detached)
               │  ACP v1 over stdio, one adapter process per session
@@ -53,13 +54,14 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `version` | Package version at runtime | — | — |
 | `paths` | Runtime file and socket locations | location naming | `errors` |
 | `protocol` | Client↔supervisor wire contract and boundary validation | wire schema, version, capabilities | `errors` |
-| `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `errors` |
+| `stream` | Framed message streams over a transport | framing, buffering, transport adapters | `protocol`, `errors` |
+| `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `stream`, `errors` |
 | `logger` | Supervisor diagnostics log | log rotation | `paths` |
 | `config` | Backend manifests and user/project config | config merge rules | `paths`, `errors` |
 | `events` | Bounded, seq-addressed event log | retention and cursors | — |
 | `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
-| `supervisor` | Process lifecycle, lock/socket, dispatch, universal addressing | live session table | `session`, `config`, `lock`, `logger`, `paths`, `protocol`, `errors` |
-| `client` | Client-side transport and autostart | — | `lock`, `protocol`, `paths`, `errors` |
+| `supervisor` | Process lifecycle, lock/listener, dispatch, universal addressing | live session table | `session`, `config`, `lock`, `logger`, `paths`, `protocol`, `stream`, `errors` |
+| `client` | Client-side transport and autostart | — | `lock`, `protocol`, `paths`, `stream`, `errors` |
 | `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
 The CLI is split by responsibility: `main.ts` dispatches and owns global exits; `context.ts`

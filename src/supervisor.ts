@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, statSync, unlinkSync } from "node:fs";
-import { createServer, type Server, type Socket } from "node:net";
 import { resolve } from "node:path";
 import {
   configFingerprint,
@@ -23,7 +22,13 @@ import {
 import { Logger } from "./logger.js";
 import { ensureHome, isWindows, lockPath, supervisorEndpoint } from "./paths.js";
 import {
-  MAX_FRAME_BYTES,
+  FrameTooLargeError,
+  createWireServer,
+  pathTarget,
+  type WireStream,
+  type WireStreamServer,
+} from "./stream.js";
+import {
   PROTOCOL_CAPABILITIES,
   WIRE_PROTOCOL_MAJOR,
   WIRE_PROTOCOL_VERSION,
@@ -106,8 +111,8 @@ export class SupervisorServer {
   #configHash: string;
   #configError: string | null;
   #sessions = new Map<string, Session>();
-  #server: Server | null = null;
-  #sockets = new Set<Socket>();
+  #server: WireStreamServer | null = null;
+  #streams = new Set<WireStream>();
   #lock: LockInfo | null = null;
   #stopping = false;
   #acceptingNew = true;
@@ -153,30 +158,21 @@ export class SupervisorServer {
         }
       }
 
-      const server = createServer((socket) => this.#onConnection(socket));
+      const server = createWireServer(pathTarget(this.endpoint));
       this.#server = server;
-      server.on("error", (error) => {
+      server.onConnection((stream) => this.#onConnection(stream));
+      server.onError((error) => {
         this.#logger.error(`server error: ${describeError(error)}`);
       });
 
-      await new Promise<void>((resolvePromise, reject) => {
-        const onError = (error: Error): void => {
-          server.off("listening", onListening);
-          reject(
-            new HlaoError(
-              "internal",
-              `cannot listen on ${this.endpoint}: ${describeError(error)}`,
-            ),
-          );
-        };
-        const onListening = (): void => {
-          server.off("error", onError);
-          resolvePromise();
-        };
-        server.once("error", onError);
-        server.once("listening", onListening);
-        server.listen(this.endpoint);
-      });
+      try {
+        await server.listen();
+      } catch (error) {
+        throw new HlaoError(
+          "internal",
+          `cannot listen on ${this.endpoint}: ${describeError(error)}`,
+        );
+      }
 
       if (!isWindows()) {
         try {
@@ -219,31 +215,12 @@ export class SupervisorServer {
     const live = [...this.#sessions.values()].filter((session) => !session.isTerminal);
     await Promise.allSettled(live.map((session) => session.close(force)));
 
-    for (const socket of this.#sockets) {
-      if (!socket.writableEnded) socket.destroy();
+    for (const stream of this.#streams) {
+      stream.terminate();
     }
 
     if (this.#server) {
-      await new Promise<void>((resolveStop) => {
-        let done = false;
-        const finish = (): void => {
-          if (done) return;
-          done = true;
-          resolveStop();
-        };
-        this.#server!.close(() => finish());
-        const fallback = setTimeout(() => {
-          try {
-            (
-              this.#server as unknown as { closeAllConnections?: () => void }
-            ).closeAllConnections?.();
-          } catch {
-            // Older runtimes.
-          }
-          finish();
-        }, 2_000);
-        fallback.unref?.();
-      });
+      await this.#server.close();
     }
 
     removeLock(this.#home, this.token);
@@ -311,43 +288,49 @@ export class SupervisorServer {
   // connections
   // -------------------------------------------------------------------------
 
-  #onConnection(socket: Socket): void {
-    this.#sockets.add(socket);
+  #onConnection(stream: WireStream): void {
+    this.#streams.add(stream);
     const abort = new AbortController();
-    socket.setEncoding("utf8");
-    socket.on("error", () => abort.abort());
-    socket.on("close", () => {
+    stream.onClose(() => {
       abort.abort();
-      this.#sockets.delete(socket);
+      this.#streams.delete(stream);
     });
 
-    let buffer = "";
     let handled = false;
     const initialTimer = setTimeout(() => {
-      if (!handled) socket.destroy();
+      if (!handled) stream.terminate();
     }, 15_000);
     initialTimer.unref?.();
 
-    socket.on("data", (chunk: string) => {
+    stream.onError((error) => {
       if (handled) return;
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
-        handled = true;
-        clearTimeout(initialTimer);
-        this.#write(socket, failure(0, new HlaoError("bad_request", "request frame too large")));
-        socket.end();
-        return;
-      }
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
       handled = true;
       clearTimeout(initialTimer);
-      const line = buffer.slice(0, newline);
-      void this.#handleLine(line, socket, abort.signal);
+      if (error instanceof FrameTooLargeError) {
+        this.#write(
+          stream,
+          failure(0, new HlaoError("bad_request", "request frame too large")),
+        );
+        stream.close();
+        return;
+      }
+      abort.abort();
+      stream.terminate();
+    });
+
+    stream.onFrame((line) => {
+      if (handled) return;
+      handled = true;
+      clearTimeout(initialTimer);
+      void this.#handleLine(line, stream, abort.signal);
     });
   }
 
-  async #handleLine(line: string, socket: Socket, signal: AbortSignal): Promise<void> {
+  async #handleLine(
+    line: string,
+    stream: WireStream,
+    signal: AbortSignal,
+  ): Promise<void> {
     let id = 0;
     try {
       let parsed: unknown;
@@ -359,14 +342,14 @@ export class SupervisorServer {
       const envelope = parseEnvelope(parsed);
       id = envelope.id;
       await this.#handleEnvelope(envelope, signal).then(
-        (result) => this.#write(socket, { id, ok: true, result }),
-        (error) => this.#write(socket, failure(id, error)),
+        (result) => this.#write(stream, { id, ok: true, result }),
+        (error) => this.#write(stream, failure(id, error)),
       );
     } catch (error) {
-      this.#write(socket, failure(id, error));
+      this.#write(stream, failure(id, error));
     }
 
-    socket.end();
+    stream.close();
     const shutdown = this.#shutdownAfterResponse;
     if (shutdown) {
       this.#shutdownAfterResponse = null;
@@ -1037,10 +1020,9 @@ export class SupervisorServer {
     }
   }
 
-  #write(socket: Socket, response: ResponseEnvelope): void {
-    if (socket.destroyed) return;
+  #write(stream: WireStream, response: ResponseEnvelope): void {
     try {
-      socket.write(`${JSON.stringify(response)}\n`);
+      stream.write(`${JSON.stringify(response)}\n`);
     } catch {
       // The client may have vanished.
     }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — unreleased
+
+### Added
+
+- The wire is defined over framed streams rather than a socket implementation
+  (`contracts/stream.md`, ADR 0009). `src/stream.ts` is the single transport seam; the
+  supervisor, client, and liveness probe no longer import `node:net` directly.
+- A TCP adapter carries the same frames as the named pipe and Unix socket. The supervisor
+  does not bind TCP by default, and the supervisor token remains local-IPC authority only.
+- Protocol 2.0 behavior is unchanged: one request per connection, the same envelope, errors,
+  and frame limits.
+
 ## 0.5.0 — unreleased
 
 ### Changed

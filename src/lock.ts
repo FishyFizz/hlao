@@ -6,10 +6,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { connect } from "node:net";
 import { HlaoError } from "./errors.js";
 import { lockPath } from "./paths.js";
 import { normalizeProtocolVersion, WIRE_PROTOCOL_MAJOR } from "./protocol.js";
+import { connectStream, pathTarget, type WireStream } from "./stream.js";
 
 export interface LockInfo {
   pid: number;
@@ -150,56 +150,53 @@ export function probeSupervisor(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (value: boolean): void => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(value);
-    };
-    const socket = connect(info.endpoint);
+    let stream: WireStream | null = null;
     const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref?.();
 
-    socket.setEncoding("utf8");
-    let buffer = "";
-    socket.on("connect", () => {
-      socket.write(
-        `${JSON.stringify({
-          id: 1,
-          method: "hello",
-          params: {},
-          token: info.token,
-        })}\n`,
-      );
-    });
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      try {
-        const response = JSON.parse(buffer.slice(0, newline)) as {
-          ok?: boolean;
-          result?: { protocolVersion?: unknown };
-        };
-        const reported = response.result?.protocolVersion;
-        const normalized = normalizeProtocolVersion(reported);
-        finish(
-          response.ok === true &&
-            normalized !== null &&
-            (expectedMajor === null || normalized.major === expectedMajor),
+    function finish(value: boolean): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream?.terminate();
+      resolve(value);
+    }
+
+    void connectStream(pathTarget(info.endpoint), { timeoutMs })
+      .then((opened) => {
+        if (settled) {
+          opened.terminate();
+          return;
+        }
+        stream = opened;
+        opened.onFrame((line) => {
+          try {
+            const response = JSON.parse(line) as {
+              ok?: boolean;
+              result?: { protocolVersion?: unknown };
+            };
+            const reported = response.result?.protocolVersion;
+            const normalized = normalizeProtocolVersion(reported);
+            finish(
+              response.ok === true &&
+                normalized !== null &&
+                (expectedMajor === null || normalized.major === expectedMajor),
+            );
+          } catch {
+            finish(false);
+          }
+        });
+        opened.onError(() => finish(false));
+        opened.onClose(() => finish(false));
+        opened.write(
+          `${JSON.stringify({
+            id: 1,
+            method: "hello",
+            params: {},
+            token: info.token,
+          })}\n`,
         );
-      } catch {
-        finish(false);
-      }
-      clearTimeout(timer);
-    });
-    socket.on("error", () => {
-      clearTimeout(timer);
-      finish(false);
-    });
-    socket.on("close", () => {
-      clearTimeout(timer);
-      finish(false);
-    });
+      })
+      .catch(() => finish(false));
   });
 }

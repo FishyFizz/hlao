@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
-import { connect } from "node:net";
 import { HlaoError, type HlaoErrorCode } from "./errors.js";
 import {
   pidAlive,
@@ -17,6 +16,12 @@ import {
   type RequestEnvelope,
   type ResponseEnvelope,
 } from "./protocol.js";
+import {
+  FrameTooLargeError,
+  connectStream,
+  pathTarget,
+  type WireStream,
+} from "./stream.js";
 import { VERSION } from "./version.js";
 
 let nextRequestId = 1;
@@ -201,28 +206,17 @@ function requestOnce<T>(
       return;
     }
 
-    const socket = connect(lock.endpoint);
+    let stream: WireStream | null = null;
     let settled = false;
-    let buffer = "";
 
     const finish = (error?: HlaoError, value?: T): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(connectTimer);
       if (responseTimer) clearTimeout(responseTimer);
-      socket.destroy();
+      stream?.terminate();
       if (error) reject(error);
       else resolve(value as T);
     };
-
-    const connectTimer = setTimeout(() => {
-      finish(
-        new HlaoError(
-          "supervisor_unavailable",
-          `cannot connect to the supervisor at ${lock.endpoint}`,
-        ),
-      );
-    }, 10_000);
 
     const responseTimer =
       timeoutMs > 0
@@ -236,76 +230,90 @@ function requestOnce<T>(
           }, timeoutMs)
         : null;
 
-    socket.setEncoding("utf8");
-    socket.on("connect", () => {
-      clearTimeout(connectTimer);
-      socket.write(frame);
-    });
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      if (buffer.length > 32 * 1024 * 1024) {
-        finish(new HlaoError("internal", "supervisor response was too large"));
-        return;
-      }
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      try {
-        const response = JSON.parse(buffer.slice(0, newline)) as ResponseEnvelope;
-        if (!response.ok && response.id === 0) {
-          finish(
-            new HlaoError(
-              response.error.code as HlaoErrorCode,
-              response.error.message,
-              response.error.details,
-            ),
-          );
+    void connectStream(pathTarget(lock.endpoint), {
+      timeoutMs: 10_000,
+      maxFrameBytes: 32 * 1024 * 1024,
+    })
+      .then((opened) => {
+        if (settled) {
+          opened.terminate();
           return;
         }
-        if (response.id !== id) {
+        stream = opened;
+
+        opened.onFrame((line) => {
+          try {
+            const response = JSON.parse(line) as ResponseEnvelope;
+            if (!response.ok && response.id === 0) {
+              finish(
+                new HlaoError(
+                  response.error.code as HlaoErrorCode,
+                  response.error.message,
+                  response.error.details,
+                ),
+              );
+              return;
+            }
+            if (response.id !== id) {
+              finish(
+                new HlaoError(
+                  "internal",
+                  `supervisor answered request ${response.id}, expected ${id}`,
+                ),
+              );
+              return;
+            }
+            if (response.ok) {
+              finish(undefined, response.result as T);
+            } else {
+              finish(
+                new HlaoError(
+                  response.error.code as HlaoErrorCode,
+                  response.error.message,
+                  response.error.details,
+                ),
+              );
+            }
+          } catch (error) {
+            finish(
+              new HlaoError(
+                "internal",
+                `cannot parse supervisor response: ${(error as Error).message}`,
+              ),
+            );
+          }
+        });
+        opened.onError((error) => {
+          finish(
+            error instanceof FrameTooLargeError
+              ? new HlaoError("internal", "supervisor response was too large")
+              : new HlaoError(
+                  "supervisor_unavailable",
+                  `supervisor connection failed: ${error.message}`,
+                ),
+          );
+        });
+        opened.onClose(() => {
           finish(
             new HlaoError(
-              "internal",
-              `supervisor answered request ${response.id}, expected ${id}`,
+              "supervisor_unavailable",
+              "supervisor closed the connection without a response",
             ),
           );
-          return;
-        }
-        if (response.ok) {
-          finish(undefined, response.result as T);
-        } else {
-          finish(
-            new HlaoError(
-              response.error.code as HlaoErrorCode,
-              response.error.message,
-              response.error.details,
-            ),
-          );
-        }
-      } catch (error) {
+        });
+
+        opened.write(frame);
+      })
+      .catch((error: unknown) => {
         finish(
-          new HlaoError(
-            "internal",
-            `cannot parse supervisor response: ${(error as Error).message}`,
-          ),
+          error instanceof HlaoError
+            ? error
+            : new HlaoError(
+                "supervisor_unavailable",
+                `supervisor connection failed: ${(error as Error).message}`,
+              ),
         );
-      }
-    });
-    socket.on("error", (error) => {
-      finish(
-        new HlaoError(
-          "supervisor_unavailable",
-          `supervisor connection failed: ${error.message}`,
-        ),
-      );
-    });
-    socket.on("close", () => {
-      finish(
-        new HlaoError(
-          "supervisor_unavailable",
-          "supervisor closed the connection without a response",
-        ),
-      );
-    });
+      });
   });
 }
 

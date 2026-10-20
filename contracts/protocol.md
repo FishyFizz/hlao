@@ -16,12 +16,18 @@ agent  -> CLI / MCP        --/
 
 ## Transport
 
-- One request per connection, one response, then the connection closes.
-- Frames are a single JSON object followed by `\n`.
+The wire is defined over application **frames**, not over a socket implementation.
+`contracts/stream.md` is the transport contract: one JSON object per frame, ordered, reliable,
+bidirectional, boundary-preserving, and bounded. On byte-stream transports the encoding is
+NDJSON. A transport adapter maps that contract onto a channel; swapping the channel does not
+change this protocol.
+
+- Protocol 2.0: one request per connection, one response, then the connection closes.
 - Endpoint: named pipe on Windows (`\\.\pipe\hlao-<hash of HLAO_HOME>`), Unix domain socket
   at `<HLAO_HOME>/supervisor.sock` elsewhere.
 - Authentication: every request carries the token from `<HLAO_HOME>/supervisor.json`. Any
-  local process holding that token is an operator; the token is the authority.
+  local process holding that token is an operator; the token is the authority. The token is
+  local-IPC authority, not a network or browser credential (ADR 0009).
 - Maximum request frame: 16 MiB. Longer frames are rejected with `bad_request`.
 
 ## Client model
