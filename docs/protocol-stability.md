@@ -18,7 +18,7 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
 
 - **Frame contract.** One JSON object per frame, ordered, reliable, bidirectional, boundaries
   preserved, bounded at 16 MiB per request. NDJSON for byte-stream transports. The contract is
-  `contracts/stream.md`; the transport seam is `src/stream.ts`. The protocol is defined over
+  `contracts/protocol.md`; the transport seam is `src/stream.ts`. The protocol is defined over
   frames, not over the socket, so a future WebSocket/bridge adapter does not change methods.
 - **Versioning.** `hello.protocolVersion` is `{major, minor}`. Major equality is required;
   minor additions are backward-compatible; `hello.capabilities` is the feature-detect list.

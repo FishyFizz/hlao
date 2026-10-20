@@ -173,10 +173,10 @@ never printed by `agents` or `config show`.
 
 The supervisor listens on a per-user named pipe (Windows) or Unix socket and is the only
 boundary a client needs. The wire is defined over framed JSON messages, not over that socket:
-`contracts/stream.md` is the transport contract and `src/stream.ts` is the adapter seam, so a
-TCP or other transport can carry the same frames. The bundled CLI is the reference client; a
-dashboard, TUI, or MCP server is another client and can talk to the same wire without private
-access.
+`contracts/protocol.md` is the full contract — frames, transport, methods, and views — and
+`src/stream.ts` is the adapter seam, so a TCP or other transport can carry the same frames.
+The bundled CLI is the reference client; a dashboard, TUI, or MCP server is another client and
+can talk to the same wire without private access.
 
 ```
 human  -> dashboard / TUI  --\
@@ -185,9 +185,9 @@ agent  -> CLI / MCP        --/
 ```
 
 Call `hello` first: it returns `protocolVersion: { major, minor }` and a capability list.
-Major versions must match; minor versions are additive. `contracts/protocol.md` is the full
-contract, including `backends.list`, filtered and backward reads, multi-id `wait`, and the
-`usage` field on every session view.
+Major versions must match; minor versions are additive. The same contract defines
+`backends.list`, filtered and backward reads, multi-id `wait`, and the `usage` field on every
+session view.
 
 Polling `sessions.list`/`sessions.read` is the 2.0 live-update model and remains supported.
 Protocol 2.1 adds an opt-in persistent stream: `hello` with `stream.persistent`, then

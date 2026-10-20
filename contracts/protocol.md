@@ -1,8 +1,10 @@
 # Contract — `protocol`
 
 The wire between the supervisor and any client. The bundled CLI is the reference client; a
-TUI, web dashboard, or MCP server is another client and must not need private access. Core owns
-session state, addressing, and these methods. It owns no presentation.
+TUI, web dashboard, or MCP server is another client and must not need private access. This
+contract covers the whole interface: the transport that carries frames, the envelope that
+gives a frame meaning, the methods, and the projections they return. Core owns session state,
+addressing, and these methods. It owns no presentation.
 
 An HLAO instance — one `HLAO_HOME`, supervisor, socket, and token — is one address space and
 one swarm boundary. Every session in it is addressable by every client. Isolation is another
@@ -14,18 +16,78 @@ human  -> dashboard / TUI  --\
 agent  -> CLI / MCP        --/
 ```
 
+The interface is layered. Method semantics do not depend on the transport, and a transport
+adapter does not interpret frames:
+
+```
+methods (hello, sessions.*, ...)         semantics
+        │
+   RequestEnvelope / Response            frames
+        │
+      WireStream                         transport seam
+        │
+  pipe / unix socket / TCP / ...         adapters
+```
+
+## Contents
+
+- [Layers and terms](#layers-and-terms)
+- [Transport](#transport) — frames, encodings, lifecycle, adapter interface, policy
+- [Envelope](#envelope)
+- [Error codes](#error-codes)
+- [Versioning](#versioning)
+- [Client model](#client-model)
+- [Addressing](#addressing)
+- [Methods](#methods)
+- [Notifications](#notifications)
+- [Event view](#event-view)
+- [Session view](#session-view)
+
+## Layers and terms
+
+- A **frame** is one JSON object that satisfies the request or response envelope, or a server
+  notification. A stream carries frames; it does not interpret them.
+- A **stream** is an ordered, reliable, bidirectional, boundary-preserving channel of frames.
+  `src/stream.ts` is the transport seam.
+- A **connection** is one stream and its lifecycle: either one-shot or persistent.
+- An **instance** is one `HLAO_HOME`, supervisor, endpoint, and token. The token is the only
+  authority boundary.
+
 ## Transport
 
-The wire is defined over application **frames**, not over a socket implementation.
-`contracts/stream.md` is the transport contract: one JSON object per frame, ordered, reliable,
-bidirectional, boundary-preserving, and bounded. On byte-stream transports the encoding is
-NDJSON. A transport adapter maps that contract onto a channel; swapping the channel does not
-change this protocol.
+The wire is defined over application **frames**, not over a socket implementation. One JSON
+object per frame, ordered, reliable, bidirectional, boundary-preserving, and bounded. A
+transport adapter maps this contract onto a channel; swapping the channel does not change this
+protocol.
 
-- A connection that does not negotiate persistence carries exactly one request, one
-  response, then closes (the protocol 2.0 behavior). `hello` with
-  `stream: { persistent: true }` keeps the connection open and multiplexes requests by
-  `id` (2.1); see *Persistent streams* below.
+### The frame
+
+A **frame** is one JSON object that satisfies the request or response envelope. A stream
+carries frames; it does not interpret them.
+
+Required properties:
+
+- **Ordered.** Frames arrive in the order they were written.
+- **Reliable.** No loss, duplication, or reordering while the stream is open.
+- **Bidirectional.** Both ends may write.
+- **Boundary-preserving.** Each write is delivered as exactly one frame.
+- **Bounded.** One frame may not exceed `MAX_FRAME_BYTES` (16 MiB) on the supervisor's inbound
+  direction. A peer that exceeds it is violating the contract.
+
+Encodings per adapter:
+
+| Adapter | Encoding |
+|---|---|
+| Named pipe, Unix domain socket, TCP | NDJSON: one frame per `\n`-terminated line. A frame may span reads; one read may hold several frames. |
+| WebSocket (planned) | One frame per WebSocket message; no delimiter is added. |
+| SSE + POST (composed, planned) | SSE `data:` carries server frames; POST carries client frames. Two channels, correlated by the envelope `id`. |
+
+A client must not depend on a transport's message boundaries. The canonical framing for
+byte-stream transports is NDJSON; a message-oriented adapter delivers the same JSON text.
+Empty lines are not frames.
+
+### Endpoint and authentication
+
 - Endpoint: named pipe on Windows (`\\.\pipe\hlao-<hash of HLAO_HOME>`), Unix domain socket
   at `<HLAO_HOME>/supervisor.sock` elsewhere.
 - Authentication: every request carries the token from `<HLAO_HOME>/supervisor.json`. Any
@@ -33,20 +95,105 @@ change this protocol.
   local-IPC authority, not a network or browser credential (ADR 0009).
 - Maximum request frame: 16 MiB. Longer frames are rejected with `bad_request`.
 
-## Client model
+### Lifecycle
 
-- Call `hello` first. It reports the protocol version, capabilities, and supervisor health.
-- Poll `sessions.list` for a fleet view and `sessions.read` with `nextSeq`/`nextBefore` for a
-  session's log. Polling is the protocol 2.0 model and remains supported. A client that needs a
-  live view may instead negotiate a persistent stream and subscribe (2.1); the supervisor owns
-  no recurring timer either way.
-- Use `sessions.wait` when a client would otherwise poll a blocking condition. It is one-shot:
-  it resolves once and must be re-armed. A subscription does not change `wait`.
-- All timestamps are ISO-8601 strings. Durations such as "pending for" are computed by the
-  client.
-- A client that wants a composite operation (`cancel` then wait, broadcast to a subtree, bulk
-  permit) loops over these methods. Such compositions are client assemblies, not protocol
-  concepts.
+#### One-shot (default, protocol 2.0)
+
+A connection that does not negotiate persistence carries exactly one request, one response,
+then closes:
+
+1. The client connects.
+2. The client writes one request frame.
+3. The supervisor writes one response frame.
+4. The supervisor closes the stream.
+
+The supervisor ignores frames after the first on such a connection and closes after replying.
+A stream that sends no frame within 15 s is closed. This is what the bundled CLI uses.
+
+#### Persistent (protocol 2.1)
+
+`hello` with `stream: { persistent: true }` keeps the connection open and multiplexes requests
+by `id`:
+
+1. The client connects and writes `hello` with `stream: { persistent: true }`.
+2. The supervisor validates the token and version and replies. On success the connection
+   stays open; on failure the reply is an error and the connection closes.
+3. Every later frame is a request. Requests carry the client-chosen `id`; several may be in
+   flight, and responses may arrive out of order. At most 64 may be in flight
+   (`too_many_requests`).
+4. `stream.subscribe` registers interest. The supervisor emits notification frames (a server
+   frame with `type: "notification"`) at the same append point that wakes a waiter.
+   `stream.unsubscribe` removes one subscription.
+5. Either side may close. A reconnect supplies per-session cursors so the server replays from
+   `seq > cursor` and reports `truncated` when history was evicted.
+
+Every request frame still carries the token. Persistence does not weaken per-frame
+authentication. The first frame gates the connection: frames that arrive before the hello
+reply are queued and then processed, so a client may pipeline safely.
+
+None of this changes `wait`: it remains one-shot. Push and wait are two ways to observe the
+same append point, not two authorities. The supervisor owns no timer in either mode.
+
+### Adapter interface
+
+`src/stream.ts` exports the seam. Other clients may implement the same shape:
+
+```ts
+type StreamTarget =
+  | { kind: "path"; path: string }        // named pipe or Unix socket
+  | { kind: "tcp"; host: string; port: number };
+
+interface WireStream {
+  write(frame: string): void;
+  close(): void;                           // flush, then FIN
+  terminate(): void;                       // drop immediately
+  bufferedBytes(): number;                 // accepted but not yet flushed
+  onFrame(handler: (frame: string) => void): void;
+  onError(handler: (error: Error) => void): void;
+  onClose(handler: () => void): void;
+}
+
+interface WireStreamServer {
+  readonly target: StreamTarget;
+  onConnection(handler: (stream: WireStream) => void): void;
+  onError(handler: (error: Error) => void): void;
+  endpoint(): StreamTarget;                // a TCP port 0 reports the bound port
+  listen(): Promise<void>;
+  close(): Promise<void>;
+}
+```
+
+`FrameTooLargeError` distinguishes a framing violation from a transport failure. Frames that
+arrive before `onFrame` is attached are buffered; a handler registered later still sees them.
+
+### Transport policy
+
+The protocol does not make transports equally trusted. A transport is enabled only with the
+authentication model below.
+
+| Target | Default | Authentication | Notes |
+|---|---|---|---|
+| Named pipe (`\\.\pipe\hlao-<hash>`) | yes | supervisor token | Per-user namespace; Windows ACLs. |
+| Unix socket (`<HLAO_HOME>/supervisor.sock`) | yes | supervisor token | Created `0600`; the directory is the user's home. |
+| Loopback TCP (`127.0.0.1`) | no | supervisor token plus an explicit opt-in | The adapter exists; the supervisor does not bind it by default. Any local process can connect. |
+| Non-loopback TCP / TLS | no | dedicated credential, TLS, explicit config | The supervisor token is **not** a network credential. |
+| WebSocket | no | origin allowlist plus a short-lived session credential | Intended for a browser client through an operator-initiated exchange. Never ship the supervisor token to page JavaScript. |
+
+The supervisor token means "a local process that can read the runtime home is an operator"
+(see *Endpoint and authentication*). That is a local trust statement. It must not be reused as
+a network or browser credential.
+
+### Transport and framing errors
+
+| Condition | Supervisor | Client |
+|---|---|---|
+| Inbound frame over the limit | respond `bad_request`, close the stream | treat as `internal` ("response was too large") |
+| Transport failure before a response | abort, close | `supervisor_unavailable` |
+| Stream closed with no response | — | `supervisor_unavailable` |
+| More than 64 requests in flight | respond `too_many_requests`, keep the connection | retry later |
+| Subscriber buffer over 8 MiB | close the stream | reconnect with cursors |
+
+Framing errors are reported before any method is dispatched, so they carry `id: 0`.
 
 ## Envelope
 
@@ -140,15 +287,61 @@ The token is the instance boundary.
   `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`.
   A client that ignores the fields and event type is unaffected.
 
-## Methods
+## Client model
+
+- Call `hello` first. It reports the protocol version, capabilities, and supervisor health.
+- Poll `sessions.list` for a fleet view and `sessions.read` with `nextSeq`/`nextBefore` for a
+  session's log. Polling is the protocol 2.0 model and remains supported. A client that needs a
+  live view may instead negotiate a persistent stream and subscribe (2.1); the supervisor owns
+  no recurring timer either way.
+- Use `sessions.wait` when a client would otherwise poll a blocking condition. It is one-shot:
+  it resolves once and must be re-armed. A subscription does not change `wait`.
+- All timestamps are ISO-8601 strings. Durations such as "pending for" are computed by the
+  client.
+- A client that wants a composite operation (`cancel` then wait, broadcast to a subtree, bulk
+  permit) loops over these methods. Such compositions are client assemblies, not protocol
+  concepts.
+
+## Addressing
+
+Every session in the instance is addressable by every caller. `callerSessionId` is recorded as
+attribution but does not restrict addressing. `parentId`/`rootId`/`depth` are lineage, not
+authority. The only isolation boundary is another instance (`HLAO_HOME`, socket, and token).
 
 All `sessionId` params accept an exact handle first, then a unique session name, then a unique
 handle prefix, resolved within **this HLAO instance**. Duplicate names are `ambiguous_id` with
 `details.candidates`; the full handle still resolves.
 
-Every session in the instance is addressable by every caller. `callerSessionId` is recorded as
-attribution but does not restrict addressing. `parentId`/`rootId`/`depth` are lineage, not
-authority. The only isolation boundary is another instance (`HLAO_HOME`, socket, and token).
+## Methods
+
+Method index:
+
+| Method | Params | Result |
+|---|---|---|| `hello` | `HelloParams` | `HelloResult` |
+| `backends.list` | `{ cwd? }` | `{ backends: AgentView[] }` |
+| `sessions.spawn` | `SpawnParams` | `SpawnResult` |
+| `sessions.list` | `{ includeClosed?, cwd? }` | `{ sessions: SessionView[] }` |
+| `sessions.get` | `{ sessionId }` | `{ session: SessionView }` |
+| `sessions.send` | `SendParams` | `SendResult` |
+| `sessions.read` | `ReadParams` | `ReadResult` |
+| `sessions.wait` | `WaitParams` | `WaitResult` |
+| `sessions.cancel` | `{ sessionId, keepQueue? }` | `{ session, discarded }` |
+| `sessions.close` | `{ sessionId, force? }` | `{ session, killed, wasTerminal }` |
+| `sessions.permit` | `{ sessionId, optionId?, requestId?, always? }` | `{ session, requestId, optionId, by }` |
+| `sessions.set_mode` | `{ sessionId, modeId }` | `{ session }` |
+| `sessions.set_policy` | `{ sessionId, permissionPolicy }` | `{ session }` |
+| `sessions.set_config_option` | `{ sessionId, configId, value }` | `{ session }` |
+| `sessions.queue` | `{ sessionId }` | `{ session, active, queue }` |
+| `sessions.queue_drop` | `{ sessionId, position? \| messageId? }` | `{ session, dropped, discarded }` |
+| `sessions.rename` | `{ sessionId, name }` | `{ session }` |
+| `sessions.forget` | `{ sessionId }` | `{ sessionId, forgotten }` |
+| `stream.subscribe` | `SubscribeParams` | `SubscribeResult` |
+| `stream.unsubscribe` | `{ subscription }` | `{ subscription, removed }` |
+| `supervisor.reload` | `{}` | `{ configHash, configError }` |
+| `supervisor.shutdown` | `{ force? }` | `{ sessionsClosed, retainedDiscarded }` |
+
+Shape names in this table are navigation labels. The inline TypeScript in each method section
+is the authoritative definition.
 
 ### `hello`
 
@@ -192,7 +385,6 @@ stays open and every later frame is a request; the connection closes when either
 On a 2.0 supervisor the unknown `stream` field is `bad_request`, so a client that may meet an
 older supervisor calls `hello` without it first and checks `stream.persistent` in the
 capabilities.
-
 
 If `protocolVersion` is present and its major differs, the response is `version_mismatch`.
 The field was added in 1.1; a client that may meet a 1.0 supervisor should call `hello` with
@@ -441,9 +633,9 @@ With several ids, `any` resolves on the first target that satisfies and `all` wh
 does. For `idle`, `permission`, and `change`, a target that ends first is unsatisfied with
 reason `exit`; for `all`, that resolves the whole wait immediately. A target that is not
 settled when the aggregate resolves is evaluated at that moment: it is reported as satisfied
-if it already meets the condition, otherwise as `pending`. `change` uses each target's `lastSeq`
-at call time as its baseline; `since` is rejected with more than one id. `types` and `grep`
-filter the event that satisfies `change` and are rejected with any other condition. All ids
+if it already meets the condition, otherwise as `pending`. `change` uses each target's
+`lastSeq` at call time as its baseline; `since` is rejected with more than one id. `types` and
+`grep` filter the event that satisfies `change` and are rejected with any other condition. All ids
 are resolved in this instance before waiting; one unknown or ambiguous id fails the request.
 
 ### `sessions.cancel`
@@ -588,24 +780,6 @@ Params: `{ subscription: number }`.
 Result: `{ subscription: number; removed: true }`.
 Errors: `not_found` when the connection has no such subscription.
 
-### Notifications
-
-A persistent connection carries two kinds of server frame. Responses have `id` and `ok`;
-notifications have `type: "notification"`.
-
-```ts
-type NotificationFrame =
-  | { type: "notification"; subscription: number; kind: "session"; session: SessionView }
-  | { type: "notification"; subscription: number; kind: "session.removed"; sessionId: string }
-  | { type: "notification"; subscription: number; kind: "event";
-      sessionId: string; events: EventView[]; cursor: number; truncated: boolean };
-```
-
-Notifications are never interleaved inside a frame. Per-session event order is the event
-log's sequence; across sessions, notifications follow the order in which the supervisor
-observed the changes. A client must not assume a response and a notification that describe
-the same change arrive in a particular order relative to each other.
-
 ### `supervisor.reload`
 
 Params: `{}`. Operator only.
@@ -625,6 +799,24 @@ Params: `{ force?: boolean }`. Operator only.
 Result: `{ sessionsClosed: number; retainedDiscarded: number }`. The supervisor replies, then
 exits. `force` skips graceful ACP closes. `retainedDiscarded` counts terminal sessions that
 were still in the live table; their event logs are lost with the supervisor.
+
+## Notifications
+
+A persistent connection carries two kinds of server frame. Responses have `id` and `ok`;
+notifications have `type: "notification"`.
+
+```ts
+type NotificationFrame =
+  | { type: "notification"; subscription: number; kind: "session"; session: SessionView }
+  | { type: "notification"; subscription: number; kind: "session.removed"; sessionId: string }
+  | { type: "notification"; subscription: number; kind: "event";
+      sessionId: string; events: EventView[]; cursor: number; truncated: boolean };
+```
+
+Notifications are never interleaved inside a frame. Per-session event order is the event
+log's sequence; across sessions, notifications follow the order in which the supervisor
+observed the changes. A client must not assume a response and a notification that describe
+the same change arrive in a particular order relative to each other.
 
 ## Event view
 
