@@ -8,6 +8,8 @@ test("help teaches universal addressing and drops removed scope language", () =>
     "send",
     "read",
     "export",
+    "get",
+    "find",
     "wait",
     "list",
     "cancel",

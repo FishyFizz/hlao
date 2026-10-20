@@ -30,6 +30,14 @@
   help test guards the wording.
 - The acceptance examples isolate `HLAO_HOME`, clean up in `finally`, use the turn result
   instead of one read page, and use a local sleep instead of `wait --until change` as a timer.
+- `wait`, `cancel`, `permit`, and `policy` accept the `close` selector grammar (`--root`,
+  `--tree`, `--status`, `--idle`, `--except-self`) as client assemblies over
+  `sessions.list`. `cancel --wait` confirms settlement.
+- `hlao get <id>` prints one session's state without events.
+- `hlao find TEXT` searches events across sessions with a bounded `list` + paged `read --grep`
+  loop; `--all` includes retained histories.
+- `permit --all-pending` answers every parked request, reporting per-session failures without
+  stopping the rest.
 
 ### Fixed
 

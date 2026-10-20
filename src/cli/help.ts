@@ -30,7 +30,10 @@ Usage:
                                              watch new events / save one page
   hlao export [<id>] [--out FILE] [--jsonl]  full retained history
   hlao wait [<id>...] [--any|--all] [--until idle|settled|permission|exit|change]
-                                             one-shot await, one or many sessions
+                [--root S | --status S | --idle DUR]   one-shot await, one or many
+                                             sessions; selectors are a client assembly
+  hlao get [<id>]                              one session's state, no events
+  hlao find TEXT [--all] [--type T]            search events across sessions
   hlao list [--all] [--cwd DIR]                sessions in this instance
   hlao list [--wide] [--usage] [--tree] [--watch]
                                              dashboard / usage / lineage
@@ -99,6 +102,8 @@ const COMMAND_HELP_NAMES = new Set([
   "read",
   "export",
   "wait",
+  "get",
+  "find",
   "list",
   "cancel",
   "close",
@@ -185,6 +190,22 @@ The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
 hasMore, and truncated. Filters are applied before the page limit, and cursors
 advance past non-matching events. Tool payloads are omitted unless
 --raw/--verbose; --grep does not search private payloads without --raw.`,
+    get: `hlao get [<id>]
+
+Print one session's orchestration state without reading events: status, turn,
+queue, settlement, policy, modes, config options, usage, pending permission,
+and lineage. Inside a session, omit <id> or pass --self.`,
+    find: `hlao find TEXT [--all] [--type TYPE]... [--max N]
+
+Search events across sessions. It is a bounded client loop: list sessions, then
+page each transcript with read --grep. By default only live sessions are
+scanned; --all includes retained closed/failed ones.
+
+  --type TYPE   keep only these event types; repeatable
+  --max N       stop after N matches (1..10000, default 1000)
+
+The scan is capped at 20 pages per session; the summary says when a session was
+capped. Exit 0 with "no matches" when nothing matched.`,
     export: `hlao export [<id>] [options]
 
 Export the session's full retained history, paging until no events remain.
@@ -215,6 +236,14 @@ Options:
   --grep TEXT            with "change": wake only on a matching event
   --timeout DUR          bound; default from config (30m), 0 = no bound
   --fail-if-failed       exit 3 when a waited session ended failed
+  --root SESSION         wait on that session's whole tree
+  --tree <id>            shorthand for --root <id>
+  --status S[,S]         wait on sessions in these states
+  --idle DUR             wait on sessions settled for at least DUR
+  --except-self          exclude this shell's session from a selector
+
+Selector flags are a client assembly over list + wait; they take no positional
+ids and are limited to 100 targets by the wire.
 
 "idle" means no active turn and no queued prompt. The wire's turn boundary is
 also called idle; this CLI uses the completion condition. "settled" is the
@@ -237,12 +266,16 @@ default: activity). --wide adds BUSY, POLICY, MODE, PENDING, and EXIT;
 --usage adds USAGE/COST and a per-currency footer total; --tree groups and
 indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
 emits one result per line) until Ctrl-C.`,
-    cancel: `hlao cancel [<id>] [--keep-queue]
+    cancel: `hlao cancel [<id>] [--keep-queue] [--wait]
 
 Request ACP session/cancel for the active turn. By default every queued message
 is discarded as well; --keep-queue stops only the active turn and lets the next
 queued message run. The session survives. Inside a session, omit <id> or pass
---self.`,
+--self. --wait then waits for the cancelled sessions to settle (exit 2 on
+timeout).
+
+Bulk mode uses the same selectors as close: --root SESSION, --tree <id>,
+--status S[,S], --idle DUR, --except-self. Selector flags take no positional id.`,
     close: `hlao close [<id>] [--force] [--tree] [--forget]
 hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run] [--forget]
 
@@ -266,7 +299,12 @@ option, --deny the first reject option, and --option names one exactly.
 --always (with --allow) also switches this session's HLAO policy to allow, so
 later provider requests are answered automatically. When the provider offers an
 allow-always option it is preferred, which can stop the provider from asking at
-all for matching commands. Inside a session, omit <id> or pass --self.`,
+all for matching commands. Inside a session, omit <id> or pass --self.
+
+--all-pending answers every pending request in the instance; --root, --tree,
+--status, --idle, and --except-self narrow the set. Selector flags take no
+positional id. A session with no matching option is reported and does not stop
+the others.`,
     mode: `hlao mode [<id>] [modeId]
 
 Read or switch the provider's native permission mode. This is the same switch a
@@ -285,6 +323,9 @@ and deny rejects them. Inside a session, omit <id> to read your own policy or
 use --self <policy> to set it; any caller in the instance may set any
 session's policy. Changing the policy also answers a parked request when the
 new policy implies an answer.
+
+Bulk mode: "policy --root SESSION allow", "policy --tree <id> deny", or
+--status/--idle with one policy. Selector flags take no positional id.
 
 permit --always is equivalent to answering the current request and setting the
 policy to allow.`,

@@ -15,6 +15,7 @@ import type {
   SetConfigOptionResult,
   SetModeResult,
   SetPolicyResult,
+  WaitResult,
 } from "../../protocol.js";
 import { formatDuration } from "../../time.js";
 import {
@@ -36,29 +37,143 @@ import {
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
-import { renderTable, sanitize, styleStatus } from "../render.js";
+import {
+  renderSessionHeader,
+  renderTable,
+  sanitize,
+  styleStatus,
+} from "../render.js";
 import { parseStatuses, resolveInList } from "./list.js";
+import { isTerminal, selectSessions, selectorsUsed } from "./selectors.js";
 
 export async function cmdCancel(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "self", type: "boolean" },
     { name: "keep-queue", type: "boolean" },
+    { name: "wait", type: "boolean" },
+    { name: "root", type: "string", valueName: "SESSION" },
+    { name: "tree", type: "boolean" },
+    { name: "status", type: "string", valueName: "STATUS" },
+    { name: "idle", type: "duration", valueName: "DUR" },
+    { name: "except-self", type: "boolean" },
+    { name: "timeout", type: "duration", valueName: "DUR" },
   ]);
   if (helpRequested(parsed, "cancel")) return 0;
   expectPositionals(parsed, "cancel", 0, 1);
-  const sessionId = resolveTarget(parsed, "cancel", "selfDefault");
+
   const ctx = contextFrom(parsed);
   const keepQueue = booleanOption(parsed, "keep-queue") === true;
+  const wait = booleanOption(parsed, "wait") === true;
+  const timeoutMs = numberOption(parsed, "timeout");
   const conn = await connect(ctx);
+
+  const selectorFlags = {
+    root: stringOption(parsed, "root"),
+    statuses: parseStatuses(stringOption(parsed, "status")),
+    idle: numberOption(parsed, "idle"),
+    exceptSelf: booleanOption(parsed, "except-self") === true,
+  };
+  if (booleanOption(parsed, "tree") === true) {
+    if (selectorFlags.root !== undefined) {
+      throw usageError("cancel: choose --root or --tree, not both");
+    }
+    if (parsed.positionals.length !== 1) {
+      throw usageError("cancel: --tree takes exactly one session id");
+    }
+    selectorFlags.root = parsed.positionals[0]!;
+  }
+
+  if (selectorsUsed(selectorFlags)) {
+    if (booleanOption(parsed, "self") === true) {
+      throw usageError("cancel: selectors and --self are exclusive");
+    }
+    if (parsed.positionals.length > 0 && booleanOption(parsed, "tree") !== true) {
+      throw usageError("cancel: selector flags take no session ids");
+    }
+    const selected = await selectSessions(conn, ctx, selectorFlags);
+    const live = selected.filter((session) => !isTerminal(session));
+    if (selected.length === 0) {
+      if (ctx.json) writeJson({ count: 0, discarded: 0, sessions: [] });
+      else out("no sessions matched the selectors");
+      return 0;
+    }
+
+    let discarded = 0;
+    const cancelled: SessionView[] = [];
+    for (const session of live) {
+      const result = await conn.request<CancelResult>("sessions.cancel", {
+        sessionId: session.id,
+        ...(keepQueue ? { keepQueue: true } : {}),
+      });
+      discarded += result.discarded;
+      cancelled.push(result.session);
+    }
+
+    let waited: WaitResult | undefined;
+    if (wait) {
+      waited = await conn.request<WaitResult>(
+        "sessions.wait",
+        {
+          sessionIds: selected.map((session) => session.id),
+          mode: "all",
+          until: "settled",
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        },
+        { timeoutMs: 0 },
+      );
+    }
+
+    if (ctx.json) {
+      writeJson({
+        count: cancelled.length,
+        discarded,
+        sessions: cancelled,
+        ...(waited !== undefined ? { waited } : {}),
+      });
+      return 0;
+    }
+    out(
+      `cancelled ${cancelled.length} session${cancelled.length === 1 ? "" : "s"}` +
+        (discarded > 0
+          ? ctx.style.dim(
+              ` · ${discarded} queued message${discarded === 1 ? "" : "s"} discarded`,
+            )
+          : "") +
+        (keepQueue ? ctx.style.dim(" · queue kept") : ""),
+    );
+    if (waited !== undefined) {
+      out(
+        waited.satisfied
+          ? ctx.style.dim("all selected sessions are settled")
+          : ctx.style.yellow("not every selected session settled before the timeout"),
+      );
+    }
+    return waited !== undefined && !waited.satisfied ? 2 : 0;
+  }
+
+  const sessionId = resolveTarget(parsed, "cancel", "selfDefault");
   const result = await conn.request<CancelResult>("sessions.cancel", {
     sessionId,
     ...(keepQueue ? { keepQueue: true } : {}),
   });
 
+  let waited: WaitResult | undefined;
+  if (wait) {
+    waited = await conn.request<WaitResult>(
+      "sessions.wait",
+      {
+        sessionId: result.session.id,
+        until: "settled",
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      },
+      { timeoutMs: 0 },
+    );
+  }
+
   if (ctx.json) {
-    writeJson(result);
-    return 0;
+    writeJson({ ...result, ...(waited !== undefined ? { waited } : {}) });
+    return waited !== undefined && !waited.satisfied ? 2 : 0;
   }
   const label = sessionLabel(ctx, result.session);
   if (result.session.status === "closed" || result.session.status === "failed") {
@@ -79,6 +194,32 @@ export async function cmdCancel(args: string[]): Promise<number> {
           ? ctx.style.dim(` (${result.discarded} queued message${result.discarded === 1 ? "" : "s"} discarded)`)
           : ""),
   );
+  if (waited !== undefined) {
+    out(
+      waited.satisfied
+        ? ctx.style.dim(`settled after ${formatDuration(waited.waitedMs)}`)
+        : ctx.style.yellow(`not settled within ${formatDuration(waited.waitedMs)}`),
+    );
+  }
+  return waited !== undefined && !waited.satisfied ? 2 : 0;
+}
+
+export async function cmdGet(args: string[]): Promise<number> {
+  const parsed = parseArgs(args, [
+    ...COMMON,
+    { name: "self", type: "boolean" },
+  ]);
+  if (helpRequested(parsed, "get")) return 0;
+  expectPositionals(parsed, "get", 0, 1);
+  const sessionId = resolveTarget(parsed, "get", "selfDefault");
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+  const got = await conn.request<GetResult>("sessions.get", { sessionId });
+  if (ctx.json) {
+    writeJson(got);
+    return 0;
+  }
+  out(renderSessionHeader(got.session, ctx.style));
   return 0;
 }
 
@@ -408,16 +549,22 @@ export async function cmdPermit(args: string[]): Promise<number> {
     { name: "allow", type: "boolean" },
     { name: "deny", type: "boolean" },
     { name: "always", type: "boolean" },
+    { name: "all-pending", type: "boolean" },
+    { name: "root", type: "string", valueName: "SESSION" },
+    { name: "tree", type: "boolean" },
+    { name: "status", type: "string", valueName: "STATUS" },
+    { name: "idle", type: "duration", valueName: "DUR" },
+    { name: "except-self", type: "boolean" },
   ]);
   if (helpRequested(parsed, "permit")) return 0;
   expectPositionals(parsed, "permit", 0, 1);
-  const sessionId = resolveTarget(parsed, "permit", "selfDefault");
 
-  const chosenFlags = [
-    stringOption(parsed, "option") !== undefined,
-    booleanOption(parsed, "allow") === true,
-    booleanOption(parsed, "deny") === true,
-  ].filter(Boolean).length;
+  const optionFlag = stringOption(parsed, "option");
+  const wantsAllow = booleanOption(parsed, "allow") === true;
+  const wantsDeny = booleanOption(parsed, "deny") === true;
+  const chosenFlags = [optionFlag !== undefined, wantsAllow, wantsDeny].filter(
+    Boolean,
+  ).length;
   if (chosenFlags === 0) {
     throw usageError("choose --allow, --deny, or --option <id>");
   }
@@ -425,12 +572,94 @@ export async function cmdPermit(args: string[]): Promise<number> {
     throw usageError("choose exactly one of --allow, --deny, --option");
   }
   const always = booleanOption(parsed, "always") ?? false;
-  if (always && booleanOption(parsed, "allow") !== true) {
+  if (always && !wantsAllow) {
     throw usageError("--always must be used with --allow");
   }
 
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
+
+  const selectorFlags = {
+    root: stringOption(parsed, "root"),
+    statuses: parseStatuses(stringOption(parsed, "status")),
+    idle: numberOption(parsed, "idle"),
+    exceptSelf: booleanOption(parsed, "except-self") === true,
+  };
+  const tree = booleanOption(parsed, "tree") === true;
+  if (tree) {
+    if (selectorFlags.root !== undefined) {
+      throw usageError("permit: choose --root or --tree, not both");
+    }
+    if (parsed.positionals.length !== 1) {
+      throw usageError("permit: --tree takes exactly one session id");
+    }
+    selectorFlags.root = parsed.positionals[0]!;
+  }
+  const allPending = booleanOption(parsed, "all-pending") === true;
+
+  if (allPending || selectorsUsed(selectorFlags)) {
+    if (booleanOption(parsed, "self") === true) {
+      throw usageError("permit: selectors and --self are exclusive");
+    }
+    if (parsed.positionals.length > 0 && !tree) {
+      throw usageError("permit: selector flags take no session ids");
+    }
+    const selected = await selectSessions(conn, ctx, selectorFlags);
+    const pending = selected.filter(
+      (session) => !isTerminal(session) && session.pendingPermission !== null,
+    );
+    if (pending.length === 0) {
+      if (ctx.json) writeJson({ count: 0, resolved: [], failed: [] });
+      else out("no pending permissions matched");
+      return 0;
+    }
+
+    const resolved: PermitResult[] = [];
+    const failed: { sessionId: string; message: string }[] = [];
+    for (const session of pending) {
+      const permission = session.pendingPermission!;
+      try {
+        const optionId = choosePermitOption(
+          permission,
+          optionFlag,
+          wantsAllow,
+          always,
+        );
+        const result = await conn.request<PermitResult>("sessions.permit", {
+          sessionId: session.id,
+          requestId: permission.requestId,
+          optionId,
+          ...(always ? { always: true } : {}),
+        });
+        resolved.push(result);
+      } catch (error) {
+        failed.push({
+          sessionId: session.id,
+          message: String((error as Error).message ?? error),
+        });
+      }
+    }
+
+    if (ctx.json) {
+      writeJson({ count: resolved.length, resolved, failed });
+      return failed.length > 0 ? 1 : 0;
+    }
+    for (const result of resolved) {
+      out(
+        `${styleStatus(result.session.status, ctx.style)} ${sessionLabel(ctx, result.session)} — ${result.optionId}`,
+      );
+    }
+    for (const failure of failed) {
+      out(ctx.style.yellow(`${failure.sessionId}: ${failure.message}`));
+    }
+    out(
+      `permitted ${resolved.length} session${resolved.length === 1 ? "" : "s"}` +
+        (failed.length > 0 ? ` · ${failed.length} failed` : ""),
+    );
+    return failed.length > 0 ? 1 : 0;
+  }
+
+  const sessionId = resolveTarget(parsed, "permit", "selfDefault");
   const current = await conn.request<GetResult>("sessions.get", { sessionId });
   const permission = current.session.pendingPermission;
   if (!permission) {
@@ -440,31 +669,7 @@ export async function cmdPermit(args: string[]): Promise<number> {
     );
   }
 
-  let optionId = stringOption(parsed, "option");
-  if (optionId === undefined) {
-    const wantsAllow = booleanOption(parsed, "allow") === true;
-    const option = wantsAllow
-      ? (always
-          ? permission.options.find((candidate) => candidate.kind === "allow_always")
-          : permission.options.find((candidate) => candidate.kind === "allow_once")) ??
-        permission.options.find(
-          (candidate) =>
-            candidate.kind === "allow_once" || candidate.kind === "allow_always",
-        )
-      : permission.options.find(
-          (candidate) =>
-            candidate.kind === "reject_once" || candidate.kind === "reject_always",
-        );
-    if (!option) {
-      throw new HlaoError(
-        "bad_option",
-        `no ${wantsAllow ? "allow" : "deny"} option was offered; use --option`,
-        { options: permission.options },
-      );
-    }
-    optionId = option.optionId;
-  }
-
+  const optionId = choosePermitOption(permission, optionFlag, wantsAllow, always);
   const result = await conn.request<PermitResult>("sessions.permit", {
     sessionId: current.session.id,
     requestId: permission.requestId,
@@ -484,6 +689,44 @@ export async function cmdPermit(args: string[]): Promise<number> {
       (always ? ctx.style.dim(" · future requests will be allowed automatically") : ""),
   );
   return 0;
+}
+
+function choosePermitOption(
+  permission: NonNullable<SessionView["pendingPermission"]>,
+  optionId: string | undefined,
+  wantsAllow: boolean,
+  always: boolean,
+): string {
+  if (optionId !== undefined) {
+    if (!permission.options.some((candidate) => candidate.optionId === optionId)) {
+      throw new HlaoError(
+        "bad_option",
+        `permission option "${optionId}" was not offered`,
+        { options: permission.options },
+      );
+    }
+    return optionId;
+  }
+  const option = wantsAllow
+    ? (always
+        ? permission.options.find((candidate) => candidate.kind === "allow_always")
+        : permission.options.find((candidate) => candidate.kind === "allow_once")) ??
+      permission.options.find(
+        (candidate) =>
+          candidate.kind === "allow_once" || candidate.kind === "allow_always",
+      )
+    : permission.options.find(
+        (candidate) =>
+          candidate.kind === "reject_once" || candidate.kind === "reject_always",
+      );
+  if (!option) {
+    throw new HlaoError(
+      "bad_option",
+      `no ${wantsAllow ? "allow" : "deny"} option was offered; use --option`,
+      { options: permission.options },
+    );
+  }
+  return option.optionId;
 }
 
 export async function cmdMode(args: string[]): Promise<number> {
@@ -558,11 +801,79 @@ export async function cmdPolicy(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "self", type: "boolean" },
+    { name: "root", type: "string", valueName: "SESSION" },
+    { name: "tree", type: "boolean" },
+    { name: "status", type: "string", valueName: "STATUS" },
+    { name: "idle", type: "duration", valueName: "DUR" },
+    { name: "except-self", type: "boolean" },
   ]);
   if (helpRequested(parsed, "policy")) return 0;
   const selfUsed = booleanOption(parsed, "self") === true;
   const caller = process.env.HLAO_SESSION_ID?.trim();
   const positionals = parsed.positionals;
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+
+  const selectorFlags = {
+    root: stringOption(parsed, "root"),
+    statuses: parseStatuses(stringOption(parsed, "status")),
+    idle: numberOption(parsed, "idle"),
+    exceptSelf: booleanOption(parsed, "except-self") === true,
+  };
+  const tree = booleanOption(parsed, "tree") === true;
+  if (tree) {
+    if (selectorFlags.root !== undefined) {
+      throw usageError("policy: choose --root or --tree, not both");
+    }
+    if (positionals.length !== 2) {
+      throw usageError("policy: --tree takes a session id and a policy");
+    }
+    selectorFlags.root = positionals[0]!;
+  }
+
+  if (selectorsUsed(selectorFlags)) {
+    if (selfUsed) {
+      throw usageError("policy: selectors and --self are exclusive");
+    }
+    const policyToken = tree ? positionals[1] : positionals[0];
+    const bulkPolicy = parsePolicy(policyToken);
+    if (bulkPolicy === undefined) {
+      throw usageError("policy: selectors take one allow|ask|deny policy");
+    }
+    if (!tree && positionals.length !== 1) {
+      throw usageError("policy: selector flags take exactly one policy");
+    }
+    const selected = (
+      await selectSessions(conn, ctx, selectorFlags)
+    ).filter((session) => !isTerminal(session));
+    if (selected.length === 0) {
+      if (ctx.json) writeJson({ count: 0, sessions: [] });
+      else out("no sessions matched the selectors");
+      return 0;
+    }
+    const updated: SessionView[] = [];
+    for (const session of selected) {
+      const result = await conn.request<SetPolicyResult>(
+        "sessions.set_policy",
+        { sessionId: session.id, permissionPolicy: bulkPolicy },
+      );
+      updated.push(result.session);
+    }
+    if (ctx.json) {
+      writeJson({ count: updated.length, sessions: updated });
+      return 0;
+    }
+    for (const session of updated) {
+      out(
+        `policy of ${sessionLabel(ctx, session)}: ${ctx.style.cyan(session.permissionPolicy)}`,
+      );
+    }
+    out(
+      `updated ${updated.length} session${updated.length === 1 ? "" : "s"}`,
+    );
+    return 0;
+  }
+
   let sessionId: string;
   let policy: PermissionPolicy | undefined;
 
@@ -594,8 +905,6 @@ export async function cmdPolicy(args: string[]): Promise<number> {
     throw usageError("policy takes a session id and one optional allow|ask|deny");
   }
 
-  const ctx = contextFrom(parsed);
-  const conn = await connect(ctx);
   if (policy === undefined) {
     const got = await conn.request<GetResult>("sessions.get", { sessionId });
     if (ctx.json) {

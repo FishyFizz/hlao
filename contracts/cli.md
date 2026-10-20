@@ -17,6 +17,8 @@ hlao read [<id>] [--self] [--since N | --before N] [--limit N]
                 [--raw] [--verbose] [--timestamps] [--jsonl] [--jsonl-page]
                 [--follow] [--fail-on-error] [--out FILE]
 hlao export [<id>] [--self] [--since N] [--raw] [--jsonl] [--out FILE]
+hlao get [<id>] [--self]
+hlao find TEXT [--all] [--type TYPE]... [--max N]
 hlao wait [<id>...] [--self] [--any | --all]
                 [--until idle|settled|permission|exit|change] [--since N]
                 [--type TYPE]... [--grep TEXT] [--timeout DUR] [--fail-if-failed]
@@ -131,6 +133,18 @@ target that satisfies and `--all` when every target does. The JSON result always
 `results` in request order, each with the target's view, `satisfied`, and `reason`; a target
 that does not currently satisfy when the aggregate resolves is `pending`. `--since` is only
 valid with one id. `--type`/`--grep` filter the event that satisfies `--until change`.
+
+`wait`, `cancel`, `permit`, and `policy` accept the `close` selector grammar: `--root SESSION`
+(whole tree), `--tree <id>` (shorthand), `--status S[,S]`, `--idle DUR`, and `--except-self`.
+They are client assemblies over `sessions.list`; a selector takes no positional id, and `wait`
+is limited to 100 targets by the wire. `cancel --wait` waits for the selected sessions to
+settle and exits 2 on timeout. `permit --all-pending` answers every pending request, reporting
+per-session failures without stopping the others. `policy --root SESSION allow` applies one
+policy to the set.
+
+`get [<id>]` prints one session's state without events (`sessions.get`). `find TEXT [--all]
+[--type T]... [--max N]` scans live sessions (retained too with `--all`) by paging
+`read --grep`; it is capped at 20 pages per session and reports when a scan was capped.
 
 `--until idle` means no active turn **and** no queued prompt; the CLI maps it to the wire's
 `settled` condition. `--until settled` is the explicit form and treats a terminal session as a

@@ -40,6 +40,8 @@ import {
 } from "../context.js";
 import { helpRequested } from "../help.js";
 import { parseConfigValues, parseEnv, resolveMessage } from "../input.js";
+import { parseStatuses } from "./list.js";
+import { selectSessions, selectorsUsed } from "./selectors.js";
 import {
   renderEvents,
   renderPermission,
@@ -650,6 +652,11 @@ export async function cmdWait(args: string[]): Promise<number> {
     { name: "fail-if-failed", type: "boolean" },
     { name: "any", type: "boolean" },
     { name: "all", type: "boolean" },
+    { name: "root", type: "string", valueName: "SESSION" },
+    { name: "tree", type: "boolean" },
+    { name: "status", type: "string", valueName: "STATUS" },
+    { name: "idle", type: "duration", valueName: "DUR" },
+    { name: "except-self", type: "boolean" },
   ]);
   if (helpRequested(parsed, "wait")) return 0;
   expectPositionals(parsed, "wait", 0, 100);
@@ -659,9 +666,44 @@ export async function cmdWait(args: string[]): Promise<number> {
   if (any && all) throw usageError("choose --any or --all, not both");
   const self = booleanOption(parsed, "self") === true;
   const caller = process.env.HLAO_SESSION_ID?.trim() || null;
+  const ctx = contextFrom(parsed);
+  const conn = await connect(ctx);
+
+  const selectorFlags = {
+    root: stringOption(parsed, "root"),
+    statuses: parseStatuses(stringOption(parsed, "status")),
+    idle: numberOption(parsed, "idle"),
+    exceptSelf: booleanOption(parsed, "except-self") === true,
+  };
+  if (booleanOption(parsed, "tree") === true) {
+    if (selectorFlags.root !== undefined) {
+      throw usageError("wait: choose --root or --tree, not both");
+    }
+    if (parsed.positionals.length !== 1) {
+      throw usageError("wait: --tree takes exactly one session id");
+    }
+    selectorFlags.root = parsed.positionals[0]!;
+  }
 
   let ids: string[];
-  if (self) {
+  if (selectorsUsed(selectorFlags)) {
+    if (self) throw usageError("wait: selectors and --self are exclusive");
+    if (parsed.positionals.length > 0 && booleanOption(parsed, "tree") !== true) {
+      throw usageError("wait: selector flags take no session ids");
+    }
+    const selected = await selectSessions(conn, ctx, selectorFlags);
+    if (selected.length === 0) {
+      if (ctx.json) writeJson({ matched: 0, results: [] });
+      else out("no sessions matched the selectors");
+      return 0;
+    }
+    if (selected.length > 100) {
+      throw usageError(
+        `wait: selectors matched ${selected.length} sessions; the wire accepts at most 100`,
+      );
+    }
+    ids = selected.map((session) => session.id);
+  } else if (self) {
     if (!caller) throw usageError("wait: --self requires HLAO_SESSION_ID");
     if (parsed.positionals.length > 0) {
       throw usageError("wait: --self takes no session ids");
@@ -705,9 +747,7 @@ export async function cmdWait(args: string[]): Promise<number> {
   if (until !== "change" && since !== undefined) {
     process.stderr.write("hlao: --since only affects --until change\n");
   }
-  const ctx = contextFrom(parsed);
   const timeoutMs = numberOption(parsed, "timeout");
-  const conn = await connect(ctx);
   if (ids.length > 1) {
     await ensureCapability(conn, "wait.multi", "wait with several ids");
   }

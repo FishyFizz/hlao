@@ -12,6 +12,7 @@ import {
 import {
   cmdCancel,
   cmdClose,
+  cmdGet,
   cmdMode,
   cmdOption,
   cmdPermit,
@@ -19,6 +20,7 @@ import {
   cmdQueue,
   cmdRename,
 } from "./commands/control.js";
+import { cmdFind } from "./commands/find.js";
 import { cmdList } from "./commands/list.js";
 import {
   cmdExport,
@@ -101,6 +103,10 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdWait(args);
       case "list":
         return await cmdList(args);
+      case "get":
+        return await cmdGet(args);
+      case "find":
+        return await cmdFind(args);
       case "cancel":
         return await cmdCancel(args);
       case "close":
