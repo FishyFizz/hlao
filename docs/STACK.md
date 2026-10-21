@@ -146,7 +146,9 @@ Building the orchestrator on them would reproduce frozen orchestration under a n
   address space. HLAO exposes it as `backends.sessions` for provider discovery and adoption,
   but does not depend on it for addressing; the supervisor's live table remains the
   instance-wide address space. The catalog is a provider-side recovery aid, not an authority,
-  and it is never persisted (ADR 0014).
+  and it is never persisted (ADR 0014). A separate historical spawn-receipt ledger stores
+  only parent/child provider id pairs for manual recovery; it is not a catalog cache (ADR
+  0015).
 - **License check:** every proposed core dependency is Apache-2.0 or MIT. No copyleft. The one
   exception is the proprietary Claude Agent SDK behind the Claude adapter.
 

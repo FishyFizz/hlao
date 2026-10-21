@@ -49,6 +49,8 @@ hlao find "text"                # search other sessions' events
 hlao usage                      # fleet cost and context snapshots
 hlao list --mine                # the sessions in your job's root subtree
 hlao provider sessions <backend> --cwd <dir>              # the provider's own catalog
+hlao children --self                                     # provider ids this session attached
+hlao children --provider <id>                            # the same receipts, read offline
 hlao adopt <backend> <provider-id> [--cwd <dir>]          # take one in as a new agent
 hlao spawn <backend> --resume <provider-id> --cwd <dir>   # pull an interrupted agent back up
 hlao spawn <backend> --fork <provider-id> --cwd <dir>     # copy one; the source is untouched
@@ -61,12 +63,35 @@ that provider session and replays its history; the interrupted turn is not repla
 re-send the instruction. `spawn --fork <provider-id> --cwd <original cwd>` copies the session
 instead; the source keeps running and can still be resumed separately.
 
-If you do not have the provider id, `hlao provider sessions <backend> --cwd <dir>` reads the
-provider's own catalog and shows which rows this instance already drives. A provider-only
-row can be adopted with `hlao adopt <backend> <provider-id>`; it gets a new HLAO id, name,
-and lineage, and keeps the provider's history and mode. Use `adopt --fork` when the source
-may still be open in another client or HLAO home. HLAO cannot detect that other driver, so
-the choice is yours; a resume is a takeover, a fork leaves the source alone.
+When you spawn or adopt a child, HLAO writes a historical spawn receipt pairing your provider
+id with the child's provider id (plus backend, cwd, and name) in `$HLAO_HOME/spawn-ledger.jsonl`.
+After a restart, `hlao children --self` reads it; `hlao get --self` reports your own provider
+id, and `hlao children --provider <id>` reads the same ledger without a supervisor. Resume a
+child by provider id, not by title. Because an agent caller is the default parent, the new
+HLAO attachment lands under you:
+
+```bash
+hlao children --self
+hlao get --self                                  # your own provider id, if needed
+hlao adopt <backend> <child-provider-id>
+```
+
+If you were forked rather than resumed, your provider id is new: read the source's
+receipts with `hlao children --provider <source-provider-id>`. The ledger is per HLAO home;
+a different home has no receipts.
+
+Receipts are history, not liveness: a child may have ended, and adoption returns a live
+duplicate when one still holds the same provider id. Use `--fork` when the source may be
+open in another client or HLAO home; HLAO cannot detect that other driver, so a resume is a
+takeover and a fork leaves the source alone.
+
+If a receipt is missing, search your own replayed history for the exact id before guessing:
+`hlao read --self --grep "provider " --raw --context 2`, or `hlao export <self>` and search
+the export. Only then fall back to `hlao provider sessions <backend> --all`. A catalog row's
+title, cwd, and age are discovery hints, not identity: adopt a candidate, read its replayed
+history, and verify the job before sending work. A provider-only row adopted with
+`hlao adopt <backend> <provider-id>` gets a new HLAO id, name, and lineage, and keeps the
+provider's history and mode.
 
 A session runs one turn at a time. A message to an idle session starts a turn directly. A
 message from one session to another that is mid-turn is **steered** into that running turn

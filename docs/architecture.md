@@ -35,7 +35,9 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
   are caller-owned watches (`read --follow` over read + one-shot wait, and `logs --follow` over
   the supervisor's file), which end with the CLI process.
 - The supervisor owns live sessions and their child processes. Its in-memory process table
-  is the state; there is no session database and no global session registry.
+  is the state; there is no session database and no global session registry. It appends
+  historical spawn receipts to `<HLAO_HOME>/spawn-ledger.jsonl`, but those entries are never
+  read as liveness and never replace the live table.
 - Provider session discovery is a read of the provider's `session/list`, not a second
   registry. The supervisor starts a short-lived adapter for the read, joins the rows to
   the live table for attachment status, and writes nothing. Adoption is a client assembly
@@ -44,9 +46,10 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
   a crash, a permission block, or a close touches one session.
 - On a graceful exit the supervisor closes its sessions. If it is killed hard, the session
   table is gone and adapter processes can be orphaned (especially on Windows); use
-  `hlao down` for the supported shutdown path. Either way there is no durable orchestration
-  store to recover from (`PRODUCT.md`, "Where state lives"). The operator's user-space files
-  (ledger, contact list) are the only durable artifacts.
+  `hlao down` for the supported shutdown path. Either way there is no durable *live*
+  orchestration store to recover from (`PRODUCT.md`, "Where state lives"). The operator's
+  user-space files and the append-only spawn-receipt ledger are the only durable artifacts;
+  neither is a liveness source.
 
 ## Module map
 
@@ -60,6 +63,7 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `paths` | Runtime file and socket locations | location naming | `errors` |
 | `protocol` | Client↔supervisor wire contract and boundary validation | wire schema, version, capabilities | `errors` |
 | `provider` | Read the provider's own session catalog with a short-lived adapter | probe lifecycle and normalization | `acp`, `config`, `errors`, `protocol`, `session/async`, `session/process`, `version` |
+| `ledger` | Historical spawn receipts keyed by parent provider id | JSONL format, dedupe and malformed-line tolerance | `paths` |
 | `stream` | Framed message streams over a transport | framing, buffering, transport adapters | `protocol`, `errors` |
 | `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `stream`, `errors` |
 | `logger` | Supervisor diagnostics log | log rotation | `paths` |
@@ -244,6 +248,7 @@ stop asking at the source; the relay keeps every remaining ask visible and bound
 | Supervisor exits gracefully | all child sessions end; lock and socket are removed |
 | Supervisor is killed hard | the session table is gone; adapter processes can survive on Windows; `down --force` removes an unverified stale lock without killing its pid |
 | Provider catalog read fails | `bad_request` when the adapter does not advertise `session/list`; `spawn_failed` when its probe cannot start or times out. No HLAO session is created. |
+| Spawn receipt cannot be appended | the spawn/attach still succeeds; the supervisor logs a warning and continues without a receipt. Recovery falls back to the provider catalog. |
 | Stale lock after a crash | next command detects a dead pid, removes the lock, autostarts |
 | Event log evicts unread events | `read` reports `truncated: true` and the earliest retained sequence; the provider's transcript is still reachable with `spawn --resume <provider id>` (ADR 0011) |
 
@@ -255,7 +260,11 @@ stop asking at the source; the relay keeps every remaining ask visible and bound
   `session/fork` (ADR 0011).
 - No provider-to-agent registry or persisted HLAO session index. Provider discovery is a
   capability-gated read of the provider's catalog, joined to the live table (ADR 0014).
-- No cold-host lineage reconstruction; the tree is the live handles.
+  The spawn-receipt ledger is a historical parent-provider-id → child-provider-id log for
+  manual recovery, not a live map (ADR 0015). It cannot restore HLAO ids, names, or lineage.
+- No automatic cold-host job-tree reconstruction. A resumed leader reads its receipts
+  (`hlao children --self`) and adopts each child by provider id; the live handles are still
+  not restored.
 - No provider-internal subagent surfacing: `clientCapabilities.subagents` is never
   advertised, so provider subagents stay inside the leaf.
 - No client-side filesystem or terminal capabilities: the adapter's own leaf tools remain
@@ -278,3 +287,5 @@ stop asking at the source; the relay keeps every remaining ask visible and bound
 - `0014-provider-session-discovery.md` — provider discovery is a capability-gated read of
   ACP `session/list`, joined to the live table; adoption is a client assembly, not a
   persisted registry.
+- `0015-spawn-receipt-ledger.md` — a historical parent-provider-id → child-provider-id
+  receipt log for manual recovery after a restart; never a liveness map.

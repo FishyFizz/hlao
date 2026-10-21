@@ -6,7 +6,9 @@ Provider session discovery and adoption. HLAO can read the provider's own
 session catalog and take an existing provider conversation into the instance
 as a new HLAO session. It still keeps no durable provider-to-agent registry:
 the provider owns the catalog, and the supervisor's live table is the only
-address space.
+address space. A historical spawn-receipt ledger now carries the parent
+provider id to child provider id pairing across a restart, without claiming
+liveness.
 
 ### Added
 
@@ -28,6 +30,22 @@ address space.
   session instead of attaching it.
 - Capability `backends.sessions`. Protocol minor moves to 3.1; existing 3.0
   clients are unaffected.
+- Historical spawn receipts at `$HLAO_HOME/spawn-ledger.jsonl`. When a parent
+  spawns or adopts a child, the supervisor appends the parent provider id, the
+  child provider id, the child's backend, cwd, and name. The ledger is keyed by
+  the durable provider id, survives a reboot, and never claims a child is
+  live. A malformed or partial line is ignored.
+- `hlao children [--provider ID | --self] [--json]`: read the receipts for a
+  parent provider id. `--self` resolves the calling session's provider id
+  through the supervisor; `--provider` reads the ledger without a supervisor,
+  which is the path after a restart or while the instance is empty.
+- `recovery.receipts` (protocol 3.1): the wire read of the same ledger,
+  live-joined to the current table (`attached`, child and parent HLAO status).
+  Capability `recovery.receipts`. It creates no session and starts no adapter,
+  so clients can show recoverable agents without probing a provider.
+- `export --all` / `down --export` manifest entries now include
+  `agentSessionId`, so a pre-reboot export keeps the durable provider handle
+  next to the session file.
 
 ### Changed
 
@@ -43,9 +61,11 @@ address space.
 ### Notes
 
 - This is a read of the provider, not a second authority. There is still no
-  persisted HLAO session index, no durable lineage, and no automatic job-tree
-  recovery. Adopting a provider session creates a new HLAO id, name, and
-  lineage; the old HLAO id is not restored.
+  live HLAO session index and no automatic job-tree recovery. The spawn ledger
+  is a historical receipt log for manual recovery; the provider id remains the
+  resume key, and the live table is the only liveness authority. Adopting a
+  provider session creates a new HLAO id, name, and lineage; the old HLAO id is
+  not restored.
 - HLAO cannot detect another client or another HLAO home driving the same
   provider session. Use `--fork` when the source must stay untouched.
 

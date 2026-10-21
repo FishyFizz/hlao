@@ -37,6 +37,15 @@ export function logPath(home: string): string {
   return join(home, "supervisor.log");
 }
 
+/**
+ * Append-only spawn receipts. This is a historical ledger, not live state:
+ * entries say which provider conversation a parent attached as a child, and
+ * never claim the child is still running.
+ */
+export function spawnLedgerPath(home: string): string {
+  return join(home, "spawn-ledger.jsonl");
+}
+
 export function projectBackendsPath(cwd: string): string {
   return join(cwd, ".hlao", "agents.json");
 }

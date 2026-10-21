@@ -35,6 +35,7 @@ import {
 } from "./commands/prompts.js";
 import {
   cmdAgents,
+  cmdChildren,
   cmdConfig,
   cmdDoctor,
   cmdDown,
@@ -126,6 +127,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdAdopt(args);
       case "provider":
         return await cmdProvider(args);
+      case "children":
+        return await cmdChildren(args);
       case "send":
         return await cmdSend(args);
       case "read":

@@ -9,6 +9,7 @@ interface ManifestValue {
   failures: number;
   sessions: {
     sessionId: string;
+    agentSessionId: string | null;
     file: string;
     count: number;
     truncated: boolean;
@@ -42,12 +43,15 @@ test("export --all writes one file per session plus a manifest", async (t) => {
   assert.equal(manifest.sessions.length, 2);
   for (const entry of manifest.sessions) {
     assert.equal(entry.error, undefined);
+    assert.ok(entry.agentSessionId, "the manifest keeps the durable provider id");
     assert.ok(entry.count > 0);
     const file = join(directory, entry.file);
     assert.ok(existsSync(file), file);
     const payload = JSON.parse(readFileSync(file, "utf8")) as {
+      session: { agentSessionId: string | null };
       events: { seq: number }[];
     };
+    assert.equal(entry.agentSessionId, payload.session.agentSessionId);
     assert.equal(payload.events.length, entry.count);
   }
 
@@ -85,6 +89,7 @@ test("down --export exports everything before stopping", async (t) => {
   ) as ManifestValue;
   assert.equal(manifest.failures, 0);
   assert.equal(manifest.sessions.length, 1);
+  assert.ok(manifest.sessions[0]!.agentSessionId);
   assert.ok(existsSync(join(directory, manifest.sessions[0]!.file)));
 });
 

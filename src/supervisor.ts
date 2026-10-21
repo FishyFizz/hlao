@@ -10,6 +10,7 @@ import {
 import { clearCrashMarker, readCrashMarker, writeCrashMarker } from "./crash.js";
 import { HlaoError, describeError, toHlaoError } from "./errors.js";
 import { generateSessionId } from "./ids.js";
+import { readSpawnReceipts, recordSpawnReceipt } from "./ledger.js";
 import {
   pidAlive,
   probeSupervisor,
@@ -60,6 +61,9 @@ import {
   type ProviderSessionView,
   type ProviderSessionsParams,
   type ProviderSessionsResult,
+  type RecoveryReceiptView,
+  type RecoveryReceiptsParams,
+  type RecoveryReceiptsResult,
   type RespondElicitationParams,
   type RespondElicitationResult,
   type QueueDropParams,
@@ -608,6 +612,8 @@ class SupervisorServer {
           caller,
           signal,
         );
+      case "recovery.receipts":
+        return this.#recoveryReceipts(params as RecoveryReceiptsParams);
       case "sessions.spawn":
         return this.#spawn(params as SpawnParams, caller);
       case "sessions.list":
@@ -743,6 +749,50 @@ class SupervisorServer {
     };
   }
 
+  /**
+   * The parent a spawn will attach to. An agent caller is the default parent;
+   * a stale or terminal caller is attribution, not an error, so the spawn
+   * becomes a root.
+   */
+  #spawnParent(params: SpawnParams, caller: string | null): Session | null {
+    if (params.parentSessionId !== undefined) {
+      return this.#resolve(params.parentSessionId);
+    }
+    if (caller !== null) {
+      const own = this.#sessions.get(caller);
+      return own !== undefined && !own.isTerminal ? own : null;
+    }
+    return null;
+  }
+
+  /**
+   * Record the parent provider id -> child provider id pair. This is a
+   * historical receipt for recovery after a restart, not a live mapping; it
+   * never changes the session table. A ledger append failure is logged and
+   * ignored so a full disk cannot turn a successful spawn into an error.
+   */
+  #recordSpawnReceipt(parent: Session | null, child: SessionView): void {
+    if (parent === null || parent.isTerminal) return;
+    const parentView = parent.view();
+    const parentProviderId = parentView.agentSessionId;
+    const childProviderId = child.agentSessionId;
+    if (parentProviderId === null || childProviderId === null) return;
+    if (parentProviderId === childProviderId) return;
+    try {
+      recordSpawnReceipt(this.#home, {
+        parentProviderId,
+        parentSessionId: parentView.id,
+        childProviderId,
+        childSessionId: child.id,
+        backend: child.backend,
+        cwd: child.cwd,
+        name: child.name,
+      });
+    } catch (error) {
+      this.#logger.warn(`spawn receipt not recorded: ${describeError(error)}`);
+    }
+  }
+
   #pruneSpawnIdempotency(): void {
     const cutoff = Date.now() - 60 * 60 * 1_000;
     for (const [key, entry] of this.#spawnIdempotency) {
@@ -795,18 +845,14 @@ class SupervisorServer {
             `provider session ${params.resumeSessionId} is attached to ${attached.id} on backend ${attached.backend}, not ${backend.name}`,
           );
         }
+        // A duplicate resume still says "this parent attached this provider
+        // conversation"; record it so a later reboot can recover the pair.
+        this.#recordSpawnReceipt(this.#spawnParent(params, caller), attached.view());
         return { ...this.#duplicateSpawn(attached, null), resumed: true };
       }
     }
 
-    let parent: Session | null = null;
-    if (params.parentSessionId !== undefined) {
-      parent = this.#resolve(params.parentSessionId);
-    } else if (caller !== null) {
-      // A stale or terminal caller is attribution, not an error: the spawn becomes a root.
-      const own = this.#sessions.get(caller);
-      parent = own !== undefined && !own.isTerminal ? own : null;
-    }
+    const parent = this.#spawnParent(params, caller);
 
     if (parent?.isTerminal) {
       throw new HlaoError(
@@ -906,6 +952,7 @@ class SupervisorServer {
     this.#logger.info(
       `spawned ${id} (${backend.name}) in ${cwd}${parent ? ` parent=${parent.id}` : ""}`,
     );
+    this.#recordSpawnReceipt(parent, session.view());
 
     const result: SpawnResult = {
       session: session.view(),
@@ -1003,6 +1050,59 @@ class SupervisorServer {
    * session, or a session this instance used before a restart. The caller
    * decides whether to adopt it.
    */
+  /**
+   * Historical spawn receipts, live-joined for convenience. The ledger is the
+   * authority on what was attached; the live table answers only whether a
+   * provider id is attached now. Nothing here is written back.
+   */
+  #recoveryReceipts(params: RecoveryReceiptsParams): RecoveryReceiptsResult {
+    const liveByProvider = new Map<string, Session>();
+    for (const session of this.#sessions.values()) {
+      if (session.isTerminal) continue;
+      const view = session.view();
+      if (view.agentSessionId === null) continue;
+      liveByProvider.set(view.agentSessionId, session);
+    }
+
+    const byChild = new Map<string, RecoveryReceiptView>();
+    for (const receipt of readSpawnReceipts(
+      this.#home,
+      params.parentProviderId,
+    )) {
+      const key = `${receipt.backend}\u0000${receipt.childProviderId}`;
+      const existing = byChild.get(key);
+      if (existing !== undefined && existing.recordedAt >= receipt.at) continue;
+      const child = liveByProvider.get(receipt.childProviderId);
+      const childView =
+        child !== undefined && child.backend === receipt.backend
+          ? child.view()
+          : null;
+      const parent = liveByProvider.get(receipt.parentProviderId);
+      const parentView = parent?.view() ?? null;
+      byChild.set(key, {
+        parentProviderId: receipt.parentProviderId,
+        parentSessionId: receipt.parentSessionId,
+        childProviderId: receipt.childProviderId,
+        childSessionId: receipt.childSessionId,
+        backend: receipt.backend,
+        cwd: receipt.cwd,
+        name: receipt.name,
+        recordedAt: receipt.at,
+        attached: childView !== null,
+        hlaoSessionId: childView?.id ?? null,
+        hlaoName: childView?.name ?? null,
+        hlaoStatus: childView?.status ?? null,
+        parentHlaoSessionId: parentView?.id ?? null,
+        parentHlaoName: parentView?.name ?? null,
+        parentHlaoStatus: parentView?.status ?? null,
+      });
+    }
+    const receipts = [...byChild.values()].sort((left, right) =>
+      right.recordedAt.localeCompare(left.recordedAt),
+    );
+    return { receipts };
+  }
+
   async #providerSessions(
     params: ProviderSessionsParams,
     caller: string | null,

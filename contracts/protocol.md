@@ -258,7 +258,8 @@ The token is the instance boundary.
   compatible with an older client; a newer client must use capabilities or version checks
   before relying on an addition.
 - `capabilities` lists additive features this supervisor implements. Unknown capabilities must
-  be ignored. Known values: `backends.list`, `backends.sessions`, `session.usage`,
+  be ignored. Known values: `backends.list`, `backends.sessions`, `recovery.receipts`,
+  `session.usage`,
   `read.filters`, `read.before`, `wait.multi`, `stream.persistent`, `stream.subscribe`,
   `stream.resume`, `wait.settled`, `wait.filters`, `session.settled`, `session.lastEvent`,
   `send.messageId`, `send.idempotency`, `spawn.idempotency`, `spawn.createdBy`,
@@ -313,7 +314,10 @@ The token is the instance boundary.
   types `ProviderSessionsParams`, `ProviderSessionView`, and `ProviderSessionsResult`; new
   capability `backends.sessions`. The read creates no HLAO session and stores no mapping.
   A resume or fork keeps the provider's mode; `BackendManifest.defaultMode` applies to new
-  sessions only. A 3.0 client that does not call the method is unaffected.
+  sessions only. It also adds `recovery.receipts`, a read of the historical spawn-receipt
+  ledger (`parentProviderId` → `childProviderId`), live-joined for attachment status. The
+  ledger is not liveness; capability `recovery.receipts`. A 3.0 client that does not call
+  the method is unaffected.
 - **3.0** is a breaking change: HLAO no longer owns a permission policy. Removed:
   `PermissionPolicy`, `SessionView.permissionPolicy`, `SessionView.pendingPermission`,
   `SpawnParams.permissionPolicy`, `sessions.set_policy`, `policy.changed`,
@@ -358,6 +362,7 @@ Method index:
 |---|---|---|| `hello` | `HelloParams` | `HelloResult` |
 | `backends.list` | `{ cwd? }` | `{ backends: AgentView[] }` |
 | `backends.sessions` | `{ backend, cwd?, cursor? }` | `ProviderSessionsResult` |
+| `recovery.receipts` | `{ parentProviderId? }` | `{ receipts: RecoveryReceiptView[] }` |
 | `sessions.spawn` | `SpawnParams` | `SpawnResult` |
 | `sessions.list` | `{ includeClosed?, cwd? }` | `{ sessions: SessionView[] }` |
 | `sessions.get` | `{ sessionId }` | `{ session: SessionView }` |
@@ -506,6 +511,49 @@ provider session already live in this instance is marked attached; adopting it t
 Errors: `backend_not_found`, `backend_unavailable`, `bad_request` when the adapter does
 not advertise `session/list`, and `spawn_failed` when the probe cannot start, handshake,
 or answer within `startupTimeoutMs`. The caller's abort signal kills the probe.
+
+### `recovery.receipts`
+
+Params:
+
+```ts
+{
+  parentProviderId?: string; // filter to one parent's receipts; omit for every receipt
+}
+```
+
+Result:
+
+```ts
+{
+  receipts: RecoveryReceiptView[];
+}
+
+type RecoveryReceiptView = {
+  parentProviderId: string;
+  parentSessionId: string | null;  // historical HLAO id at attach time
+  childProviderId: string;         // the durable handle to adopt
+  childSessionId: string;          // historical HLAO id at attach time
+  backend: string;
+  cwd: string;
+  name: string | null;
+  recordedAt: string;
+  attached: boolean;               // a non-terminal HLAO session holds the child id
+  hlaoSessionId: string | null;
+  hlaoName: string | null;
+  hlaoStatus: SessionStatus | null;
+  parentHlaoSessionId: string | null; // a non-terminal session holds the parent id
+  parentHlaoName: string | null;
+  parentHlaoStatus: SessionStatus | null;
+};
+```
+
+This reads the append-only spawn-receipt ledger, not the live table. A receipt is written
+when a parent spawns or reattaches a child and is keyed by the parent's provider id, so it
+survives a supervisor restart. The result dedupes the same parent/backend/child triple to
+its latest receipt and sorts newest first. It never creates a session, starts an adapter,
+or claims a child is live; `attached` is only a live-table lookup. A malformed ledger line
+is skipped. `--provider` on the CLI reads the same file with no supervisor.
 
 ### `sessions.spawn`
 

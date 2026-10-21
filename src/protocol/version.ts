@@ -47,6 +47,7 @@ export const ACP_PROTOCOL_VERSION = 1;
 export const PROTOCOL_CAPABILITIES = [
   "backends.list",
   "backends.sessions",
+  "recovery.receipts",
   "session.usage",
   "read.filters",
   "read.before",

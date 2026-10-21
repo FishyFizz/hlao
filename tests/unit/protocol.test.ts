@@ -256,6 +256,26 @@ test("backends.sessions requires a backend and validates an absolute cwd", () =>
   );
 });
 
+test("recovery.receipts accepts an optional parent provider id only", () => {
+  assert.deepEqual(parseParams("recovery.receipts", {}), {
+    parentProviderId: undefined,
+  });
+  assert.deepEqual(
+    parseParams("recovery.receipts", { parentProviderId: "provider-1" }),
+    { parentProviderId: "provider-1" },
+  );
+  assert.throws(
+    () => parseParams("recovery.receipts", { parentProviderId: "" }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+  assert.throws(
+    () => parseParams("recovery.receipts", { parent: "provider-1" }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
 test("read filters validate and since/before are exclusive", () => {
   const params = parseParams("sessions.read", {
     sessionId: "abc",

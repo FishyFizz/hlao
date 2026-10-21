@@ -408,6 +408,23 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         cursor: optString(object, "cursor", what, 4_096),
       } as ParamsByMethod[M];
     }
+    case "recovery.receipts": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["parentProviderId"], what);
+      const parentProviderId = optString(
+        object,
+        "parentProviderId",
+        what,
+        4_096,
+      );
+      if (parentProviderId !== undefined && parentProviderId.length === 0) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.parentProviderId must not be empty`,
+        );
+      }
+      return { parentProviderId } as ParamsByMethod[M];
+    }
     case "sessions.spawn": {
       const object = asObject(raw, what);
       checkKeys(

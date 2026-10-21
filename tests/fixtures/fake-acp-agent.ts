@@ -30,7 +30,10 @@ const doneAt = Number(process.env.FAKE_DONE_AT ?? 2);
 const optionMode = process.env.FAKE_NO_ALWAYS === "1" ? "basic" : "full";
 const permissionCount = Number(process.env.FAKE_PERMISSION_COUNT ?? 2);
 
-let nextSession = 0;
+// Provider ids are process-local in this fixture. Tests that need two live
+// provider conversations with distinct ids can offset the next one.
+const sessionOffset = Number(process.env.FAKE_SESSION_OFFSET ?? 0);
+let nextSession = Number.isFinite(sessionOffset) ? sessionOffset : 0;
 let nextFork = 0;
 let cancelActive: (() => void) | null = null;
 /** Set while a session/prompt handler is in flight and able to take a steer. */

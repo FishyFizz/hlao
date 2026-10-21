@@ -12,6 +12,7 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--env K=V]... [--no-skill] [--idempotency-key KEY]
                 [--resume PROVIDER_ID | --fork PROVIDER_ID]
 hlao provider sessions <backend> [--cwd DIR | --all] [--cursor CURSOR]
+hlao children [--provider ID | --self]
 hlao adopt <backend> <provider-id> [--cwd DIR] [--name LABEL]
                 [--parent SESSION] [--fork] [--no-skill]
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
@@ -174,8 +175,11 @@ With `--follow`, `--jsonl` streams events and re-arms a one-shot `wait --until c
 
 `export [<id>]` pages forward until `hasMore` is false and returns `{session, events,
 earliestRetainedSeq, lastSeq, count, truncated}`. `--out FILE` writes that object (or one
-event per line with `--jsonl`); without `--out` the JSON object goes to stdout. It is the
-supported recovery path before `down`; `read --out` remains one bounded page by design.
+event per line with `--jsonl`); without `--out` the JSON object goes to stdout. `--all --out
+DIR` writes one file per session plus `manifest.json`; each manifest entry includes
+`agentSessionId`, the durable provider id, alongside the id, name, backend, cwd, file, count,
+and truncation facts. It is the supported recovery path before `down`; `read --out` remains
+one bounded page by design.
 
 `wait` accepts one id or a list. For several ids, `--any` (the default) resolves on the first
 target that satisfies and `--all` when every target does. The JSON result always includes
@@ -279,6 +283,18 @@ adapter. `--fork` copies the provider session with ACP `session/fork` instead; t
 keeps running. `--name` labels the new session and `--no-skill` omits the first-prompt skill
 pointer. A resumed or forked session keeps the provider's persisted mode; `defaultMode`
 applies to new sessions only.
+
+`children` reads the historical spawn-receipt ledger at
+`<HLAO_HOME>/spawn-ledger.jsonl`. Whenever a parent session spawns or adopts a child, the
+supervisor appends `{version, at, parentProviderId, parentSessionId, childProviderId,
+childSessionId, backend, cwd, name}`. The lookup key is the parent **provider** id, because
+HLAO ids are lifetime-scoped. `--self` resolves the caller's provider id through
+`sessions.get`, then prints the receipts; `--provider ID` reads the ledger directly and needs
+no supervisor. `--json` returns `{parentProviderId, ledger, children}`. The result dedupes the
+same parent/backend/child triple to its latest receipt, and malformed or partial lines are
+ignored. Receipts are history, not liveness: a child may have ended, and adoption returns a
+live attachment as `duplicate: true`. This is the recovery path after a restart, when the old
+HLAO ids are gone but the provider conversations remain.
 
 `agents`, `config`, and `doctor` are local and non-mutating; none autostarts a supervisor.
 `agents` reports the file that defined each user or project backend, middle-truncated in human

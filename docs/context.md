@@ -25,13 +25,15 @@ surfaces. This file is the map between them and the code.
   fails closed. `permit`, `mode` set, and a spawn `mode` are operator-only. Provider
   session discovery is a capability-gated read of ACP `session/list` (`backends.sessions`),
   live-joined to the supervisor table; `hlao adopt` loads one as a new HLAO session. There
-  is no persisted provider-to-agent registry (ADR 0014). A resumed or forked session keeps
+  is no live provider-to-agent registry (ADR 0014). An append-only spawn-receipt ledger
+  pairs parent and child provider ids for manual recovery after a restart; it is history,
+  not liveness, and `hlao children` reads it (ADR 0015). A resumed or forked session keeps
   the provider's mode; `defaultMode` applies to new sessions only.
-- **Verification:** `npm test` runs 269 tests: 267 pass, 2 skipped (POSIX-only process-group
+- **Verification:** `npm test` runs 276 tests: 274 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
-  ACP agent, including the acceptance assemblies, provider discovery/adoption, and a
-  raw-NDJSON conformance test that never invokes the CLI. The dashboard typechecks, passes 33
-  tests, and builds against wire 3.1.
+  ACP agent, including the acceptance assemblies, provider discovery/adoption, the
+  post-reboot receipt recovery, and a raw-NDJSON conformance test that never invokes the CLI.
+  The dashboard typechecks, passes 38 tests, and builds against wire 3.1.
 - **Next:** N-08 containment (a scoped credential or separate instance), N-11's general
   resource bounds, and the remaining provider continuity hardening (RF-01, RF-02, RF-03,
   RF-06, RF-07, RF-08) remain. The dashboard wire-readiness assessment is
@@ -61,6 +63,8 @@ A small set of plain operations both a human and an agent use:
 - `cancel` / `close` / `permit` — the lifecycle operations around the five observables.
 - `provider sessions` / `adopt` — a read of the provider's own catalog and a client
   assembly that loads one as a new HLAO session. Neither is a registry.
+- `children` — read historical spawn receipts by parent provider id, including offline;
+  the post-reboot recovery path, not a liveness query.
 
 There is no scheduler. Recurring work is a loop the caller writes, using a bounded wait's
 timeout as the timer. There is no shared-state object. Shared state is a file named by path
@@ -71,7 +75,8 @@ and announced by reference; the examples show it.
 1. **No durable orchestration store.** The supervisor's live session table is the truth.
    The lock file is discovery only; the event log is bounded memory; the supervisor log is
    diagnostics. Provider session discovery is a read of the provider's catalog, joined to
-   the live table, never a persisted HLAO registry.
+   the live table, never a persisted HLAO registry. The spawn-receipt ledger is
+   append-only history for manual recovery and is never read as liveness.
 2. **`wait` never re-arms.** No recurring timers anywhere in `src/`.
 3. **Reads are bounded and cursor-addressed.** Eviction is reported through `truncated` and
    `earliestRetainedSeq`.
@@ -97,6 +102,7 @@ and announced by reference; the examples show it.
 | supervisor lifecycle, universal addressing, dispatch | `src/supervisor.ts` |
 | provider catalog reads (`backends.sessions`) | `src/provider.ts` |
 | provider discovery/adoption commands | `src/cli/commands/provider.ts`, `src/cli/commands/adopt.ts` |
+| spawn receipts and their read surface | `src/ledger.ts`, `src/cli/commands/children.ts` |
 | autostart, lock probing, request transport | `src/client.ts`, `src/lock.ts` |
 | backend manifests and config merge | `src/config.ts`, `contracts/backends.md` |
 | retention / cursor / eviction rules | `src/events.ts`, ADR 0002 |
@@ -139,6 +145,8 @@ hlao down
   `session/fork`: ADR 0011.
 - Provider session discovery is a capability-gated read of ACP `session/list`, joined to
   the live table; adoption is a client assembly, not a stored mapping: ADR 0014.
+- Spawn receipts are historical, keyed by the parent provider id, and never liveness:
+  ADR 0015.
 - Identity generated before process start; ACP ids internal: ADR 0003.
 - Permission requests are orchestration state; the provider owns the policy, every ask is
   relayed to the operator, and control is operator-only: ADR 0013 (superseding the policy
@@ -153,7 +161,9 @@ lineage reconstruction, or durable event store. Each absence is a constraint fro
 `PRODUCT.md`, not an unfinished feature. Provider history is not absent: it lives in the
 provider, and `spawn --resume` reads it through ACP `session/load` (ADR 0011). Provider
 discovery is not a registry: `backends.sessions` reads the provider's catalog and joins the
-live table (ADR 0014).
+live table (ADR 0014). Tree recovery is not automatic: the spawn-receipt ledger lets a
+resumed leader adopt children by provider id one at a time (ADR 0015), but HLAO ids and
+lineage are not restored.
 
 ## Known limitations and edges
 

@@ -28,6 +28,7 @@ Usage:
                                              take a provider session into this instance
   hlao provider sessions <backend> [--cwd DIR | --all]
                                              list the provider's own sessions
+  hlao children [--provider ID | --self]       provider ids this parent attached
   hlao send [<id>] [message] [--wait]          deliver a prompt (steer or queue)
   hlao read [<id>] [--since N | --before N] [--type T] [--grep TEXT]
                 [--after TIME] [--until TIME] [--regex] [--context N]
@@ -169,6 +170,7 @@ const COMMAND_HELP_NAMES = new Set([
   "spawn",
   "adopt",
   "provider",
+  "children",
   "send",
   "read",
   "export",
@@ -292,6 +294,31 @@ The read starts a short-lived adapter process; it does not create an HLAO
 session or a provider conversation. A backend that does not advertise
 session/list is refused. The supervisor's live table remains the instance-wide
 address space.`,
+    children: `hlao children [--provider ID | --self]
+
+List the historical spawn receipts for a parent provider id. A receipt is
+written when a parent session spawns or adopts a child: it pairs the parent's
+provider id with the child's provider id and records the child's backend, cwd,
+and name at that moment. The ledger is append-only and lives at
+$HLAO_HOME/spawn-ledger.jsonl.
+
+This is the recovery path after a restart, when the HLAO instance is empty and
+the HLAO ids are gone. The provider id is the durable handle:
+  hlao children --self
+  hlao adopt <backend> <provider-id>
+
+Options:
+  --provider ID   read receipts for this provider id; no supervisor needed
+  --self          resolve this session's provider id, then read its receipts
+                  (default inside a session)
+
+A receipt is history, not liveness: the child may have ended. Adoption returns
+the live session as a duplicate if one still holds the same provider id. Use
+--fork when the source may be driven elsewhere. Malformed or partial lines are
+ignored; the ledger never changes the live session table.
+
+The ledger is per HLAO home. A leader that was forked (not resumed) has a new
+provider id; read its predecessor's receipts with --provider <source-id>.`,
     send: `hlao send [<id>] [message] [options]
 
 Deliver a prompt. When the target is idle it runs a turn immediately. When it

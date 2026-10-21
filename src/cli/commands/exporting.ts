@@ -73,6 +73,8 @@ export async function exportSession(
 
 export interface ExportManifestEntry {
   sessionId: string;
+  /** The durable provider handle; the only id that can reopen this conversation. */
+  agentSessionId: string | null;
   name: string | null;
   backend: string;
   cwd: string;
@@ -169,6 +171,7 @@ export async function exportAll(
       writeFileSync(join(outDir, file), body);
       entries.push({
         sessionId: view.id,
+        agentSessionId: view.agentSessionId,
         name: view.name,
         backend: view.backend,
         cwd: view.cwd,
@@ -182,6 +185,7 @@ export async function exportAll(
       failures += 1;
       entries.push({
         sessionId: view.id,
+        agentSessionId: view.agentSessionId,
         name: view.name,
         backend: view.backend,
         cwd: view.cwd,

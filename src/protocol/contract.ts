@@ -310,6 +310,7 @@ const METHODS = [
   "hello",
   "backends.list",
   "backends.sessions",
+  "recovery.receipts",
   "sessions.spawn",
   "sessions.list",
   "sessions.get",
@@ -434,6 +435,33 @@ export interface ProviderSessionsResult {
   agentVersion: string | null;
   sessions: ProviderSessionView[];
   nextCursor: string | null;
+}
+export interface RecoveryReceiptsParams {
+  /** Filter to one parent provider id; omit for every child receipt. */
+  parentProviderId?: string;
+}
+/** A historical spawn receipt, live-joined to the current supervisor table. */
+export interface RecoveryReceiptView {
+  parentProviderId: string;
+  parentSessionId: string | null;
+  childProviderId: string;
+  childSessionId: string;
+  backend: string;
+  cwd: string;
+  name: string | null;
+  recordedAt: string;
+  /** A non-terminal HLAO session currently holds this child provider id. */
+  attached: boolean;
+  hlaoSessionId: string | null;
+  hlaoName: string | null;
+  hlaoStatus: SessionStatus | null;
+  /** A non-terminal HLAO session currently holds the parent provider id. */
+  parentHlaoSessionId: string | null;
+  parentHlaoName: string | null;
+  parentHlaoStatus: SessionStatus | null;
+}
+export interface RecoveryReceiptsResult {
+  receipts: RecoveryReceiptView[];
 }
 export interface SpawnParams {
   backend: string;
@@ -738,6 +766,7 @@ export type ParamsByMethod = {
   hello: HelloParams;
   "backends.list": BackendsListParams;
   "backends.sessions": ProviderSessionsParams;
+  "recovery.receipts": RecoveryReceiptsParams;
   "sessions.spawn": SpawnParams;
   "sessions.list": ListParams;
   "sessions.get": GetParams;

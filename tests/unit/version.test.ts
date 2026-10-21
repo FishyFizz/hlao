@@ -40,6 +40,7 @@ test("the wire is 3.1 with provider discovery and the permission relay capabilit
   const capabilities = PROTOCOL_CAPABILITIES as readonly string[];
   for (const capability of [
     "backends.sessions",
+    "recovery.receipts",
     "session.compaction",
     "session.notices",
     "session.plan",

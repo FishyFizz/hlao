@@ -9,7 +9,8 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
 1. Require wire **major 3** and feature-detect capabilities; do not key behavior off the
    package version or a minor number. Protocol 3.0 is a deliberate break: it removes the
    policy surface and replaces `pendingPermission` with `pendingPermissions`. Protocol 3.1
-   is additive: it adds `backends.sessions` for provider discovery. An old-major supervisor
+   is additive: it adds `backends.sessions` for provider discovery and
+   `recovery.receipts` for historical spawn receipts. An old-major supervisor
    is reported as `version_mismatch` and is never replaced; stop it with the old CLI (or
    `hlao down`, which uses the legacy connection path) before starting 3.x.
 2. Use a **local process** (Node/Tauri/Electron) that can open the named pipe/Unix socket and
@@ -31,8 +32,9 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
   `sessions.set_policy`, and `policy.changed`; adds `pendingPermissions`,
   `permission.requested.queuePosition`, `PermitParams.requestId`, and `AgentView.defaultMode`;
   and makes `sessions.permit`/`sessions.set_mode` operator-only. There is no compatibility
-  shim. 3.1 adds `backends.sessions` (provider catalog, live-joined) without changing an
-  existing method; a 3.0 client can ignore it.
+  shim. 3.1 adds `backends.sessions` (provider catalog, live-joined) and
+  `recovery.receipts` (historical parent/child provider-id receipts) without changing an
+  existing method; a 3.0 client can ignore them.
 - **Persistent streams.** `hello` with `stream: {persistent: true}` opens a multiplexed
   connection. Requests carry a client-chosen `id`; responses echo it. The server may send
   notification frames. The legacy one-request-per-connection path remains, so a dashboard can
@@ -124,7 +126,7 @@ handling should be exercised against a slow/stalled consumer before it is truste
    WebSocket) is not shipped; local IPC is the supported dashboard transport today.
 8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
    `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`,
-   `spawn.resume`, `spawn.fork`, `backends.sessions`, `read.time`, `read.regex`,
+   `spawn.resume`, `spawn.fork`, `backends.sessions`, `recovery.receipts`, `read.time`, `read.regex`,
    `read.context`, `session.firstPrompt`, `session.pendingPermissions`, `permit.request`,
    and the 2.5 provider-state capabilities (`session.compaction`,
    `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`).
@@ -133,7 +135,9 @@ handling should be exercised against a slow/stalled consumer before it is truste
    can offer "open the provider transcript" instead. Without `backends.sessions`, keep the
    manual provider-id input; with it, offer the provider catalog picker. The catalog read is
    on demand and starts an adapter, so load it when the user opens the provider-session
-   surface, not on every render.
+   surface, not on every render. Without `recovery.receipts`, keep recovery manual; with it,
+   show the historical receipts and offer provider-id resume. A receipt is history, not a
+   live attachment.
 
 ## Known gaps and how to handle them now
 

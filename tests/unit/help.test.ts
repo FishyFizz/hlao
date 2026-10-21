@@ -7,6 +7,7 @@ test("help teaches universal addressing and drops removed scope language", () =>
     "spawn",
     "adopt",
     "provider",
+    "children",
     "send",
     "read",
     "export",
@@ -46,6 +47,8 @@ test("help teaches universal addressing and drops removed scope language", () =>
   assert.match(commandHelp("adopt"), /session\/load/);
   assert.match(commandHelp("adopt"), /--fork/);
   assert.match(commandHelp("provider"), /session\/list/);
+  assert.match(commandHelp("children"), /--provider ID/);
+  assert.match(commandHelp("children"), /spawn-ledger\.jsonl/);
   assert.match(commandHelp("wait"), /historical completion condition/);
   assert.match(commandHelp("list"), /--cwd DIR \(exact working directory\)/);
   assert.match(commandHelp("get"), /--brief/);
