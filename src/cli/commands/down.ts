@@ -54,7 +54,10 @@ export async function cmdDown(args: string[]): Promise<number> {
       cliPath: ctx.cliPath,
       callerSessionId: ctx.callerSessionId,
       autostart: false,
-      // `down` must be able to stop a pre-2.0 supervisor during an upgrade.
+      // `down` is the upgrade escape hatch: it may use the legacy connection
+      // path to stop a live supervisor of an older major via the same
+      // `sessions.list`/`supervisor.shutdown` methods. A normal command never
+      // does this; it reports `version_mismatch` instead.
       allowLegacyProtocol: true,
     });
 
@@ -181,7 +184,7 @@ export async function cmdDown(args: string[]): Promise<number> {
     // its pid can be reused by an unrelated process. A successful hello proves
     // the endpoint and token are this supervisor's; without it, remove only the
     // lock and leave whatever owns the pid alone.
-    const verified = await probeSupervisor(lock, 750, null);
+    const verified = (await probeSupervisor(lock, 750)).alive;
     if (!verified) {
       removeLock(ctx.home, lock.token);
       const stillRunning = pidAlive(lock.pid);

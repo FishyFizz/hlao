@@ -1,10 +1,6 @@
 import { resolve } from "node:path";
 import { HlaoError, toHlaoError } from "../../errors.js";
-import type {
-  PermissionPolicy,
-  SendResult,
-  SpawnResult,
-} from "../../protocol.js";
+import type { SendResult, SpawnResult } from "../../protocol.js";
 import {
   booleanOption,
   expectPositionals,
@@ -31,6 +27,20 @@ import { sanitize } from "../render.js";
 import { printPartialText } from "./prompt-support.js";
 
 export async function cmdSpawn(args: string[]): Promise<number> {
+  // A removed flag is a migration error, not a generic unknown option. It is
+  // checked before parsing (but not after `--`, where it is prompt text) so the
+  // message names the replacement.
+  const endOfOptions = args.indexOf("--");
+  const optionArgs = endOfOptions === -1 ? args : args.slice(0, endOfOptions);
+  if (
+    optionArgs.some(
+      (arg) => arg === "--permission" || arg.startsWith("--permission="),
+    )
+  ) {
+    throw usageError(
+      "--permission was removed in 0.15 (protocol 3.0); the provider mode is the permission policy now. Set backends.<name>.defaultMode in config, or pass --mode from an operator shell. Provider asks are answered with \"hlao permit\".",
+    );
+  }
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "name", type: "string", valueName: "LABEL" },
@@ -44,7 +54,6 @@ export async function cmdSpawn(args: string[]): Promise<number> {
     { name: "model", type: "string", valueName: "VALUE" },
     { name: "config", type: "string", valueName: "KEY=VALUE", multiple: true },
     { name: "parent", type: "string", valueName: "SESSION" },
-    { name: "permission", type: "string", valueName: "POLICY" },
     { name: "env", type: "string", valueName: "K=V", multiple: true },
     { name: "no-skill", type: "boolean" },
     { name: "idempotency-key", type: "string", valueName: "KEY" },
@@ -59,9 +68,14 @@ export async function cmdSpawn(args: string[]): Promise<number> {
   const prompt = await resolveMessage(parsed.positionals.slice(1), parsed);
   const model = stringOption(parsed, "model");
   const config = parseConfigValues(multipleOption(parsed, "config"));
-  const permission = stringOption(parsed, "permission");
-  if (permission !== undefined && !["ask", "allow", "deny"].includes(permission)) {
-    throw usageError("--permission must be ask, allow, or deny");
+  const requestedMode = stringOption(parsed, "mode");
+  // Control is operator-only; the supervisor enforces it too. This early check
+  // gives an agent a clear message instead of a wire error.
+  if (requestedMode !== undefined && process.env.HLAO_SESSION_ID?.trim()) {
+    throw new HlaoError(
+      "operator_only",
+      "only an operator shell without HLAO_SESSION_ID may pass --mode; an agent-spawned session uses the backend's defaultMode",
+    );
   }
   const wait = booleanOption(parsed, "wait") ?? false;
   const promptGiven = prompt !== undefined;
@@ -93,11 +107,10 @@ export async function cmdSpawn(args: string[]): Promise<number> {
       prompt: twoPhase ? undefined : prompt,
       wait: twoPhase ? false : wait,
       timeoutMs: numberOption(parsed, "timeout"),
-      mode: stringOption(parsed, "mode"),
+      mode: requestedMode,
       model,
       config,
       parentSessionId: stringOption(parsed, "parent"),
-      permissionPolicy: permission as PermissionPolicy | undefined,
       env: parseEnv(multipleOption(parsed, "env")),
       ...(booleanOption(parsed, "no-skill") === true ? { skill: false } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
@@ -133,7 +146,11 @@ export async function cmdSpawn(args: string[]): Promise<number> {
         ? ctx.style.dim(`  forked from ${sanitize(session.forkedFrom)}`)
         : "") +
       (session.parentId ? ctx.style.dim(`  parent ${session.parentId}`) : "") +
-      ctx.style.dim(`  policy ${session.permissionPolicy}`) +
+      (session.modes
+        ? ctx.style.dim(`  mode ${sanitize(session.modes.currentModeId)}`)
+        : requestedMode !== undefined
+          ? ctx.style.dim(`  mode ${sanitize(requestedMode)} (not advertised)`)
+          : "") +
       (session.createdBy
         ? ctx.style.dim(`  by ${sanitize(session.createdBy)}`)
         : "") +

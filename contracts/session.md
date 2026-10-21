@@ -72,9 +72,10 @@ export interface SpawnOptions {
   depth: number;
   name: string | null;
   createdBy: string;             // "operator" or the requesting session id; provenance only
-  requestedMode?: string;        // mode requested at spawn; recorded in session.created
+  requestedMode?: string;        // effective mode at spawn; recorded in session.created
   env: Record<string, string>;   // includes the HLAO_* identity variables, including HLAO_NAME
-  permissionPolicy: "ask" | "allow" | "deny";
+  permissionTimeoutMs: number;   // one-shot deadline (0 parks); captured at spawn
+  maxPendingPermissions: number; // FIFO bound; captured at spawn
   home: string;                  // injected as HLAO_HOME
   config: SessionConfig;         // timeouts, retention
   cliPath: string;               // injected as HLAO_CLI
@@ -125,15 +126,13 @@ export class Session {
   /** Protocol close when supported, then terminate; idempotent. */
   close(force?: boolean, by?: string): Promise<{ killed: boolean; wasTerminal: boolean }>;
 
-  /** Answer the pending permission request. Throws no_pending_permission / bad_option.
-   *  `always` also switches the session policy to allow and prefers allow_always. */
-  permit(optionId?: string, requestId?: string, always?: boolean, by?: string): {
+  /** Answer one queued permission request with a provider-offered option id.
+   *  With more than one pending, requestId is required (bad_request otherwise).
+   *  Throws no_pending_permission / bad_option. */
+  permit(optionId: string, requestId?: string, by?: string): {
     requestId: string;
     optionId: string;
   };
-
-  /** Read or switch the live HLAO permission policy. */
-  setPolicy(policy: "ask" | "allow" | "deny", by?: string): void;
 
   /** Read or switch the provider's native mode. Throws bad_request when the
    *  backend advertises no modes, bad_option for an unknown mode. */
@@ -170,15 +169,22 @@ export class Session {
 4. **Cancellation is not a kill.** `cancel()` asks ACP to stop; `close(force)` kills. On
    POSIX the adapter is spawned detached and its whole process group is signaled, so tools it
    started do not outlive it; on Windows the existing `taskkill /T` path is unchanged.
-5. **Permission requests are data.** An unanswered request appears in `view()` and produces
-   `permission.requested`; it blocks only that session's turn. A provider can also ask
-   outside a prompt turn (an autonomous cycle); such a request is surfaced and answered the
-   same way, and its events carry `turn: null` and `data.outsideTurn: true`. The policy is
-   `allow` by default, `ask` opt-in, and `permit(..., always)` can switch a live session to
-   `allow`. A provider question (ACP elicitation) is separate state:
-   `pendingElicitation`, `elicitation.requested`/`elicitation.resolved`, and
-   `hlao elicit`. The permission policy never answers it, because a form answer
-   cannot be inferred from `allow` or `deny`.
+5. **Permission requests are relayed, never policy-answered.** A request parks in a FIFO
+   `Map` keyed by request id, appears in `view().pendingPermissions`, and produces
+   `permission.requested` with its 1-based `queuePosition`. There is no auto-allow and no
+   auto-deny. A provider can also ask outside a prompt turn (an autonomous cycle); such a
+   request follows the same queue and timeout rules, and its events carry `turn: null` and
+   `data.outsideTurn: true`.
+   - A second concurrent request queues. A request beyond `maxPendingPermissions` is answered
+     `cancelled` and recorded `{ by: "system", reason: "queue_full" }`.
+   - `permissionTimeoutMs > 0` arms one absolute one-shot deadline per request. Expiry picks
+     `reject_once`, then `reject_always`, else cancels; it never allows, and records
+     `{ by: "timeout", reason: "timeout" }`.
+   - A provider withdrawal clears only that request. Cancel, close, turn end, and failure
+     clear every request; every path clears the timer.
+   A provider question (ACP elicitation) is separate state: `pendingElicitation`,
+   `elicitation.requested`/`elicitation.resolved`, and `hlao elicit`. The permission relay
+   never answers it, because a form answer cannot be inferred from an option kind.
 6. **Provider modes and config options are data.** `view().modes` and `view().configOptions`
    report what the adapter advertises; setters change them and record the actor.
 7. **Names are labels.** `setName` changes `name` and emits an event; the handle, addressing,
@@ -186,6 +192,8 @@ export class Session {
 8. **Events are monotonic.** `append` assigns the next sequence before waiters run.
 9. **Reads never mutate.** A read does not acknowledge or consume anything.
 10. **Timeouts are bounds, not schedules.** Nothing in this module starts a recurring timer.
+    The permission deadline is one absolute one-shot timer per request, cleared by answer,
+    withdrawal, cancel, or close.
 11. **Cancel is explicit about the queue.** The default discards the backlog; `keepQueue`
     stops only the active turn. Every discard is attributed and previewed.
 12. **No addressing policy.** This module has no visibility or scope logic; the supervisor

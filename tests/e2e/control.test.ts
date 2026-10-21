@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { QueueDropResult, QueueResult } from "../../src/protocol.js";
 import {
   Harness,
+  type GetValue,
   type JsonError,
   type PermitValue,
   type ReadValue,
@@ -30,7 +31,7 @@ async function spawnParent(
   return { id, env: { HLAO_SESSION_ID: id, HLAO_NAME: name } };
 }
 
-test("policy reads and writes live state and records the actor", async (t) => {
+test("mode reads are open; setting one is operator-only and attributed", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -41,20 +42,19 @@ test("policy reads and writes live state and records the actor", async (t) => {
   assert.equal(child.code, 0);
   const childId = child.value.session.id;
 
-  const read = await harness.json<{ session: { permissionPolicy: string } }>([
-    "policy",
-    childId,
-  ]);
+  const read = await harness.json<{
+    currentModeId: string;
+  }>(["mode", childId]);
   assert.equal(read.code, 0);
-  assert.equal(read.value.session.permissionPolicy, "allow");
+  assert.equal(read.value.currentModeId, "default");
 
-  const set = await harness.json<{ session: { permissionPolicy: string } }>([
-    "policy",
+  const set = await harness.json<{ session: { modes: { currentModeId: string } } }>([
+    "mode",
     childId,
-    "ask",
-  ], { env: parent.env });
+    "auto",
+  ]);
   assert.equal(set.code, 0);
-  assert.equal(set.value.session.permissionPolicy, "ask");
+  assert.equal(set.value.session.modes.currentModeId, "auto");
 
   const history = await harness.json<ReadValue>([
     "read",
@@ -62,19 +62,28 @@ test("policy reads and writes live state and records the actor", async (t) => {
     "--since",
     "0",
   ]);
-  const changed = history.value.events.find(
-    (event) =>
-      event.type === "policy.changed" &&
-      event.data.permissionPolicy === "ask",
+  // The adapter may notify current_mode_update first (by "agent"); the
+  // supervisor's own mode event records the operator's action.
+  assert.ok(
+    history.value.events.some(
+      (event) =>
+        event.type === "mode" &&
+        event.data.currentModeId === "auto" &&
+        event.data.by === "operator",
+    ),
   );
-  assert.equal(changed?.data.by, parent.id);
 
-  const self = await harness.json<{ session: { permissionPolicy: string } }>(
-    ["policy"],
-    { env: { HLAO_SESSION_ID: childId } },
-  );
+  const self = await harness.json<{ currentModeId: string }>(["mode", "--self"], {
+    env: { HLAO_SESSION_ID: childId },
+  });
   assert.equal(self.code, 0);
-  assert.equal(self.value.session.permissionPolicy, "ask");
+  assert.equal(self.value.currentModeId, "auto");
+
+  const refused = await harness.json<JsonError>(["mode", childId, "default"], {
+    env: parent.env,
+  });
+  assert.equal(refused.code, 1);
+  assert.equal(refused.value.error.code, "operator_only");
 });
 
 test("permissions, modes, renames, cancels, and closes attribute the actor", async (t) => {
@@ -89,8 +98,6 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
     "gate",
     "--env",
     "FAKE_MODE=permission",
-    "--permission",
-    "ask",
   ], { env: parent.env });
   assert.equal(gated.code, 0);
   const gatedId = gated.value.session.id;
@@ -105,12 +112,20 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
   ]);
   assert.equal(waited.code, 0);
 
-  const permitted = await harness.json<PermitValue>(
+  // A parent agent cannot unblock a child; the operator answers.
+  const refused = await harness.json<JsonError>(
     ["permit", gatedId, "--allow"],
     { env: parent.env },
   );
+  assert.equal(refused.code, 1);
+  assert.equal(refused.value.error.code, "operator_only");
+
+  const permitted = await harness.json<PermitValue>(
+    ["permit", gatedId, "--allow"],
+    {},
+  );
   assert.equal(permitted.code, 0);
-  assert.equal(permitted.value.by, parent.id);
+  assert.equal(permitted.value.by, "operator");
 
   const gatedHistory = await harness.json<ReadValue>([
     "read",
@@ -121,7 +136,7 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
   const resolved = gatedHistory.value.events.find(
     (event) => event.type === "permission.resolved" && event.data.optionId === "allow",
   );
-  assert.equal(resolved?.data.by, parent.id);
+  assert.equal(resolved?.data.by, "operator");
 
   const worker = await harness.json<SpawnValue>(["spawn", "fake", "work", "--wait"], {
     env: parent.env,
@@ -132,9 +147,7 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
     env: parent.env,
   });
   assert.equal(renamed.code, 0);
-  const mode = await harness.json(["mode", workerId, "auto"], {
-    env: parent.env,
-  });
+  const mode = await harness.json(["mode", workerId, "auto"]);
   assert.equal(mode.code, 0);
 
   const active = await harness.json<SpawnValue>([
@@ -167,7 +180,7 @@ test("permissions, modes, renames, cancels, and closes attribute the actor", asy
   );
   assert.ok(
     workerHistory.value.events.some(
-      (event) => event.type === "mode" && event.data.by === parent.id,
+      (event) => event.type === "mode" && event.data.by === "operator",
     ),
   );
 
@@ -448,7 +461,7 @@ test("close --tree --dry-run reports without closing anything", async (t) => {
   assert.equal(byId.get(childId), "idle");
 });
 
-test("changing policy answers a parked permission", async (t) => {
+test("permit answers by request id and names unknown ids", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -456,8 +469,6 @@ test("changing policy answers a parked permission", async (t) => {
     "spawn",
     "fake",
     "ask first",
-    "--permission",
-    "ask",
     "--env",
     "FAKE_MODE=permission",
   ]);
@@ -473,25 +484,37 @@ test("changing policy answers a parked permission", async (t) => {
     "15s",
   ]);
   assert.equal(waiting.code, 0);
-  assert.ok(waiting.value.session.pendingPermission);
+  const pending = waiting.value.session.pendingPermissions[0]!;
+  assert.ok(pending);
 
-  const allowed = await harness.json<{
-    session: {
-      status: string;
-      permissionPolicy: string;
-      pendingPermission: unknown;
-    };
-  }>(["policy", id, "allow"]);
+  const unknown = await harness.json<JsonError>([
+    "permit",
+    id,
+    "--request",
+    "no-such-request",
+    "--allow",
+  ]);
+  assert.equal(unknown.code, 1);
+  assert.equal(unknown.value.error.code, "no_pending_permission");
+
+  const allowed = await harness.json<PermitValue>([
+    "permit",
+    id,
+    "--request",
+    pending.requestId,
+    "--allow",
+  ]);
   assert.equal(allowed.code, 0);
-  assert.equal(allowed.value.session.permissionPolicy, "allow");
-  assert.equal(allowed.value.session.pendingPermission, null);
-  assert.notEqual(allowed.value.session.status, "waiting_permission");
+  assert.equal(allowed.value.requestId, pending.requestId);
+  assert.equal(allowed.value.by, "operator");
+
+  const after = await harness.json<GetValue>(["get", id]);
+  assert.deepEqual(after.value.session.pendingPermissions, []);
 
   const read = await harness.json<ReadValue>(["read", id, "--since", "0"]);
   const resolved = read.value.events.find(
     (event) => event.type === "permission.resolved",
   );
-  assert.ok(resolved);
-  assert.equal(resolved.data.by, "operator");
-  assert.equal(typeof resolved.data.optionId, "string");
+  assert.equal(resolved?.data.by, "operator");
+  assert.equal(typeof resolved?.data.optionId, "string");
 });

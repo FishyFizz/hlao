@@ -12,6 +12,8 @@ type BackendManifest = {
   source: "builtin" | "user" | "project";
   available: boolean;
   unavailableReason?: string;
+  /** Spawn mode when the operator supplies none. (3.0) */
+  defaultMode?: string;
 };
 ```
 
@@ -31,10 +33,11 @@ appears in `hlao agents` so the failure is visible rather than silent.
 
 ```jsonc
 {
-  "permissionPolicy": "allow",      // allow | ask | deny
   "waitTimeoutMs": 1800000,
   "sendWaitTimeoutMs": 1800000,
   "startupTimeoutMs": 120000,
+  "permissionTimeoutMs": 1800000,  // 0 parks forever
+  "maxPendingPermissions": 16,     // 1..1000
   "maxEventsPerSession": 5000,
   "maxEventLogBytes": 16777216,
   "maxEventBytes": 262144,
@@ -44,7 +47,8 @@ appears in `hlao agents` so the failure is visible rather than silent.
       "command": "my-agent",
       "args": ["acp"],
       "env": { "MY_FLAG": "1" },
-      "description": "optional"
+      "description": "optional",
+      "defaultMode": "auto"
     }
   }
 }
@@ -52,6 +56,22 @@ appears in `hlao agents` so the failure is visible rather than silent.
 
 All fields are optional. Unknown top-level keys are rejected so a typo cannot silently do
 nothing. Duration fields are milliseconds.
+
+The permission keys bound the relay:
+
+- `permissionTimeoutMs` — one absolute one-shot deadline per provider request. On expiry
+  HLAO selects `reject_once`, then `reject_always`, else cancels; it never allows. `0`
+  parks forever. The value is captured at spawn; `reload` affects only new spawns.
+- `maxPendingPermissions` — FIFO bound on the pending queue. A request beyond the bound is
+  answered `cancelled`, is not enqueued, and records
+  `permission.resolved { by: "system", reason: "queue_full" }`. Captured at spawn.
+
+`permissionPolicy` was removed in protocol 3.0. Its presence is rejected with a migration
+message naming `backends.<name>.defaultMode`, not the generic unknown-key error.
+
+`defaultMode` is accepted in user and project backend manifests. The effective spawn mode is
+the operator's `--mode` → the backend's `defaultMode` → the provider's own default. Mode
+names are not normalized; an unknown name is reported by the adapter at spawn.
 
 ## Project config — `<cwd>/.hlao/agents.json`
 
@@ -85,11 +105,12 @@ only.
   so it is not pre-judged here.
 - `args`: array of strings.
 - `env`: object whose values are strings.
+- `defaultMode`: a non-empty mode id string.
 - Unknown backend keys are rejected.
 - All fields of user config are validated before any is applied; an invalid file applies
   none of its values. The supervisor still starts, but `sessions.spawn` fails with
   `config_invalid`, and local `agents`/`doctor`/`config validate` report the file and reason.
-  This keeps a typo from silently changing `permissionPolicy` or a timeout.
+  This keeps a typo from silently changing a timeout or a default mode.
 - Invalid project config fails only that `spawn` request with `config_invalid`, naming the
   file; local `agents`/`doctor` report it too.
 

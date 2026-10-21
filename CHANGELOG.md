@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.15.0 — unreleased
+
+Protocol 3.0. HLAO no longer owns a permission policy: the provider's mode is the
+policy layer, and every provider permission request is relayed to the operator.
+
+### Changed (breaking)
+
+- Removed the HLAO permission policy: `PermissionPolicy`, `SessionView.permissionPolicy`,
+  `SpawnParams.permissionPolicy`, `sessions.set_policy`, `policy.changed`, and the
+  `hlao policy` command. `permission.requested` no longer carries `policy` or `auto`.
+  An old `permissionPolicy` config key fails with a migration message naming
+  `backends.<name>.defaultMode`; `--permission` and `hlao policy` fail with migration
+  messages instead of an unknown-option/command error.
+- Every ACP permission request now parks for the operator. There is no auto-allow and no
+  auto-deny. `hlao permit` answers with the provider's own option id.
+- `SessionView.pendingPermission` is replaced by `SessionView.pendingPermissions` (FIFO).
+  A second concurrent request queues instead of being auto-cancelled. The queue is bounded
+  by `maxPendingPermissions` (default 16, range 1..1000), captured at spawn; overflow
+  answers the provider `cancelled` and records
+  `permission.resolved { by: "system", reason: "queue_full", optionId: null }`.
+- `permissionTimeoutMs` (default 30m, `0` = park) starts one absolute one-shot deadline per
+  request, captured at spawn. Expiry selects `reject_once`, then `reject_always`, else
+  cancels; it never allows. The resolution is
+  `permission.resolved { by: "timeout", reason: "timeout" }`.
+- Control is operator-only (`operator_only` from the supervisor and a CLI pre-check):
+  `sessions.permit`, `sessions.set_mode`, and a spawn `mode` from a caller with
+  `HLAO_SESSION_ID`. Reads stay open. The operator uses a shell without `HLAO_SESSION_ID`
+  or the dashboard.
+- `BackendManifest.defaultMode` (user and project backends) sets the spawn mode after an
+  operator `--mode` and before the provider's default. Agent-spawned children always use
+  it; an agent `--mode` is refused. `AgentView.defaultMode` exposes it in `agents` and
+  `config show`.
+- `permit --allow --always` selects `allow_always`; `permit --deny --always` selects
+  `reject_always`. A missing kind is `bad_option` with no fallback. `PermitParams.always`
+  is removed; the CLI resolves the option id.
+- `permit --request ID` answers one queued request; `permit --all-pending` answers every
+  pending request. Without `--request`, more than one pending is a `bad_request` naming the
+  ids.
+- `hlao mode` gains operator-only bulk selectors `--root`, `--tree`, `--status`, and
+  `--idle`, replacing `policy` bulk. Reads and `--self` reads stay open.
+- Protocol 3.0 (breaking): capabilities `session.pendingPermissions` and `permit.request`;
+  `PermitParams.requestId`, `PermitResult.requestId`, `permission.requested.queuePosition`.
+  Clients require major equality; there is no compatibility shim.
+- `probeSupervisor` now distinguishes "not answering" from "alive, speaking major N". A 3.0
+  client and a 3.0 supervisor refuse to replace or clobber a live different-major
+  supervisor, reporting `version_mismatch` with the upgrade order. `hlao down` uses the
+  legacy connection path to stop an older supervisor when those methods exist.
+
+### Added
+
+- `hlao config show` prints `permissionTimeoutMs`, `maxPendingPermissions`, and each
+  backend's `defaultMode`.
+- The fake ACP test adapter gains a `permission-multi` mode (parallel asks) and optional
+  always-kind omission for the no-fallback tests.
+
+### Migration
+
+1. Stop the running supervisor with the old CLI (or `hlao down`, which tries the legacy
+   path) before upgrading. A 3.0 client refuses to replace a live 2.x supervisor.
+2. Remove `permissionPolicy` from `config.json`. Set `backends.<name>.defaultMode` for
+   unattended runs; `permissionTimeoutMs: 0` parks instead of the 30m fail-closed default.
+3. Replace `--permission allow` with a backend default mode or an operator `--mode`.
+   Replace `hlao policy ...` with `hlao mode ...`. `permit --always` now selects the
+   provider's always option.
+4. Update agent sessions with the 0.15 skill: an agent cannot set a mode or answer a
+   request. Update the dashboard to 3.0.
+
 ## 0.14.0 — unreleased
 
 ### Added

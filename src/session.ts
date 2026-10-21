@@ -22,7 +22,6 @@ import { VERSION } from "./version.js";
 import type {
   EventType,
   EventView,
-  PermissionPolicy,
   QueueItemView,
   SessionCompactionView,
   SessionConfigOptionView,
@@ -40,9 +39,7 @@ import { raceWithTimeout, withTimeout } from "./session/async.js";
 import {
   cancelledElicitation,
   cancelledResponse,
-  chooseByPolicy,
   elicitationResponse,
-  pickAllowOption,
   selectedResponse,
   toElicitationView,
   type ElicitationAction,
@@ -98,7 +95,10 @@ export interface SpawnOptions {
   createdBy: string;
   requestedMode?: string;
   env: Record<string, string>;
-  permissionPolicy: PermissionPolicy;
+  /** One-shot operator wait before a request fails closed; 0 parks (3.0). */
+  permissionTimeoutMs: number;
+  /** Bound on the pending permission FIFO, captured at spawn (3.0). */
+  maxPendingPermissions: number;
   home: string;
   config: SessionConfig;
   cliPath: string;
@@ -203,7 +203,8 @@ export class Session {
   #pumping = false;
   #turnText = "";
   #lastMessageId: string | null = null;
-  #pending: PendingPermission | null = null;
+  /** FIFO of provider permission requests, keyed by ACP request id. */
+  #pending = new Map<string, PendingPermission>();
   #pendingElicitation: PendingElicitation | null = null;
   #lastStopReason: StopReason | null = null;
   #usage: SessionUsageView | null = null;
@@ -227,7 +228,8 @@ export class Session {
   #stderrTail: string[] = [];
   #config: SessionConfig;
   #backendManifest: BackendManifest;
-  #permissionPolicy: PermissionPolicy;
+  #permissionTimeoutMs: number;
+  #maxPendingPermissions: number;
   #env: Record<string, string>;
   #home: string;
   #cliPath: string;
@@ -255,7 +257,8 @@ export class Session {
     this.#lastActivityAt = this.createdAt;
     this.#config = options.config;
     this.#backendManifest = options.backend;
-    this.#permissionPolicy = options.permissionPolicy;
+    this.#permissionTimeoutMs = options.permissionTimeoutMs;
+    this.#maxPendingPermissions = options.maxPendingPermissions;
     this.#env = options.env;
     this.#home = options.home;
     this.#cliPath = options.cliPath;
@@ -296,11 +299,11 @@ export class Session {
 
   /** Operator input of either kind blocks the session the same way. */
   get #awaitingInput(): boolean {
-    return this.#pending !== null || this.#pendingElicitation !== null;
+    return this.#pending.size > 0 || this.#pendingElicitation !== null;
   }
 
   view(): SessionView {
-    const pending = this.#pending;
+    const pending = [...this.#pending.values()];
     const elicitation = this.#pendingElicitation;
     return {
       id: this.id,
@@ -321,9 +324,9 @@ export class Session {
       settled: this.#status === "idle" && this.#queue.length === 0,
       lastSeq: this.#log.lastSeq,
       lastEvent: this.#lastEvent ? { ...this.#lastEvent } : null,
-      pendingPermission: pending
-        ? toPermissionView(pending.requestId, pending.requestedAt, pending.request)
-        : null,
+      pendingPermissions: pending.map((entry) =>
+        toPermissionView(entry.requestId, entry.requestedAt, entry.request),
+      ),
       pendingElicitation: elicitation
         ? toElicitationView(
             elicitation.requestId,
@@ -336,7 +339,6 @@ export class Session {
       forkedFrom: this.#forkSessionId,
       processId: this.#child?.pid ?? null,
       exit: this.#exit,
-      permissionPolicy: this.#permissionPolicy,
       modes: this.#modes
         ? {
             currentModeId: this.#modes.currentModeId,
@@ -1120,97 +1122,117 @@ export class Session {
     return { killed, wasTerminal: false };
   }
 
+  /**
+   * Answer one pending request with the provider's own option id. The option
+   * must be offered; HLAO never invents a fallback. With several requests
+   * pending, `requestId` is required.
+   */
   permit(
-    optionId?: string,
+    optionId: string,
     requestId?: string,
-    always = false,
     by = "operator",
   ): { requestId: string; optionId: string } {
-    const pending = this.#pending;
-    if (!pending) {
-      throw new HlaoError("no_pending_permission", `session ${this.id} has no pending permission`);
-    }
-    if (requestId !== undefined && requestId !== pending.requestId) {
+    if (this.#pending.size === 0) {
       throw new HlaoError(
         "no_pending_permission",
-        `no pending permission with request id ${requestId}`,
-        { requestId: pending.requestId },
+        `session ${this.id} has no pending permission`,
       );
     }
+    let pending: PendingPermission;
+    if (requestId !== undefined) {
+      const found = this.#pending.get(requestId);
+      if (!found) {
+        const ids = [...this.#pending.keys()];
+        throw new HlaoError(
+          "no_pending_permission",
+          `no pending permission with request id ${requestId}`,
+          { requestIds: ids },
+        );
+      }
+      pending = found;
+    } else if (this.#pending.size > 1) {
+      const ids = [...this.#pending.keys()];
+      throw new HlaoError(
+        "bad_request",
+        `session ${this.id} has ${ids.length} pending permission requests; pass --request <id> (${ids.join(", ")}) or --all-pending`,
+        { requestIds: ids },
+      );
+    } else {
+      pending = this.#pending.values().next().value!;
+    }
 
-    let chosen: PermissionOption | undefined;
-    if (optionId !== undefined) {
-      chosen = pending.request.options.find((option) => option.optionId === optionId);
-      if (!chosen) {
-        throw new HlaoError("bad_option", `permission option "${optionId}" was not offered`, {
+    const chosen = pending.request.options.find(
+      (option) => option.optionId === optionId,
+    );
+    if (!chosen) {
+      throw new HlaoError(
+        "bad_option",
+        `permission option "${optionId}" was not offered`,
+        {
           options: pending.request.options.map((option) => ({
             optionId: option.optionId,
             name: option.name,
             kind: option.kind,
           })),
-        });
-      }
-    } else if (always) {
-      chosen =
-        pending.request.options.find((option) => option.kind === "allow_always") ??
-        pickAllowOption(pending.request.options);
-      if (!chosen) {
-        throw new HlaoError(
-          "bad_option",
-          "this permission request offers no allow option; pass --option explicitly",
-          {
-            options: pending.request.options.map((option) => ({
-              optionId: option.optionId,
-              name: option.name,
-              kind: option.kind,
-            })),
-          },
-        );
-      }
-    } else {
-      chosen = pickAllowOption(pending.request.options);
-      if (!chosen) {
-        throw new HlaoError(
-          "bad_option",
-          "this permission request offers no allow option; pass --option explicitly",
-          {
-            options: pending.request.options.map((option) => ({
-              optionId: option.optionId,
-              name: option.name,
-              kind: option.kind,
-            })),
-          },
-        );
-      }
+        },
+      );
     }
-
-    if (always) {
-      this.#changePolicy("allow", by);
-    }
-    this.#resolvePending(chosen, by);
+    this.#resolvePending(pending, chosen, by);
     return { requestId: pending.requestId, optionId: chosen.optionId };
   }
 
-  /** Answer the parked request and wake the turn. */
-  #resolvePending(chosen: PermissionOption, by: string): void {
-    const pending = this.#pending;
-    if (!pending) return;
-    this.#pending = null;
-    if (!this.isTerminal) {
-      this.#status = this.#pendingElicitation
-        ? "waiting_permission"
-        : this.#active
-          ? "busy"
-          : "idle";
-    }
+  /** Answer one parked request and wake the turn. */
+  #resolvePending(
+    pending: PendingPermission,
+    chosen: PermissionOption,
+    by: string,
+    reason?: string,
+  ): void {
+    if (this.#pending.get(pending.requestId) !== pending) return;
+    this.#pending.delete(pending.requestId);
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
+    this.#refreshInputStatus();
     this.#emit("permission.resolved", {
       requestId: pending.requestId,
       optionId: chosen.optionId,
       optionName: chosen.name,
       by,
+      ...(reason !== undefined ? { reason } : {}),
     });
     pending.resolve(selectedResponse(chosen.optionId));
     this.#changed();
+  }
+
+  /**
+   * Start the one absolute deadline for a request. On expiry the request fails
+   * closed: prefer `reject_once`, then `reject_always`, else cancel. An allow
+   * option is never selected.
+   */
+  #armPermissionTimeout(pending: PendingPermission): void {
+    if (this.#permissionTimeoutMs <= 0) return;
+    const timer = setTimeout(() => {
+      if (this.#pending.get(pending.requestId) !== pending) return;
+      const reject =
+        pending.request.options.find((option) => option.kind === "reject_once") ??
+        pending.request.options.find((option) => option.kind === "reject_always");
+      if (reject) {
+        this.#resolvePending(pending, reject, "timeout", "timeout");
+      } else {
+        this.#clearPendingOne(pending.requestId, "timeout", "timeout");
+      }
+    }, this.#permissionTimeoutMs);
+    timer.unref?.();
+    pending.timer = timer;
+  }
+
+  /** Recompute the blocked status from every pending input, not just one. */
+  #refreshInputStatus(): void {
+    if (this.isTerminal) return;
+    this.#status = this.#awaitingInput
+      ? "waiting_permission"
+      : this.#active
+        ? "busy"
+        : "idle";
   }
 
   /** Changes the operator-facing label. The id and env identity do not change. */
@@ -1223,36 +1245,6 @@ export class Session {
     }
     this.#name = name;
     this.#emit("session.renamed", { name, by });
-    this.#changed();
-  }
-
-  /** Reads or writes the live HLAO permission policy. */
-  setPolicy(policy: PermissionPolicy, by = "operator"): void {
-    if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
-    }
-    this.#changePolicy(policy, by);
-
-    // A policy change is also the answer to an existing request. `ask` leaves
-    // it parked; `allow`/`deny` answer it when the provider offered a matching
-    // option.
-    const pending = this.#pending;
-    if (!pending || policy === "ask") return;
-    if (policy === "allow") {
-      const allow = pickAllowOption(pending.request.options);
-      if (allow) this.#resolvePending(allow, by);
-      return;
-    }
-    const reject =
-      pending.request.options.find((option) => option.kind === "reject_once") ??
-      pending.request.options.find((option) => option.kind === "reject_always");
-    if (reject) this.#resolvePending(reject, by);
-  }
-
-  #changePolicy(policy: PermissionPolicy, by: string): void {
-    if (this.#permissionPolicy === policy) return;
-    this.#permissionPolicy = policy;
-    this.#emit("policy.changed", { permissionPolicy: policy, by });
     this.#changed();
   }
 
@@ -1440,23 +1432,7 @@ export class Session {
     if (signal.aborted) {
       return Promise.resolve(cancelledResponse());
     }
-    // A request is live work even when no prompt turn owns it. Claude Code can
-    // run an autonomous cycle after a turn's result (a background-task
-    // notification, a peer message), and its tool calls still ask for
-    // permission; answering `cancelled` there aborts the tool call with
-    // "Tool use aborted" without ever surfacing the request. So answer it like
-    // any other request. Its events carry `turn: null` and, under `ask`, the
-    // session parks in `waiting_permission` until someone answers.
-    if (this.#pending) {
-      this.#emit("error", {
-        message: "a second permission request arrived while one was pending",
-        requestId,
-      });
-      return Promise.resolve(cancelledResponse());
-    }
-
-    const auto = this.#permissionPolicy !== "ask";
-    this.#emit("permission.requested", {
+    const data = {
       requestId,
       toolCallId: params.toolCall.toolCallId,
       title: params.toolCall.title ?? "",
@@ -1466,57 +1442,59 @@ export class Session {
         name: option.name,
         kind: option.kind,
       })),
-      policy: this.#permissionPolicy,
-      auto,
       // True when the request belongs to work no prompt turn owns, such as an
-      // autonomous cycle. The request is still answered; the flag is diagnostic.
+      // autonomous cycle. It follows the same queue and timeout rules.
       outsideTurn: this.#active === null,
-    });
+    };
 
-    const policyChoice = chooseByPolicy(params.options, this.#permissionPolicy);
-    if (policyChoice === "cancelled") {
+    // A request is live work even when no prompt turn owns it. Claude Code can
+    // run an autonomous cycle after a turn's result (a background-task
+    // notification, a peer message), and its tool calls still ask for
+    // permission; answering `cancelled` there aborts the tool call without
+    // ever surfacing the request.
+    if (this.#pending.size >= this.#maxPendingPermissions) {
+      // Fail closed, visibly. This request is not enqueued, so it has no
+      // queuePosition; the provider is told the tool call was cancelled.
+      this.#emit("permission.requested", data);
       this.#emit("permission.resolved", {
         requestId,
         optionId: null,
-        by: `policy:${this.#permissionPolicy}`,
-        note: `no ${this.#permissionPolicy} option was offered; cancelled`,
+        by: "system",
+        reason: "queue_full",
       });
       return Promise.resolve(cancelledResponse());
-    }
-    if (policyChoice) {
-      this.#emit("permission.resolved", {
-        requestId,
-        optionId: policyChoice.optionId,
-        optionName: policyChoice.name,
-        by: `policy:${this.#permissionPolicy}`,
-      });
-      return Promise.resolve(selectedResponse(policyChoice.optionId));
     }
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       // The provider withdraws a request it no longer needs, for example when
       // it abandons the tool call. The ACP connection aborts this signal on
-      // `$/cancel_request`; clearing the pending state keeps an operator from
-      // answering a request that no longer exists.
+      // `$/cancel_request`; clearing one entry keeps the rest answerable.
       const onWithdraw = (): void => {
-        if (this.#pending?.requestId !== requestId) return;
-        this.#clearPending("withdrawn", "agent");
+        if (this.#pending.get(requestId) !== pending) return;
+        this.#clearPendingOne(requestId, "withdrawn", "agent");
       };
       const settle = (response: RequestPermissionResponse): void => {
         signal.removeEventListener("abort", onWithdraw);
         resolve(response);
       };
-      this.#pending = {
+      const pending: PendingPermission = {
         requestId,
         requestedAt: nowIso(),
         request: params,
         resolve: settle,
       };
+      this.#pending.set(requestId, pending);
       signal.addEventListener("abort", onWithdraw, { once: true });
       if (signal.aborted) {
-        this.#clearPending("withdrawn", "agent");
+        this.#clearPendingOne(requestId, "withdrawn", "agent");
         return;
       }
+      this.#emit("permission.requested", {
+        ...data,
+        // 1-based FIFO position. The first request is position 1.
+        queuePosition: this.#pending.size,
+      });
+      this.#armPermissionTimeout(pending);
       this.#status = "waiting_permission";
       this.#changed();
     });
@@ -1542,9 +1520,9 @@ export class Session {
       });
       return Promise.resolve(cancelledElicitation());
     }
-    // Elicitation is user input, not a permission: no policy may answer it.
-    // Even `allow` would have to invent form content, so the request always
-    // parks until an operator responds, declines, or cancels.
+    // Elicitation is user input, not a permission: the operator-only permit
+    // relay never answers it, because an option kind cannot invent form
+    // content. The request parks until someone responds, declines, or cancels.
     this.#emit("elicitation.requested", {
       requestId,
       sessionId:
@@ -1618,13 +1596,7 @@ export class Session {
       );
     }
     this.#pendingElicitation = null;
-    if (!this.isTerminal) {
-      this.#status = this.#pending
-        ? "waiting_permission"
-        : this.#active
-          ? "busy"
-          : "idle";
-    }
+    this.#refreshInputStatus();
     this.#emit("elicitation.resolved", {
       requestId: pending.requestId,
       action,
@@ -1640,13 +1612,7 @@ export class Session {
     const pending = this.#pendingElicitation;
     if (!pending) return;
     this.#pendingElicitation = null;
-    if (this.#status === "waiting_permission" && !this.isTerminal) {
-      this.#status = this.#pending
-        ? "waiting_permission"
-        : this.#active
-          ? "busy"
-          : "idle";
-    }
+    if (this.#status === "waiting_permission") this.#refreshInputStatus();
     this.#emit("elicitation.resolved", {
       requestId: pending.requestId,
       action: "cancel",
@@ -1657,17 +1623,21 @@ export class Session {
     this.#changed();
   }
 
+  /** Clear every pending permission (cancel, close, turn end, failure). */
   #clearPending(reason: string, by = "system"): void {
-    const pending = this.#pending;
-    if (!pending) return;
-    this.#pending = null;
-    if (this.#status === "waiting_permission" && !this.isTerminal) {
-      this.#status = this.#pendingElicitation
-        ? "waiting_permission"
-        : this.#active
-          ? "busy"
-          : "idle";
+    if (this.#pending.size === 0) return;
+    for (const requestId of [...this.#pending.keys()]) {
+      this.#clearPendingOne(requestId, reason, by);
     }
+  }
+
+  /** Clear one request without touching its siblings. */
+  #clearPendingOne(requestId: string, reason: string, by = "system"): void {
+    const pending = this.#pending.get(requestId);
+    if (!pending) return;
+    this.#pending.delete(requestId);
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
+    if (this.#status === "waiting_permission") this.#refreshInputStatus();
     this.#emit("permission.resolved", {
       requestId: pending.requestId,
       optionId: null,
@@ -1692,7 +1662,6 @@ export class Session {
       parentId: this.parentId,
       rootId: this.rootId,
       depth: this.depth,
-      permissionPolicy: this.#permissionPolicy,
       ...(this.#forkSessionId !== null
         ? { forkedFrom: this.#forkSessionId }
         : {}),

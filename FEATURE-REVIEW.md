@@ -1,11 +1,11 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-21 after milestone 0.13. The additive 0.10 review was merged here and
+**Updated:** 2026-10-21 after milestone 0.15. The additive 0.10 review was merged here and
 deleted after its resolved findings were removed.
 **Scope:** unresolved findings only. This is the long-standing ledger. The 0.1–0.4 review, the
 0.5 review, and the 0.10 review were merged here; resolved items were removed. Shipped fixes
-are described in `docs/milestones/0.2.md` through `docs/milestones/0.13.md` and ADR 0005–0012.
+are described in `docs/milestones/0.2.md` through `docs/milestones/0.15.md` and ADR 0005–0013.
 
 The substrate is unchanged: five primitives, a per-user supervisor, a bounded cursor-addressed
 event log, identity at spawn, and one-shot waits. The gaps below are affordances around those
@@ -40,8 +40,14 @@ provenance, and the dashboard client update. Those entries were removed; the wir
 read filters (R-17), whole-instance export (R-18), width-aware and projectable list output
 (R-21, R-22), usage aggregation (R-23), readable cross-session search (R-25), and the
 first-prompt fallback (R-29). Those entries were removed; the wire is now 2.8. The design
-also raised new concerns (RF-01 through RF-08 below), which remain open. R-14's mechanism and
-every other open finding are below.
+also raised new concerns (RF-01 through RF-08 below), which remain open.
+
+0.15 resolved the permission model (N-10) and R-14's mechanism: the provider owns the policy,
+every provider ask is relayed through a bounded FIFO, and `permissionTimeoutMs` fails closed.
+It also closed N-08's normal control paths (`permit`, `mode` set, and a spawn `mode` are
+operator-only); the containment gap itself (a scoped credential or separate instance) remains
+below. Those entries were removed or narrowed; the wire is now 3.0. Every other open finding
+is below.
 
 ---
 
@@ -56,79 +62,44 @@ covers the orphaned-adapter hazard that remains after a hard kill.
 
 ### Agent trust, identity, and reliability
 
-#### N-08. Control is advisory, not enforced
+#### N-08. Containment is still advisory
 
-Caller identity is self-declared from `HLAO_SESSION_ID`; a spawned agent can unset it or read
-`<HLAO_HOME>/supervisor.json` and call the socket as the operator (`reload`, `shutdown`,
-`by: "operator"`). A session with `permissionPolicy: ask` can run `hlao policy --self allow` (or
-re-policy a sibling) and remove the gate. 0.8 recorded `createdBy`, and 0.10 made the human
+0.15 closed the normal control paths: `sessions.permit`, `sessions.set_mode`, and a spawn
+`mode` from a caller with `HLAO_SESSION_ID` are refused with `operator_only`, and the `policy`
+command is gone. But caller identity is still self-declared; a spawned agent can unset
+`HLAO_SESSION_ID`, or read `<HLAO_HOME>/supervisor.json` and call the socket as the operator
+(`reload`, `shutdown`, `by: "operator"`, `permit`). 0.8 recorded `createdBy` and 0.10 made the
 transcript attribute actors truthfully (R-01), but those are provenance and audit, not
 authority. There is still no scoped client credential. A stale-caller spawn still becomes an
 unrelated root without a warning.
 
 **Why it matters.** The target user drives agents over build logs, repositories, and web
 content; those agents read untrusted material. The docs say the token is not an ACL, but the
-CLI's `operator_only` errors and the phrase "ask is the gated mode" imply more than the model
-delivers.
+CLI's `operator_only` errors imply more than the model delivers.
 
-**Fix shape.** Document the trust model beside `--permission ask` and `operator_only`; decide
-whether a stale-caller spawn should warn. For containment, offer a scoped client token/shim
-(no raw operator methods, no arbitrary policy changes) or require a separate instance for
-untrusted agents. The instance token is the real authority; say so where the controls are
+**Fix shape.** Offer a scoped client token/shim (no raw operator methods, no arbitrary mode
+changes) or require a separate instance for untrusted agents. A stale-caller spawn should
+warn. The instance token is the real authority; keep saying so where the controls are
 described.
 
-**Effort:** S for docs/warning; L for scoped-client enforcement.
+**Effort:** S for the stale-caller warning; L for scoped-client enforcement.
 
 ### Permissions and resource bounds
 
-#### N-10. Permission model: one tri-state and one pending request
-
-- **No per-tool rules.** `permissionPolicy` is a single `allow|ask|deny` for the whole session.
-  Users expect "allow Read/Grep, ask on Bash, deny destructive commands". Provider modes can
-  approximate some of this, but they differ per backend and are opaque to HLAO.
-- **One pending request only.** A second concurrent permission request is auto-cancelled with an
-  `error` event. Parallel tool calls can therefore have one request silently rejected; the
-  session view and the wire cannot represent a queue.
-- **No deny-always.** The ACP option kind `reject_always` exists, but `permit --always` is only
-  valid with `--allow`. This is the former P2-10 item.
-
-**Fix shape.** Add `permissionRules` matching tool kind/title (and, where the provider exposes
-it, command patterns) to a policy; support a bounded pending-request queue with per-request ids
-and `permit --request <id>`; allow `--deny --always` to prefer `reject_always`. Keep provider
-modes as the lower layer.
-
-**Effort:** M/L.
-
 #### N-11. No resource safety bounds or spend budget
 
-The event log is bounded; the things an agent can create are not. There is no `maxSessions`, no
-`maxQueuedPrompts`/`maxQueuedBytes`, and no per-session or per-instance budget. Usage is
-retrospective: `SessionView.usage` and `list --usage` show the latest snapshot, but there is no
-`wait --until usage` for an operator loop to stop at a cost threshold.
+The event log and the permission queue are bounded; the things an agent can create are not.
+There is no `maxSessions` and no `maxQueuedBytes`. The prompt queue has a hard-coded 1,000
+cap (`MAX_QUEUED_PROMPTS` in `src/session.ts`) that is not configurable. There is no
+per-session or per-instance budget. Usage is retrospective: `SessionView.usage` and
+`list --usage` show the latest snapshot, but there is no `wait --until usage` for an
+operator loop to stop at a cost threshold.
 
-**Fix shape.** Add safety bounds with explicit `bad_request` messages: `maxSessions`,
-`maxQueuedPrompts`, `maxQueuedBytes`. Add a budget as an observation/stop condition over the
-existing `usage` view, surfaced in `list --usage` and documented as a caller-owned loop. A
-budget that stops a job is not a scheduler; the stop condition stays with the caller.
-
-**Effort:** S/M.
-
-#### R-14. A parked permission can hang forever `[from the 0.10 review]`
-
-0.10 removed the false "a request cannot silently hang" guarantee and documented that `ask`
-parks until an operator or another session answers. The mechanism is still missing: there is no
-`permissionTimeoutMs`, no auto-deny/auto-cancel, and no periodic notice. A session with policy
-`ask` holds its adapter and turn budget until someone answers; `wait --until permission` only
-observes.
-
-**Why it matters.** Long unattended runs are the target use case. The operator may return hours
-later to a turn that never started.
-
-**Fix shape.** Product decision: add `permissionTimeoutMs` (default 0 = park) with explicit
-auto-deny/auto-cancel behavior and a recorded event, or at minimum emit a periodic notice and
-document that `ask` requires an operator. If timers are excluded by the thesis, make the
-caller-owned `wait --until permission` notification loop the documented pattern. `permit
---all-pending` helps, but it needs an operator.
+**Fix shape.** Make the existing prompt-queue cap configurable and add safety bounds with
+explicit `bad_request` messages: `maxSessions`, `maxQueuedPrompts`, `maxQueuedBytes`. Add a
+budget as an observation/stop condition over the existing `usage` view, surfaced in
+`list --usage` and documented as a caller-owned loop. A budget that stops a job is not a
+scheduler; the stop condition stays with the caller.
 
 **Effort:** S/M.
 
@@ -415,9 +386,9 @@ The remaining work is grouped so each milestone has one design decision:
    R-21, R-22, R-23, R-25, and R-29 (watch, time/regex/context search, whole-instance export,
    output scaling, usage aggregation, find output, and the first-prompt fallback; wire 2.8).
    See `docs/milestones/0.13.md` and ADR 0012.
-7. **Safety and policy.** N-08 enforcement, N-10, N-11, R-14's mechanism, and RF-01 (orphan
-   safety). This is the next milestone; each item changes authority or a default and needs a
-   product decision.
+7. **Provider-owned permissions.** Shipped as 0.15; resolved N-10 and R-14's mechanism,
+   removed the duplicate policy layer, and made control operator-only (wire 3.0). The
+   remaining safety work is N-08's containment and N-11's general bounds.
 8. **Provider continuity hardening.** RF-02 through RF-08: replay retention, live-session
    history, provider enumeration, cwd validation, fork-without-load, fork navigation, and
    real-adapter fidelity. Each is a recovery-semantics decision, not a new primitive.
@@ -439,10 +410,11 @@ the answer is recorded as an event.
 
 ## Note
 
-Everything above remains outside the implemented 0.13 surface. The implementation and its tests
+Everything above remains outside the implemented 0.15 surface. The implementation and its tests
 are described in `README.md`, `contracts/`, and `docs/milestones/0.2.md` through
-`docs/milestones/0.13.md`. 0.13 resolved the fleet-observation set and recorded its design
-decision in ADR 0012; the supervisor still owns no timer, index, or aggregate store. 0.12
-resolved provider session continuity (P0-14 and R-19), then recorded the hazards it deferred as
-RF-01 through RF-08. 0.11 resolved provider-native state (R-10..R-13) and merged the 0.10
-review into this ledger.
+`docs/milestones/0.15.md`. 0.15 removed the HLAO policy layer and recorded the design in ADR
+0013 (superseding the policy mechanism in ADR 0004); the supervisor still owns no recurring
+timer beyond the one-shot permission deadline, no index, and no aggregate store. 0.13 resolved
+the fleet-observation set (ADR 0012). 0.12 resolved provider session continuity (P0-14 and
+R-19), then recorded the hazards it deferred as RF-01 through RF-08. 0.11 resolved
+provider-native state (R-10..R-13) and merged the 0.10 review into this ledger.

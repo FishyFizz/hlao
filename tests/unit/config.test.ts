@@ -24,7 +24,8 @@ test("defaults load when no config exists", () => {
   try {
     const { config, error } = loadConfig(home);
     assert.equal(error, null);
-    assert.equal(config.permissionPolicy, "allow");
+    assert.equal(config.permissionTimeoutMs, 30 * 60_000);
+    assert.equal(config.maxPendingPermissions, 16);
     assert.equal(config.waitTimeoutMs, 30 * 60_000);
     assert.ok(config.backends.claude);
     assert.ok(config.backends.codex);
@@ -39,13 +40,13 @@ test("user backends override built-ins and carry their source", () => {
     writeFileSync(
       join(home, "config.json"),
       JSON.stringify({
-        permissionPolicy: "allow",
         backends: {
           fake: {
             command: "node",
             args: ["agent.js"],
             env: { FAKE_MODE: "echo" },
             description: "test",
+            defaultMode: "auto",
           },
           claude: { command: "node", args: ["other.js"] },
         },
@@ -53,7 +54,7 @@ test("user backends override built-ins and carry their source", () => {
     );
     const { config, error } = loadConfig(home);
     assert.equal(error, null);
-    assert.equal(config.permissionPolicy, "allow");
+    assert.equal(config.backends.fake?.defaultMode, "auto");
     assert.equal(config.backends.fake?.source, "user");
     assert.deepEqual(config.backends.fake?.args, ["agent.js"]);
     assert.equal(
@@ -72,14 +73,14 @@ test("an invalid config applies none of its values", () => {
   try {
     writeFileSync(
       join(home, "config.json"),
-      JSON.stringify({ permissionPolicy: "allow", waitTimeoutMs: "nope" }),
+      JSON.stringify({ waitTimeoutMs: "nope" }),
     );
     const { config, error } = loadConfig(home);
     assert.ok(error instanceof HlaoError);
     assert.equal(error.code, "config_invalid");
     assert.match(error.message, /config\.json/);
     // The valid-looking field must not leak through from an invalid file.
-    assert.equal(config.permissionPolicy, "allow");
+    assert.equal(config.waitTimeoutMs, 30 * 60_000);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -112,6 +113,57 @@ test("unknown config keys are rejected rather than ignored", () => {
     const { error } = loadConfig(home);
     assert.ok(error instanceof HlaoError);
     assert.equal(error.code, "config_invalid");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("permissionPolicy names defaultMode in its migration error", () => {
+  const home = tempHome();
+  try {
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ permissionPolicy: "allow" }),
+    );
+    const { error } = loadConfig(home);
+    assert.ok(error instanceof HlaoError);
+    assert.equal(error.code, "config_invalid");
+    assert.match(error.message, /permissionPolicy/);
+    assert.match(error.message, /defaultMode/);
+    assert.doesNotMatch(error.message, /unknown field/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("permission bounds default, accept 0 park, and validate their ranges", () => {
+  const home = tempHome();
+  try {
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ permissionTimeoutMs: 0, maxPendingPermissions: 1 }),
+    );
+    const loaded = loadConfig(home);
+    assert.equal(loaded.error, null);
+    assert.equal(loaded.config.permissionTimeoutMs, 0);
+    assert.equal(loaded.config.maxPendingPermissions, 1);
+
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ maxPendingPermissions: 0 }),
+    );
+    const invalid = loadConfig(home);
+    assert.ok(invalid.error instanceof HlaoError);
+    assert.equal(invalid.error.code, "config_invalid");
+    assert.match(invalid.error.message, /maxPendingPermissions/);
+
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ backends: { fake: { command: "node", defaultMode: "" } } }),
+    );
+    const emptyMode = loadConfig(home);
+    assert.ok(emptyMode.error instanceof HlaoError);
+    assert.match(emptyMode.error.message, /defaultMode/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

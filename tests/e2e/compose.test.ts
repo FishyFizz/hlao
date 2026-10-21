@@ -222,8 +222,6 @@ test("permit --all-pending answers every parked request", async (t) => {
     "ask one",
     "--env",
     "FAKE_MODE=permission",
-    "--permission",
-    "ask",
   ]);
   await spawn(harness, [
     "spawn",
@@ -231,8 +229,6 @@ test("permit --all-pending answers every parked request", async (t) => {
     "ask two",
     "--env",
     "FAKE_MODE=permission",
-    "--permission",
-    "ask",
   ]);
   await waitForPending(harness, 2);
 
@@ -248,7 +244,7 @@ test("permit --all-pending answers every parked request", async (t) => {
   assert.deepEqual(pending.value.sessions, []);
 });
 
-test("policy selectors apply to a whole tree", async (t) => {
+test("mode selectors apply to a whole tree", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
@@ -261,9 +257,9 @@ test("policy selectors apply to a whole tree", async (t) => {
 
   const changed = await harness.json<{
     count: number;
-    sessions: { id: string; permissionPolicy: string }[];
-  }>(["policy", "--root", parent, "ask"]);
-  assert.equal(changed.code, 0);
+    sessions: { id: string; modes: { currentModeId: string } | null }[];
+  }>(["mode", "--root", parent, "auto"]);
+  assert.equal(changed.code, 0, JSON.stringify(changed.value));
   assert.equal(changed.value.count, 2);
   assert.deepEqual(
     new Set(changed.value.sessions.map((session) => session.id)),
@@ -271,7 +267,7 @@ test("policy selectors apply to a whole tree", async (t) => {
   );
   assert.ok(
     changed.value.sessions.every(
-      (session) => session.permissionPolicy === "ask",
+      (session) => session.modes?.currentModeId === "auto",
     ),
   );
 });

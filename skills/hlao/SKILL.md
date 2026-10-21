@@ -42,7 +42,7 @@ hlao send --self "..."          # queue your next turn (do not wait inside this 
 hlao send <id> "..."            # prompt another session; steers if it is mid-turn
 hlao wait --until permission --timeout 10m
 hlao queue                      # what is queued behind the active turn
-hlao permit <id> --allow        # answer a pending permission request
+hlao permit <id> --allow        # operator only; an agent reports the blocker
 hlao elicit <id> --accept k=v   # answer a provider question (--decline/--cancel)
 hlao get <id>                   # state only, no events
 hlao find "text"                # search other sessions' events
@@ -113,15 +113,20 @@ provider is waiting for an answer; `exit` means the session ended.
 
 ## Permission and trust
 
-- A pending request is visible in `read` and in `list --pending`. The operator, or another
-  session (normally the parent), answers it with `hlao permit <id> --allow`, `--deny`, or
-  `--option <id>`. A provider question is separate and never auto-answered: `hlao elicit <id>`
-  shows it, and `--accept key=value`, `--decline`, or `--cancel` answers it. A session parked
-  on either gate cannot run a command to answer itself; leave a clear blocker and let the
-  operator or parent answer.
-- The operator owns the permission gate. Do not change your own or another session's policy to
-  remove it; report the blocker instead.
-- The instance token is the real authority. `ask` makes a request visible; it is not
-  containment. Cooperate with the gate rather than working around it.
+- The provider's mode is the permission policy. There is no HLAO `allow|ask|deny` setting and
+  no auto-answer: every provider ask is relayed to the operator.
+- A pending request is visible in `read` and in `list --pending` as
+  `pendingPermissions` (a FIFO queue; parallel asks are each answerable). **Answering is
+  operator-only.** `hlao permit` and `hlao mode <id> <mode>` from a shell with
+  `HLAO_SESSION_ID` are refused with `operator_only`. Do not try to answer your own or a
+  child's request, and do not change a mode: report the blocker to `$HLAO_PARENT_ID` or the
+  operator and stop.
+- A provider question is separate and also never auto-answered: `hlao elicit <id>` shows it,
+  and `--accept key=value`, `--decline`, or `--cancel` answers it. A session parked on either
+  gate cannot run a command to answer itself; leave a clear blocker.
+- The operator may have set a per-backend `defaultMode`; an agent-spawned child inherits it.
+  An agent cannot pass `--mode`.
+- This control is advisory, not an ACL. The instance token is the real authority. Cooperate
+  with the gate rather than working around it; containment needs a separate instance.
 
 If a command is unclear, run `hlao help <command>`; the CLI is the source of truth.

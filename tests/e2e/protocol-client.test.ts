@@ -20,10 +20,22 @@ test("read filters, jsonl, and backward paging work through the CLI", async (t) 
     "ask first",
     "--env",
     "FAKE_MODE=permission",
-    "--wait",
   ]);
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;
+
+  // No policy answers the ask; the operator does, then the turn finishes.
+  const waiting = await harness.json<WaitValue>([
+    "wait",
+    id,
+    "--until",
+    "permission",
+    "--timeout",
+    "10s",
+  ]);
+  assert.equal(waiting.code, 0);
+  await harness.json(["permit", id, "--allow"]);
+  await harness.json<WaitValue>(["wait", id, "--until", "idle", "--timeout", "10s"]);
 
   const toolCalls = await harness.json<ReadValue>([
     "read",

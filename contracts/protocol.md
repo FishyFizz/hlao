@@ -264,7 +264,8 @@ The token is the instance boundary.
   `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
   `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
   `session.messages`, `session.elicitation`, `spawn.resume`, `spawn.fork`,
-  `read.time`, `read.regex`, `read.context`, `session.firstPrompt`, `send.steering`.
+  `read.time`, `read.regex`, `read.context`, `session.firstPrompt`, `send.steering`,
+  `session.pendingPermissions`, `permit.request`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -306,6 +307,16 @@ The token is the instance boundary.
   gains optional `steered`, `SessionView` gains optional `steeringSupported`, and the
   `prompt.steered` event type marks the delivery. Capability: `send.steering`. A client that
   omits `steer` keeps the queued behavior.
+- **3.0** is a breaking change: HLAO no longer owns a permission policy. Removed:
+  `PermissionPolicy`, `SessionView.permissionPolicy`, `SessionView.pendingPermission`,
+  `SpawnParams.permissionPolicy`, `sessions.set_policy`, `policy.changed`,
+  `permission.requested.policy`/`auto`, and `PermitParams.always`. Added:
+  `SessionView.pendingPermissions` (FIFO), `PermitParams.requestId`,
+  `PermitResult.requestId`, `permission.requested.queuePosition`, and
+  `AgentView.defaultMode`. Capabilities: `session.pendingPermissions`, `permit.request`.
+  Every provider ask parks for the operator; `sessions.permit` and `sessions.set_mode` are
+  operator-only. There is no compatibility shim. A live supervisor of another major is
+  reported as `version_mismatch`, never replaced.
 
 ## Client model
 
@@ -347,10 +358,9 @@ Method index:
 | `sessions.wait` | `WaitParams` | `WaitResult` |
 | `sessions.cancel` | `{ sessionId, keepQueue? }` | `{ session, discarded }` |
 | `sessions.close` | `{ sessionId, force? }` | `{ session, killed, wasTerminal }` |
-| `sessions.permit` | `{ sessionId, optionId?, requestId?, always? }` | `{ session, requestId, optionId, by }` |
+| `sessions.permit` | `{ sessionId, optionId, requestId? }` | `{ session, requestId, optionId, by }` |
 | `sessions.respond_elicitation` | `{ sessionId, requestId?, action, content? }` | `{ session, requestId, action, by }` |
 | `sessions.set_mode` | `{ sessionId, modeId }` | `{ session }` |
-| `sessions.set_policy` | `{ sessionId, permissionPolicy }` | `{ session }` |
 | `sessions.set_config_option` | `{ sessionId, configId, value }` | `{ session }` |
 | `sessions.queue` | `{ sessionId }` | `{ session, active, queue }` |
 | `sessions.queue_drop` | `{ sessionId, position? \| messageId? }` | `{ session, dropped, discarded }` |
@@ -435,6 +445,7 @@ type AgentView = {
   configPath?: string;
   available: boolean;
   unavailableReason?: string;
+  defaultMode?: string;       // operator's per-backend spawn mode (3.0)
 };
 ```
 
@@ -450,11 +461,10 @@ Params:
   prompt?: string;               // optional first message
   wait?: boolean;                // wait for the first turn when prompt is present
   timeoutMs?: number;            // bound on that wait; defaults to sendWaitTimeoutMs
-  mode?: string;                 // provider mode to select before returning (sessions.set_mode)
+  mode?: string;                 // operator-only; effective before the backend defaultMode
   model?: string;                // value for the option whose category is "model"
   config?: Record<string, string | boolean>; // session config options applied before the prompt
   parentSessionId?: string;      // lineage; defaults to the caller's live session, else a root
-  permissionPolicy?: "ask" | "allow" | "deny"; // defaults to config
   env?: Record<string, string>;  // extra environment for the adapter
   skill?: boolean;               // include the HLAO skill pointer in the first prompt (default true)
   idempotencyKey?: string;       // reuse the session produced by an earlier spawn (2.3)
@@ -751,14 +761,34 @@ not make. Closed sessions remain readable for `config.retainClosedMs`.
 
 ### `sessions.permit`
 
-Params: `{ sessionId: string; optionId?: string; requestId?: string; always?: boolean }`.
+Params: `{ sessionId: string; optionId: string; requestId?: string }`.
 
 Result: `{ session: SessionView; requestId: string; optionId: string; by: "operator" }`.
 
-With no `optionId`, the first `allow_once`/`allow_always` option is chosen; with `always`,
-`allow_always` is preferred. With no `requestId`, the single pending request is used.
-`always: true` also sets the session's `permissionPolicy` to `allow` and appends a
-`policy.changed` event. Errors: `no_pending_permission`, `bad_option`.
+**Operator-only:** a request with `callerSessionId` is refused with `operator_only`. Answers
+one queued provider request with an option id the provider offered. The queue is FIFO; with
+more than one request pending, `requestId` is required and its absence is a `bad_request`
+that names the pending ids. An unknown `requestId` is `no_pending_permission` carrying the
+pending ids. A missing `optionId` fails boundary validation. Errors: `bad_option`,
+`no_pending_permission`, `operator_only`.
+
+The relay rules (3.0):
+
+- Every ACP permission request parks, including one that arrives outside a turn
+  (`outsideTurn: true`). There is no auto-answer.
+- `SessionView.pendingPermissions` is the queue in arrival order. `permission.requested`
+  carries `queuePosition` (1-based) for an enqueued request.
+- `maxPendingPermissions` (config, captured at spawn) bounds the queue. A request beyond the
+  bound is not enqueued: the provider is answered `cancelled` and
+  `permission.resolved { by: "system", reason: "queue_full", optionId: null }` is recorded.
+- `permissionTimeoutMs` (config, captured at spawn) is one absolute one-shot deadline per
+  request. On expiry the supervisor selects `reject_once`, then `reject_always`, else
+  cancels; it never selects an allow option, and records
+  `permission.resolved { by: "timeout", reason: "timeout", optionId }`.
+- Timers are cleared on answer, provider withdrawal, cancel, and close. A withdrawal clears
+  only its own request; cancel and close clear every request.
+- The session stays `waiting_permission` while any request remains. `wait --until
+  permission` and `list --pending` match any pending request.
 
 ### `sessions.respond_elicitation`
 
@@ -771,26 +801,21 @@ by: "operator" }`.
 Answers a provider question (ACP `elicitation/create`) exposed as
 `SessionView.pendingElicitation`. `accept` carries schema-shaped content; `decline` answers
 with no content; `cancel` withdraws the question and the provider aborts the tool call. An
-elicitation is user input, not a permission: the session's `permissionPolicy` never answers
+elicitation is user input, not a permission: the operator-only permit relay never answers
 it. Errors: `no_pending_elicitation` when nothing is pending or `requestId` does not match.
 
 ### `sessions.set_mode`
 
 Params: `{ sessionId: string; modeId: string }`. Result: `{ session: SessionView }`.
 
-Switches the provider's native session mode when the adapter advertises modes. The session
-view reports `modes: { currentModeId, availableModes }`. Errors: `bad_request` when the
-backend advertises no modes, `bad_option` when the mode is not in the advertised list, and
-`session_closed` for a terminal session.
-
-### `sessions.set_policy`
-
-Params: `{ sessionId: string; permissionPolicy: "ask" | "allow" | "deny" }`.
-Result: `{ session: SessionView }`.
-
-Changes the live HLAO permission policy without requiring a pending request. Emits
-`policy.changed` with the acting caller. It does not alter provider-native modes or config
-options.
+**Operator-only:** a request with `callerSessionId` is refused with `operator_only`; reads
+stay open through `sessions.get`. Switches the provider's native session mode when the
+adapter advertises modes. The mode is the permission policy; HLAO does not normalize mode
+names. The session view reports `modes: { currentModeId, availableModes }`. Errors:
+`bad_request` when the backend advertises no modes, `bad_option` when the mode is not in the
+advertised list, `operator_only`, and `session_closed` for a terminal session. `spawn` mode
+resolution is operator `--mode` → `BackendManifest.defaultMode` → the provider's default; an
+agent caller may not supply `mode`.
 
 ### `sessions.set_config_option`
 
@@ -944,7 +969,7 @@ type EventType =
   | "agent.message" | "agent.thought" | "user.message" | "session.message"
   | "tool.call" | "tool.update" | "plan" | "plan.update"
   | "permission.requested" | "permission.resolved"
-  | "elicitation.requested" | "elicitation.resolved" | "policy.changed"
+  | "elicitation.requested" | "elicitation.resolved"
   | "notice" | "usage" | "mode" | "config" | "commands" | "session.info"
   | "compaction" | "subagent" | "stderr" | "error" | "raw";
 ```
@@ -972,12 +997,16 @@ Actor fields are explicit:
 - `prompt.discarded` carries the original `from`, the acting `by`, `reason`, a bounded
   `textPreview`, and `messageId` (2.3).
 - `session.created` carries `createdBy`: `"operator"` or the requesting session id (2.3).
-- `permission.resolved`, `policy.changed`, `mode`, `config`, `cancel.requested`,
-  `session.renamed`, and `session.closed` carry `by`: the caller session id, `"operator"`,
-  `"policy:<name>"` for an automatic answer, or `"agent"` when the adapter itself changed a
-  mode/config option.
-- `permission.resolved` with `optionId: null` also carries `reason` (for example `"cancel"`,
-  `"close"`, `"turn-ended"`).
+- `permission.resolved`, `mode`, `config`, `cancel.requested`, `session.renamed`, and
+  `session.closed` carry `by`: the caller session id, `"operator"`, `"agent"` when the
+  provider withdrew a request or changed a mode/config option, `"system"` for a queue
+  bound, or `"timeout"` for the deadline.
+- `permission.requested` (3.0) carries `requestId`, `toolCallId`, `title`, `kind`,
+  `options`, and `outsideTurn`; `queuePosition` (1-based) is present when the request was
+  enqueued. `permission.resolved` carries `requestId`, `optionId` (nullable), optional
+  `optionName`, `by`, optional `reason`, and optional `note`. `by: "system"` with
+  `reason: "queue_full"` and `by: "timeout"` with `reason: "timeout"` are the bound
+  outcomes; a provider withdrawal is `by: "agent", reason: "withdrawn"`.
 
 Provider-native events (2.5) are structured; `raw` is not required to read them:
 
@@ -1030,14 +1059,13 @@ type SessionView = {
     title: string | null;        // bounded; renderers sanitize it
     at: string;
   } | null;
-  pendingPermission: PermissionView | null;
+  pendingPermissions: PermissionView[]; // FIFO; empty when none (3.0)
   pendingElicitation?: ElicitationView | null; // 2.6
   lastStopReason: StopReason | null;
   agentSessionId: string | null; // durable provider handle; pass as spawn.resumeSessionId (2.7)
   forkedFrom?: string | null;    // provider id this session was forked from (2.7)
   processId: number | null;
   exit: { code: number | null; signal: string | null } | null;
-  permissionPolicy: "ask" | "allow" | "deny";
   modes: {
     currentModeId: string;
     availableModes: { id: string; name: string; description?: string }[];

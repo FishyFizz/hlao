@@ -66,8 +66,6 @@ test("wait --until idle names a permission stop instead of claiming idle", async
     "gate",
     "--env",
     "FAKE_MODE=permission",
-    "--permission",
-    "ask",
   ]);
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;
@@ -181,7 +179,7 @@ test("get human output carries the state its help promises", async (t) => {
   assert.equal(human.code, 0);
   for (const label of [
     "state",
-    "policy",
+    "mode",
     "config",
     "usage",
     "lineage",

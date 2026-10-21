@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  FAKE_BACKEND,
   Harness,
   type DoctorValue,
   type JsonError,
@@ -10,7 +11,7 @@ test("invalid user config fails startup instead of creating an empty instance", 
   const harness = new Harness();
   t.after(() => harness.cleanup());
 
-  harness.writeConfig({ permissionPolicy: "allow", waitTime: 1000 });
+  harness.writeConfig({ waitTime: 1000 });
 
   const spawned = await harness.json<JsonError>(["spawn", "fake"]);
   assert.equal(spawned.code, 1);
@@ -51,4 +52,47 @@ test("invalid user config fails startup instead of creating an empty instance", 
       (check) => check.name === "backends" && check.status === "fail",
     ),
   );
+});
+
+test("permissionPolicy is rejected with a defaultMode migration message", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  harness.writeConfig({
+    permissionPolicy: "allow",
+    backends: { fake: FAKE_BACKEND },
+  });
+
+  const validate = await harness.json<JsonError>(["config", "validate"]);
+  assert.equal(validate.code, 1);
+  assert.equal(validate.value.error.code, "config_invalid");
+  assert.match(validate.value.error.message, /permissionPolicy/);
+  assert.match(validate.value.error.message, /defaultMode/);
+
+  const spawned = await harness.json<JsonError>(["spawn", "fake"]);
+  assert.equal(spawned.code, 1);
+  assert.equal(spawned.value.error.code, "config_invalid");
+  assert.match(spawned.value.error.message, /defaultMode/);
+});
+
+test("--permission and the policy command fail with migration messages", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const permission = await harness.json<JsonError>([
+    "spawn",
+    "fake",
+    "--permission",
+    "ask",
+  ]);
+  assert.equal(permission.code, 1);
+  assert.equal(permission.value.error.code, "bad_request");
+  assert.match(permission.value.error.message, /--permission was removed/);
+  assert.match(permission.value.error.message, /defaultMode/);
+
+  const policy = await harness.json<JsonError>(["policy", "any", "allow"]);
+  assert.equal(policy.code, 1);
+  assert.equal(policy.value.error.code, "bad_request");
+  assert.match(policy.value.error.message, /"hlao policy" was removed/);
+  assert.match(policy.value.error.message, /hlao mode/);
 });

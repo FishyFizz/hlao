@@ -91,7 +91,7 @@ test("the JSON envelope covers mutations and errors", async (t) => {
     { args: ["read", id], command: "read" },
     { args: ["queue", id], command: "queue" },
     { args: ["rename", id, "renamed"], command: "rename" },
-    { args: ["policy", id, "ask"], command: "policy" },
+    { args: ["mode", id, "auto"], command: "mode" },
     { args: ["find", "hello"], command: "find" },
     { args: ["cancel", id], command: "cancel" },
     { args: ["close", id], command: "close" },

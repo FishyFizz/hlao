@@ -1,6 +1,10 @@
 # ADR 0004 — Permission requests are observable orchestration state
 
-**Status:** accepted and revised, 2026-10-19.
+**Status:** accepted and revised, 2026-10-19. **Superseded in part by ADR 0013
+(2026-10-21):** HLAO no longer owns a permission policy; the provider mode is the policy
+layer and every request is relayed to the operator. The observability rule and the
+pending-request state stand; the `allow|ask|deny` policy and the one-request limit below do
+not.
 
 ## Context
 

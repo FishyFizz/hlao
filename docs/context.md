@@ -7,8 +7,8 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.14.0, built 2026-10-21 on `dev`
-  (mid-turn steering for inter-agent messaging; protocol 2.9 additive).
+- **Version:** 0.15.0, built 2026-10-21 on `dev`
+  (provider-owned permissions and the operator relay; protocol 3.0 breaking).
 - **Status:** the primitive surface, supervisor, CLI, tests, the four acceptance
   assemblies, and the dashboard client are implemented and green. The socket is a public
   client contract: the bundled CLI, the dashboard, and an MCP server are interchangeable
@@ -20,22 +20,25 @@ surfaces. This file is the map between them and the code.
   not supervisor state (ADR 0012). An agent's send to a busy peer is injected into the
   running turn when the adapter advertises ACP steering; otherwise it queues. The
   supervisor remains turn-serial: steering is a provider request, not a second local turn.
-- **Verification:** `npm test` runs 244 tests: 242 pass, 2 skipped (POSIX-only process-group
+  HLAO owns no permission policy (ADR 0013): the provider mode is the coarse policy, every
+  provider ask is relayed to the operator through a bounded FIFO, and a one-shot timeout
+  fails closed. `permit`, `mode` set, and a spawn `mode` are operator-only.
+- **Verification:** `npm test` runs 262 tests: 260 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
   ACP agent, including the acceptance assemblies and a raw-NDJSON conformance test that never
-  invokes the CLI. The dashboard typechecks, passes 24 tests, and builds.
-- **Next:** safety and policy are the next ledger track (N-08 enforcement, N-10, N-11,
-  R-14's mechanism, RF-01); provider continuity hardening follows. The dashboard
+  invokes the CLI. The dashboard typechecks, passes 24 tests, and builds against wire 3.0.
+- **Next:** N-08 containment (a scoped credential or separate instance), N-11's general
+  resource bounds, and RF-01 provider continuity hardening remain. The dashboard
   wire-readiness assessment is `docs/protocol-stability.md`.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through
   `wait --until permission`, resumed after `hlao permit`, and — from inside its own shell —
   ran `hlao whoami` and `hlao list` using the injected `HLAO_CLI`/`HLAO_HOME`, seeing itself
   as `role: session`. This is the end-to-end proof that identity reaches a real leaf.
-  The same run exposed a default-policy defect: the adapter's Manual mode asks before every
-  Bash call, so `ask` as the default parked the agent on each tool. The default is now
-  `allow`, `ask` is opt-in, `permit --always` removes the gate from a live session, and
-  provider modes are exposed through `--mode` / `hlao mode`.
+  The same run exposed the defect that led to 0.15: the adapter's Manual mode asks before
+  every Bash call, and an HLAO `allow` default only hid the duplication. 0.15 removes the
+  second policy: the provider mode (per-backend `defaultMode`, operator `--mode`) is the
+  coarse policy, and every ask is relayed to the operator through `hlao permit`.
 - **Codex:** the adapter starts and reaches its provider; the local account's provider
   returned `403 GROUP_NOT_ALLOWED`, so no successful Codex turn is claimed. That is provider
   configuration, not an HLAO failure.
@@ -121,8 +124,9 @@ hlao down
   `spawn --resume` reopens it with ACP `session/load`, and `spawn --fork` copies it with
   `session/fork`: ADR 0011.
 - Identity generated before process start; ACP ids internal: ADR 0003.
-- Permission requests are orchestration state; the default policy is `allow`, with `ask`
-  opt-in, `permit --always` for a live session, and provider modes exposed: ADR 0004.
+- Permission requests are orchestration state; the provider owns the policy, every ask is
+  relayed to the operator, and control is operator-only: ADR 0013 (superseding the policy
+  mechanism in ADR 0004).
 - One serialized turn; cancel clears the queue: ADR 0005.
 
 ## Deliberately absent

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { basename, delimiter, dirname, extname, isAbsolute, join } from "node:path";
 import { HlaoError, describeError } from "./errors.js";
 import { configPath, projectBackendsPath } from "./paths.js";
-import type { AgentView, PermissionPolicy } from "./protocol.js";
+import type { AgentView } from "./protocol.js";
 
 const require = createRequire(import.meta.url);
 
@@ -19,13 +19,16 @@ export interface BackendManifest {
   configPath?: string;
   available: boolean;
   unavailableReason?: string;
+  /** The mode a spawn uses when the operator supplies none (3.0). */
+  defaultMode?: string;
 }
 
 export interface HlaoConfig {
-  permissionPolicy: PermissionPolicy;
   waitTimeoutMs: number;
   sendWaitTimeoutMs: number;
   startupTimeoutMs: number;
+  permissionTimeoutMs: number;
+  maxPendingPermissions: number;
   maxEventsPerSession: number;
   maxEventLogBytes: number;
   maxEventBytes: number;
@@ -39,10 +42,11 @@ export interface ConfigLoadResult {
 }
 
 const USER_KEYS = [
-  "permissionPolicy",
   "waitTimeoutMs",
   "sendWaitTimeoutMs",
   "startupTimeoutMs",
+  "permissionTimeoutMs",
+  "maxPendingPermissions",
   "maxEventsPerSession",
   "maxEventLogBytes",
   "maxEventBytes",
@@ -51,17 +55,17 @@ const USER_KEYS = [
 ] as const;
 
 const PROJECT_KEYS = ["backends"] as const;
-const BACKEND_KEYS = ["command", "args", "env", "description"] as const;
+const BACKEND_KEYS = ["command", "args", "env", "description", "defaultMode"] as const;
 
 export function defaults(): HlaoConfig {
   return {
-    // A single operator driving their own work: the provider's own permission
-    // modes still apply, and asking on every tool call makes an agent hang.
-    // Use "ask" for a gated session or set a config file value.
-    permissionPolicy: "allow",
     waitTimeoutMs: 30 * 60_000,
     sendWaitTimeoutMs: 30 * 60_000,
     startupTimeoutMs: 120_000,
+    // A provider ask parks until the operator answers; fail closed after 30m.
+    // 0 parks forever and is the documented unattended-diagnosis escape hatch.
+    permissionTimeoutMs: 30 * 60_000,
+    maxPendingPermissions: 16,
     maxEventsPerSession: 5_000,
     maxEventLogBytes: 16 * 1024 * 1024,
     maxEventBytes: 256 * 1024,
@@ -77,18 +81,19 @@ export function loadConfig(home: string): ConfigLoadResult {
   try {
     const raw = readJson(file);
     const object = asObject(raw, "config");
+    // A removed key gets the migration message, not the generic unknown-key
+    // error: it is the one config change every 0.14 operator must make.
+    if (object.permissionPolicy !== undefined) {
+      throw new HlaoError(
+        "config_invalid",
+        "config.permissionPolicy was removed in 0.15 (protocol 3.0); the provider mode is the permission policy now. Remove it and set backends.<name>.defaultMode (for example \"auto\"), or pass --mode from an operator shell. Pending requests are answered with \"hlao permit\".",
+      );
+    }
     checkKeys(object, USER_KEYS, "config");
 
     // Build and validate into a fresh object; commit only if every field passes.
-    // A partly-applied config (especially permissionPolicy) is worse than none.
+    // A partly-applied config is worse than none.
     const next = defaults();
-
-    const policy = optionalEnum(object, "permissionPolicy", "config", [
-      "ask",
-      "allow",
-      "deny",
-    ] as const);
-    if (policy) next.permissionPolicy = policy;
 
     next.waitTimeoutMs =
       optionalInt(object, "waitTimeoutMs", "config", 0, 604_800_000) ??
@@ -99,6 +104,12 @@ export function loadConfig(home: string): ConfigLoadResult {
     next.startupTimeoutMs =
       optionalInt(object, "startupTimeoutMs", "config", 1_000, 3_600_000) ??
       next.startupTimeoutMs;
+    next.permissionTimeoutMs =
+      optionalInt(object, "permissionTimeoutMs", "config", 0, 604_800_000) ??
+      next.permissionTimeoutMs;
+    next.maxPendingPermissions =
+      optionalInt(object, "maxPendingPermissions", "config", 1, 1_000) ??
+      next.maxPendingPermissions;
     next.maxEventsPerSession =
       optionalInt(object, "maxEventsPerSession", "config", 1, 1_000_000) ??
       next.maxEventsPerSession;
@@ -201,6 +212,9 @@ export function toAgentView(manifest: BackendManifest): AgentView {
     ...(manifest.configPath ? { configPath: manifest.configPath } : {}),
     available: manifest.available,
     unavailableReason: manifest.unavailableReason,
+    ...(manifest.defaultMode !== undefined
+      ? { defaultMode: manifest.defaultMode }
+      : {}),
   };
 }
 
@@ -332,6 +346,20 @@ function parseBackend(
     description = object.description;
   }
 
+  let defaultMode: string | undefined;
+  if (object.defaultMode !== undefined) {
+    if (
+      typeof object.defaultMode !== "string" ||
+      object.defaultMode.trim().length === 0
+    ) {
+      throw new HlaoError(
+        "config_invalid",
+        `backend "${name}".defaultMode must be a non-empty mode id`,
+      );
+    }
+    defaultMode = object.defaultMode;
+  }
+
   const resolution = resolveCommand(command);
   return {
     name,
@@ -345,6 +373,7 @@ function parseBackend(
     ...(resolution.reason !== undefined
       ? { unavailableReason: resolution.reason }
       : {}),
+    ...(defaultMode !== undefined ? { defaultMode } : {}),
   };
 }
 
@@ -453,21 +482,4 @@ function optionalInt(
     );
   }
   return value;
-}
-
-function optionalEnum<T extends string>(
-  object: Record<string, unknown>,
-  key: string,
-  what: string,
-  allowed: readonly T[],
-): T | undefined {
-  const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || !allowed.includes(value as T)) {
-    throw new HlaoError(
-      "config_invalid",
-      `${what}.${key} must be one of: ${allowed.join(", ")}`,
-    );
-  }
-  return value as T;
 }

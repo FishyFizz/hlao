@@ -145,11 +145,12 @@ test("config can be inspected locally and validates", async (t) => {
 
   const shown = await harness.json<{
     error: { code: string } | null;
-    config: { permissionPolicy: string };
+    config: { maxPendingPermissions: number; permissionTimeoutMs: number };
   }>(["config", "show"]);
   assert.equal(shown.code, 0);
   assert.equal(shown.value.error?.code, "config_invalid");
-  assert.equal(shown.value.config.permissionPolicy, "allow");
+  assert.equal(shown.value.config.maxPendingPermissions, 16);
+  assert.equal(shown.value.config.permissionTimeoutMs, 1_800_000);
 
   const agents = await harness.json<JsonError>(["agents"]);
   assert.equal(agents.code, 1);
@@ -167,11 +168,12 @@ test("reload applies new config only to new spawns and is operator-only", async 
     "--wait",
   ]);
   assert.equal(first.code, 0);
-  assert.equal(first.value.session.permissionPolicy, "allow");
+  assert.equal(first.value.session.modes?.currentModeId, "default");
   const firstId = first.value.session.id;
 
   harness.updateConfig((config) => {
-    config.permissionPolicy = "ask";
+    const backends = config.backends as Record<string, Record<string, unknown>>;
+    backends.fake!.defaultMode = "auto";
   });
 
   const reload = await harness.json<{
@@ -189,10 +191,10 @@ test("reload applies new config only to new spawns and is operator-only", async 
     "--wait",
   ]);
   assert.equal(second.code, 0);
-  assert.equal(second.value.session.permissionPolicy, "ask");
+  assert.equal(second.value.session.modes?.currentModeId, "auto");
 
   const live = await harness.json<ReadValue>(["read", firstId]);
-  assert.equal(live.value.session.permissionPolicy, "allow");
+  assert.equal(live.value.session.modes?.currentModeId, "default");
 
   const denied = await harness.json<JsonError>(["reload"], {
     env: { HLAO_SESSION_ID: firstId },
@@ -221,6 +223,7 @@ test("an invalid reload blocks new spawns until the file is fixed", async (t) =>
   assert.equal(failed.code, 1);
   assert.equal(failed.value.error.code, "config_invalid");
   assert.match(failed.value.error.message, /permissionPolicy/);
+  assert.match(failed.value.error.message, /defaultMode/);
 
   const blocked = await harness.json<JsonError>(["spawn", "fake"]);
   assert.equal(blocked.code, 1);
@@ -237,7 +240,6 @@ test("an invalid reload blocks new spawns until the file is fixed", async (t) =>
     join(harness.home, "config.json"),
     JSON.stringify(
       {
-        permissionPolicy: "allow",
         backends: {
           fake: {
             command: process.execPath,

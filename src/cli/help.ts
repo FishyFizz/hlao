@@ -48,11 +48,11 @@ Usage:
   hlao cancel [<id>]                           stop the active turn; discard queue
   hlao close [<id>] [--force] [--tree]         end a session
   hlao close --idle DUR | --status S | --root S [--dry-run] [--forget]
-  hlao permit [<id>] --allow|--deny|--option ID  answer a permission request
+  hlao permit [<id>] --allow|--deny|--option ID [--request ID]
+                                             answer a pending permission (operator)
   hlao elicit [<id>] [--accept key=value ... | --decline | --cancel]
                                              answer a provider question
-  hlao mode [<id>] [modeId]                    read or switch a provider mode
-  hlao policy [<id>] [allow|ask|deny]          read or set the live permission policy
+  hlao mode [<id>] [modeId]                    read any; set a provider mode (operator)
   hlao option [<id>] [key value]               read or set provider config options
   hlao queue [<id>] | queue drop [<id>] N      inspect or drop queued prompts
   hlao queue drop <id> --id msg-XXXXXXXX       drop one message by id
@@ -105,9 +105,10 @@ Examples:
   hlao send --self "Check the log again."     # deferred until this turn ends
   hlao read --since 42
   hlao wait --until permission --timeout 10m
-  hlao permit a1b2c3 --allow --always
+  hlao permit a1b2c3 --allow            # operator shell only
+  hlao permit a1b2c3 --request req-7 --deny --always
   hlao elicit a1b2c3 --accept question_0="Build"
-  hlao mode a1b2c3 auto
+  hlao mode a1b2c3 auto                 # operator shell only
   hlao rename a1b2c3 builder
   hlao list --json`;
 }
@@ -174,7 +175,6 @@ const COMMAND_HELP_NAMES = new Set([
   "permit",
   "elicit",
   "mode",
-  "policy",
   "option",
   "queue",
   "rename",
@@ -204,11 +204,10 @@ Options:
   --stdin                read the first message from stdin
   --wait                 wait for the first turn to end
   --timeout DUR          bound the first-turn wait (0 = no bound)
-  --mode ID              provider permission mode (see "hlao mode <id>")
+  --mode ID              provider mode (operator shell only; see "hlao mode")
   --model VALUE          select the model category of provider config options
   --config KEY=VALUE     set a provider config option (repeatable)
   --parent SESSION       spawn under another session in this instance
-  --permission POLICY    allow (default), ask, or deny
   --env K=V              extra environment for the adapter (repeatable)
   --no-skill             omit the HLAO skill pointer from the first prompt
                          (the skill file and $HLAO_SKILL are still present)
@@ -221,10 +220,11 @@ Options:
                          new session. The source is untouched; the copy's
                          history is replayed when the backend supports loading.
 
-A session can be addressed by id, id prefix, or name. In human mode --wait
-prints the new handle before it starts waiting, so a long first turn is
-observable. The spawn result includes the handle, label, provider id, policy,
-and cursor. The first message id is printed when a message is sent. Text passed
+The provider mode is the permission policy. With no --mode, a spawn uses
+backends.<name>.defaultMode from config and then the provider's own default.
+An agent-spawned child always takes the backend default; a caller may not pass
+--mode. The spawn result includes the handle, label, provider id, effective
+mode, and cursor. The first message id is printed when a message is sent. Text passed
 as a positional or --prompt is visible in process listings and shell history;
 use --stdin or --prompt-file for secrets.
 
@@ -306,9 +306,10 @@ matches one event at a time, so a phrase split across chunks will not match.`,
     get: `hlao get [<id>] [--brief]
 
 Print one session's orchestration state without reading events: status, turn,
-queue, settlement, provider title, agent name/version, plan, compaction, policy,
-modes, config options, usage, pending permission, and lineage. --brief prints
-only the header. Inside a session, omit <id> or pass --self.`,
+queue, settlement, provider title, agent name/version, plan, compaction,
+provider mode, config options, usage, the pending permission queue, and
+lineage. --brief prints only the header. Inside a session, omit <id> or pass
+--self.`,
     find: `hlao find TEXT [--all] [--type TYPE]... [--max N] [options]
 
 Search events across sessions. It is a bounded client loop: list sessions, then
@@ -414,8 +415,8 @@ Conditions:
               A session that ends before it becomes idle is unsatisfied (exit 3).
   settled     the explicit completion condition: settled, permission, or exit.
               Termination counts as completion (exit 0).
-  permission  operator input is pending: a permission request (answer with
-              permit) or a provider question (answer with elicit).
+  permission  operator input is pending: one or more permission requests
+              (answer with permit) or a provider question (answer with elicit).
   exit        the session is terminal.
   change      a new event matches --since/--type/--grep.
 
@@ -437,10 +438,11 @@ instance count, and a view with a known caller marks that session with *.
 --all includes sessions that have closed but are still retained for reading.
 
 Filters: --status S[,S], --backend NAME, --root SESSION, --mine (the caller's
-own root subtree, from HLAO_ROOT_ID/HLAO_SESSION_ID), --name TEXT, --pending,
---cwd DIR (exact working directory), and --cwd-prefix DIR (subtree). Filters
+own root subtree, from HLAO_ROOT_ID/HLAO_SESSION_ID), --name TEXT, --pending
+(any pending permission or question), --cwd DIR (exact working directory), and
+--cwd-prefix DIR (subtree). Filters
 never change the instance counts in the footer. --sort created|activity (human
-default: activity). --wide adds BUSY, POLICY, REQUESTER, MODEL, AGENT, MODE,
+default: activity). --wide adds BUSY, REQUESTER, MODEL, AGENT, MODE,
 PENDING, and EXIT; --usage adds USAGE/COST and a per-currency footer total; --tree
 groups and indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
 emits one result per line) until Ctrl-C.
@@ -477,21 +479,25 @@ and actions without changing anything. --forget removes a terminal session from
 the table (retention is otherwise one hour); a session with retained
 descendants must have them forgotten first. Closing discards queued messages
 and, once retention ends, in-memory history.`,
-    permit: `hlao permit [<id>] --allow|--deny|--option ID [--always]
+    permit: `hlao permit [<id>] --allow|--deny|--option ID [--always] [--request ID]
 
-Answer the session's pending permission request. --allow picks the first allow
-option, --deny the first reject option, and --option names one exactly.
+Answer one of the session's pending provider permission requests. This is
+operator-only: a caller with HLAO_SESSION_ID is refused with operator_only and
+must report the blocker. --allow picks the provider's allow_once (else
+allow_always), --deny picks reject_once (else reject_always), and --option
+names one exactly. The option must be offered.
 
---always (with --allow) also switches this session's HLAO policy to allow, so
-later provider requests are answered automatically. When the provider offers an
-allow-always option it is preferred, which can stop the provider from asking at
-all for matching commands. Inside a session, omit <id> or pass --self.
+--always is a provider option selector, not a policy change:
+--allow --always selects allow_always and --deny --always selects reject_always.
+If the request does not offer that kind the command fails with bad_option; it
+never falls back.
 
---all-pending answers every pending request in the instance; --root SESSION (the
-job root), --tree <id> (that session and descendants), --status, --idle, and
---except-self narrow the set. Apart from --tree <id>, selector flags take no
-positional id. A session with no matching option is reported and does not stop
-the others.`,
+--request ID answers one request. With more than one pending and no --request,
+the command is a bad_request that names the request ids. --all-pending answers
+every pending request; --root SESSION (the job root), --tree <id> (that session
+and descendants), --status, --idle, and --except-self narrow the set. Apart from
+--tree <id>, selector flags take no positional id. A request with no matching
+option is reported and does not stop the others.`,
     elicit: `hlao elicit [<id>] [--accept key=value ... | --decline | --cancel]
 
 Answer a provider question (ACP form elicitation), such as Claude Code's
@@ -502,36 +508,26 @@ form fields; a session with no pending question is an error.
 parse as JSON when possible, so strings, numbers, booleans, and string arrays
 work ("question_1=[\\"a\\",\\"b\\"]"). --decline answers with no content, and
 --cancel withdraws the question (the provider aborts the tool call). An
-elicitation is not a permission: the session's permission policy never answers
+elicitation is not a permission: the operator-only permit relay never answers
 it, so it always waits for an operator or a delegated session. Inside a
 session, omit <id> or pass --self.`,
 
     mode: `hlao mode [<id>] [modeId]
 
-Read or switch the provider's native permission mode. This is the same switch a
-person uses in Claude Code; it is how you stop the provider from asking on every
-tool call.
+Read or switch the provider's native mode. The mode is the permission policy:
+the provider decides what its modes mean, and HLAO does not normalize them.
 
-Without modeId: print the current mode and the available modes.
-With modeId: request session/set_mode and report the result.
-Inside a session, omit <id> to read your own; use --self <modeId> to set it.
-`,
-    policy: `hlao policy [<id>] [allow|ask|deny]
+Without modeId: print the current mode and the available modes. Any caller may
+read, including its own with --self.
+With modeId: request session/set_mode and report the result. Setting a mode is
+operator-only; an agent caller is refused with operator_only.
 
-Read a session's live HLAO permission policy, or set it without needing a
-pending request. allow answers provider requests automatically, ask parks them,
-and deny rejects them. Inside a session, omit <id> to read your own policy or
-use --self <policy> to set it; any caller in the instance may set any
-session's policy. Changing the policy also answers a parked request when the
-new policy implies an answer.
-
-Bulk mode: "policy --root SESSION allow" (SESSION must be the job root),
-"policy --tree <id> deny" (that session and descendants), or --status/--idle
-with one policy. Apart from --tree <id>, selector flags take no positional id.
-A child id passed to --root is refused instead of widening to the job.
-
-permit --always is equivalent to answering the current request and setting the
-policy to allow.`,
+Bulk set (operator-only, replaces "hlao policy" bulk):
+  hlao mode --root SESSION <mode>     the whole job (SESSION must be its root)
+  hlao mode --tree <id> <mode>        that session and descendants
+  hlao mode --status S[,S] <mode>     sessions in those states
+  hlao mode --idle DUR <mode>         sessions settled for at least DUR
+Apart from --tree <id>, selector flags take no positional id.`,
     option: `hlao option [<id>] [key value]
 
 Read or set a provider-advertised session config option (model, reasoning
@@ -556,10 +552,11 @@ a session id is accepted. Duplicate names resolve as ambiguous. --clear removes
 the name. Inside a session, use --self <name> (or --self --clear).`,
     agents: `hlao agents [--cwd DIR]
 
-Show built-in, user, and project backends with their source and readiness.
-Reads configuration locally so it works without a supervisor; the same view is
-available to any client as the wire method backends.list. Environment values
-are never printed, only their names.`,
+Show built-in, user, and project backends with their source, readiness, and
+the operator's defaultMode when configured. Reads configuration locally so it
+works without a supervisor; the same view is available to any client as the
+wire method backends.list. Environment values are never printed, only their
+names.`,
     status: `hlao status [--start]
 
 Probe the supervisor without starting one and report pid, version, uptime, live
@@ -577,9 +574,13 @@ controls; --raw prints the line untouched. With --json, a plain read returns
 
 Local, non-mutating configuration inspection.
 
-  show       effective values and backends; backend env values are redacted
+  show       effective values and backends; prints permissionTimeoutMs,
+             maxPendingPermissions, and each backend's defaultMode; backend env
+             values are redacted
   path       the user config path (whether or not it exists)
-  validate   parse and validate the file; exits 1 on an invalid config`,
+  validate   parse and validate the file; exits 1 on an invalid config.
+             A removed permissionPolicy is reported with the defaultMode
+             migration, not a generic unknown-key error.`,
     reload: `hlao reload
 
 Re-read the user config in the running supervisor. New spawns use the new
@@ -616,6 +617,12 @@ you need first with "hlao export <id> --out FILE".
                  If any session fails to export, shutdown is refused.
   --force        kill the process and remove the lock when the normal path is
                  not available. With --export, the export must still succeed.
+
+"down" is also the upgrade escape hatch: it may use the legacy connection path
+to stop a live supervisor of an older wire major when that supervisor still
+answers "sessions.list" and "supervisor.shutdown". If it cannot, stop it with
+the old CLI first. Other commands report version_mismatch instead of
+replacing it.
 
 --dry-run reports what would be exported and closed without changing anything.`,
   };

@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { HlaoError } from "./errors.js";
 import { lockPath } from "./paths.js";
-import { normalizeProtocolVersion, WIRE_PROTOCOL_MAJOR } from "./protocol.js";
+import { normalizeProtocolVersion } from "./protocol.js";
 import { connectStream, pathTarget, type WireStream } from "./stream.js";
 
 export interface LockInfo {
@@ -142,24 +142,38 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** A cheap liveness + token check used during startup and autostart. */
+/**
+ * The result of a liveness probe. `alive` means the endpoint answered a
+ * token-checked hello; `major` is the wire major it reported. A live
+ * supervisor of another major must be reported, never treated as a crash.
+ */
+export interface SupervisorProbe {
+  alive: boolean;
+  major: number | null;
+}
+
+/**
+ * A cheap liveness + token check used during startup and autostart. The hello
+ * deliberately carries no protocol version: an older supervisor accepts it and
+ * reports its own, so the caller can distinguish "not answering" from "alive,
+ * speaking major N" before deciding whether the lock is stale.
+ */
 export function probeSupervisor(
   info: LockInfo,
   timeoutMs = 750,
-  expectedMajor: number | null = WIRE_PROTOCOL_MAJOR,
-): Promise<boolean> {
+): Promise<SupervisorProbe> {
   return new Promise((resolve) => {
     let settled = false;
     let stream: WireStream | null = null;
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    const timer = setTimeout(() => finish(false, null), timeoutMs);
     timer.unref?.();
 
-    function finish(value: boolean): void {
+    function finish(alive: boolean, major: number | null): void {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       stream?.terminate();
-      resolve(value);
+      resolve({ alive, major });
     }
 
     void connectStream(pathTarget(info.endpoint), { timeoutMs })
@@ -175,19 +189,20 @@ export function probeSupervisor(
               ok?: boolean;
               result?: { protocolVersion?: unknown };
             };
-            const reported = response.result?.protocolVersion;
-            const normalized = normalizeProtocolVersion(reported);
-            finish(
-              response.ok === true &&
-                normalized !== null &&
-                (expectedMajor === null || normalized.major === expectedMajor),
+            if (response.ok !== true) {
+              finish(false, null);
+              return;
+            }
+            const normalized = normalizeProtocolVersion(
+              response.result?.protocolVersion,
             );
+            finish(true, normalized?.major ?? null);
           } catch {
-            finish(false);
+            finish(false, null);
           }
         });
-        opened.onError(() => finish(false));
-        opened.onClose(() => finish(false));
+        opened.onError(() => finish(false, null));
+        opened.onClose(() => finish(false, null));
         opened.write(
           `${JSON.stringify({
             id: 1,
@@ -197,6 +212,6 @@ export function probeSupervisor(
           })}\n`,
         );
       })
-      .catch(() => finish(false));
+      .catch(() => finish(false, null));
   });
 }

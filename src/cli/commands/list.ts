@@ -348,7 +348,7 @@ function filterSessions(
   if (filters.pending === true) {
     result = result.filter(
       (session) =>
-        session.pendingPermission !== null ||
+        session.pendingPermissions.length > 0 ||
         session.pendingElicitation !== null,
     );
   }

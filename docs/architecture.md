@@ -122,7 +122,7 @@ disk and never reconstructs one after a restart.
 
 Two kinds of information, deliberately separated:
 
-1. **Orchestration state** — status, turn count, queue depth, pending permission, last
+1. **Orchestration state** — status, turn count, queue depth, pending permission queue, last
    sequence, process state, lineage. This is what makes a stuck job visible.
 2. **Leaf events** — message chunks, thoughts, tool calls, plans, notices. This is what the
    agent said or did, which is the leaf's business.
@@ -188,18 +188,27 @@ break.
 
 ## Permissions
 
-Permission requests are orchestration state, not a hidden callback. The default policy
-`allow` answers with the first allow option and records the answer (`by: policy:allow`), so a
-session does not park on its first tool call. `ask` (opt-in) stores the request, exposes it
-through `read` and `wait --until permission`, and blocks the ACP turn until the operator (or
-the agent, via `hlao permit`) answers. `deny` answers with a reject option. Every answer is
-recorded with who chose it and which option.
+Permission requests are orchestration state, not a hidden callback, and HLAO owns no policy
+that answers them (ADR 0013). The provider's native mode is the coarse policy and every ACP
+request is relayed to the operator:
 
-`hlao permit <id> --allow --always` switches a live session's policy to `allow` and prefers
-the provider's `allow_always` option when offered. Provider-native modes are a second layer:
-the session view reports the adapter's `modes`, `spawn --mode` selects one, and `hlao mode`
-reads or switches it. The provider can therefore stop asking at the source while HLAO keeps
-the guarantee that a request cannot silently hang.
+- The session parks each request in a FIFO `Map` keyed by request id and exposes
+  `pendingPermissions`; parallel asks are individually visible and answerable. A second ask
+  queues instead of being auto-cancelled.
+- `maxPendingPermissions` (captured at spawn) bounds the queue. Overflow answers the provider
+  `cancelled` and records `permission.resolved { by: "system", reason: "queue_full" }`.
+- `permissionTimeoutMs` (default 30m, `0` parks) is one absolute one-shot deadline per
+  request. Expiry selects `reject_once`, then `reject_always`, else cancels; it never allows.
+  Every path that resolves, withdraws, cancels, or closes a request clears its timer.
+- The operator answers with `hlao permit`, using the provider's own option id. `--always` is
+  a provider option selector (`allow_always` / `reject_always`), not a state change.
+  `permit`, `mode` set, and a spawn `mode` are operator-only; reads stay open.
+
+Provider-native modes are the policy layer: the session view reports the adapter's `modes`,
+`spawn --mode` selects one, and `hlao mode` reads or switches it. The effective spawn mode is
+operator `--mode` → the backend's `defaultMode` → the provider's default. The provider can
+therefore stop asking at the source; the relay keeps every remaining ask visible and
+bounded.
 
 ## Addressing and isolation
 
@@ -249,7 +258,10 @@ the guarantee that a request cannot silently hang.
 - `0001-supervisor-per-user.md` — persistent supervisor instead of re-attach per call.
 - `0002-cursor-bounded-event-log.md` — the read projection and its retention rules.
 - `0003-lineage-at-spawn.md` — identity is generated before process start and injected.
-- `0004-permissions-are-orchestration-state.md` — ask/allow/deny and `permit`.
+- `0004-permissions-are-orchestration-state.md` — permission requests are orchestration
+  state (policy mechanism superseded by 0013).
+- `0013-provider-owns-permission-policy.md` — the provider owns the policy; HLAO relays every
+  ask through a bounded queue and a fail-closed deadline.
 - `0005-prompt-queue-and-cancel.md` — serialized turns; cancel clears the queue.
 - `0011-provider-session-resume.md` — the provider session id is the durable handle;
   `spawn --resume` reads the provider's transcript through ACP `session/load`, and

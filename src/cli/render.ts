@@ -61,7 +61,6 @@ export const SESSION_FIELD_NAMES = [
   "created",
   "event",
   "busy",
-  "policy",
   "requester",
   "model",
   "agent",
@@ -98,7 +97,6 @@ const DEFAULT_DROP_ORDER: SessionField[] = [
   "busy",
   "model",
   "event",
-  "policy",
   "context",
   "cost",
   "pending",
@@ -126,7 +124,6 @@ const FIELD_HEADERS: Record<SessionField, string> = {
   created: "CREATED",
   event: "EVENT",
   busy: "BUSY",
-  policy: "POLICY",
   requester: "REQUESTER",
   model: "MODEL",
   agent: "AGENT",
@@ -169,7 +166,6 @@ export function renderSessionTable(
             "created",
             "event",
             "busy",
-            "policy",
             "requester",
             "model",
             "agent",
@@ -211,16 +207,19 @@ export function renderSessionTable(
         40,
       ),
       busy: busyFor(session),
-      policy: session.permissionPolicy,
       requester: session.createdBy ? oneLine(session.createdBy) : "—",
       model: modelLabel(session),
       agent: agentLabel(session),
       mode: session.modes?.currentModeId ?? "—",
-      pending: session.pendingPermission
-        ? truncateRight(oneLine(session.pendingPermission.title), 30)
-        : session.pendingElicitation
-          ? truncateRight(`Q: ${oneLine(session.pendingElicitation.message)}`, 30)
-          : "—",
+      pending:
+        session.pendingPermissions.length > 0
+          ? `${session.pendingPermissions.length > 1 ? `${session.pendingPermissions.length} · ` : ""}${truncateRight(
+              oneLine(session.pendingPermissions[0]!.title),
+              30,
+            )}`
+          : session.pendingElicitation
+            ? truncateRight(`Q: ${oneLine(session.pendingElicitation.message)}`, 30)
+            : "—",
       exit: exitDetail(session),
       context: session.usage
         ? `${formatTokens(session.usage.used)}/${formatTokens(session.usage.size)}`
@@ -420,7 +419,6 @@ export function renderSessionHeader(session: SessionView, style: Style): string 
     `seq ${session.lastSeq}`,
     session.queued > 0 ? `queued ${session.queued}` : null,
     session.modes ? `mode ${session.modes.currentModeId}` : null,
-    `policy ${session.permissionPolicy}`,
     session.createdBy ? `by ${oneLine(session.createdBy)}` : null,
     session.parentId ? `parent ${session.parentId}` : "root",
     session.depth > 0 ? `root ${session.rootId}` : null,
@@ -493,15 +491,7 @@ export function renderSessionState(
     `root ${session.rootId}`,
     `depth ${session.depth}`,
   ].join(" · ");
-  const pending = session.pendingPermission
-    ? `${oneLine(session.pendingPermission.title)} (requested ${formatAge(
-        session.pendingPermission.requestedAt,
-      )}) — ${commandPrefix} permit ${session.id} --allow`
-    : session.pendingElicitation
-      ? `question: ${oneLine(session.pendingElicitation.message)} (requested ${formatAge(
-          session.pendingElicitation.requestedAt,
-        )}) — ${commandPrefix} elicit ${session.id}`
-      : "—";
+  const pending = pendingInputLabel(session, commandPrefix);
   const exit = terminal
     ? session.exit
       ? session.exit.signal
@@ -519,7 +509,7 @@ export function renderSessionState(
     style.dim(`agent    ${agentLabel(session)}`),
     style.dim(`plan     ${planLabel(session)}`),
     style.dim(`compaction ${compactionLabel(session)}`),
-    style.dim(`policy   ${session.permissionPolicy} · mode ${mode}`),
+    style.dim(`mode     ${mode}`),
     style.dim(`config   ${config}`),
     style.dim(`usage    ${usage}`),
     style.dim(`lineage  ${lineage}`),
@@ -540,6 +530,37 @@ export function renderSessionState(
   ].join("\n");
 }
 
+/**
+ * `get`'s one-line pending description. Multiple requests name the queue and
+ * point at `--all-pending`; a single one names its request id.
+ */
+function pendingInputLabel(session: SessionView, commandPrefix: string): string {
+  const permissions = session.pendingPermissions;
+  if (permissions.length === 1) {
+    const pending = permissions[0]!;
+    return `${oneLine(pending.title)} (requested ${formatAge(
+      pending.requestedAt,
+    )}) — ${commandPrefix} permit ${session.id} --request ${oneLine(
+      pending.requestId,
+    )} --allow`;
+  }
+  if (permissions.length > 1) {
+    const titles = permissions
+      .slice(0, 3)
+      .map((pending) => oneLine(pending.title))
+      .join("; ");
+    const more =
+      permissions.length > 3 ? `; +${permissions.length - 3} more` : "";
+    return `${permissions.length} pending: ${titles}${more} — ${commandPrefix} permit ${session.id} --all-pending --allow`;
+  }
+  if (session.pendingElicitation) {
+    return `question: ${oneLine(session.pendingElicitation.message)} (requested ${formatAge(
+      session.pendingElicitation.requestedAt,
+    )}) — ${commandPrefix} elicit ${session.id}`;
+  }
+  return "—";
+}
+
 export function renderReadResult(
   result: ReadResult,
   style: Style,
@@ -547,10 +568,10 @@ export function renderReadResult(
   options: RenderOptions = {},
 ): string {
   const lines: string[] = [renderSessionHeader(result.session, style)];
-  const pending = result.session.pendingPermission;
+  const permissions = result.session.pendingPermissions;
   const question = result.session.pendingElicitation;
 
-  if (pending) {
+  for (const pending of permissions) {
     const hasRequest = result.events.some(
       (event) =>
         event.type === "permission.requested" &&
@@ -560,11 +581,19 @@ export function renderReadResult(
     if (hasRequest) {
       lines.push(
         style.dim(
-          `pending permission: ${oneLine(pending.title)} — ${commandPrefix} permit ${result.session.id} --allow`,
+          `pending permission: ${oneLine(pending.title)} — ${commandPrefix} permit ${result.session.id} --request ${oneLine(pending.requestId)} --allow`,
         ),
       );
     } else {
-      lines.push(renderPermission(result.session.id, pending, style, commandPrefix));
+      lines.push(
+        renderPermission(
+          result.session.id,
+          pending,
+          style,
+          commandPrefix,
+          permissions.length > 1,
+        ),
+      );
     }
   }
 
@@ -943,14 +972,15 @@ export function renderEvents(
           ? (data.options as { optionId: string; name: string; kind: string }[])
           : [];
         const title = oneLine(data.title ?? "permission required");
-        if (data.auto === true) {
-          lines.push(
-            `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission")} › ${title} ${style.dim(`— auto-answered by policy:${String(data.policy ?? "allow")}`)}`,
-          );
-          break;
-        }
+        const requestId =
+          typeof data.requestId === "string" ? oneLine(data.requestId) : null;
+        const queuePosition =
+          typeof data.queuePosition === "number" ? data.queuePosition : null;
         lines.push(
-          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission needed")} › ${title}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission needed")} › ${title}` +
+            (queuePosition !== null && queuePosition > 1
+              ? style.dim(` · queue ${queuePosition}`)
+              : ""),
         );
         for (const option of options) {
           lines.push(
@@ -958,11 +988,20 @@ export function renderEvents(
           );
         }
         lines.push(
-          `  ${style.dim(`answer: ${commandPrefix} permit ${sessionId} --allow`)}`,
+          `  ${style.dim(
+            `answer: ${commandPrefix} permit ${sessionId}` +
+              (requestId !== null ? ` --request ${requestId}` : "") +
+              ` --allow`,
+          )}`,
         );
         if (options.some((option) => option.kind === "allow_always")) {
           lines.push(
-            `  ${style.dim(`stop future asks: ${commandPrefix} permit ${sessionId} --allow --always`)}`,
+            `  ${style.dim(`always: ${commandPrefix} permit ${sessionId}` + (requestId !== null ? ` --request ${requestId}` : "") + ` --allow --always`)}`,
+          );
+        }
+        if (options.some((option) => option.kind === "reject_always")) {
+          lines.push(
+            `  ${style.dim(`deny always: ${commandPrefix} permit ${sessionId}` + (requestId !== null ? ` --request ${requestId}` : "") + ` --deny --always`)}`,
           );
         }
         break;
@@ -970,15 +1009,10 @@ export function renderEvents(
       case "permission.resolved": {
         flush();
         const answer = data.optionId === null ? "cancelled" : oneLine(data.optionId);
+        const reason =
+          typeof data.reason === "string" ? oneLine(data.reason) : null;
         lines.push(
-          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission")} › ${answer} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
-        );
-        break;
-      }
-      case "policy.changed": {
-        flush();
-        lines.push(
-          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("policy")} › ${oneLine(data.permissionPolicy ?? "")} ${style.dim(`(${oneLine(data.by ?? "unknown")})`)}`,
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.magenta("permission")} › ${answer} ${style.dim(`(${oneLine(data.by ?? "unknown")}${reason !== null ? ` · ${reason}` : ""})`)}`,
         );
         break;
       }
@@ -1326,9 +1360,15 @@ export function renderPermission(
   permission: PermissionView,
   style: Style,
   commandPrefix = "hlao",
+  multiple = false,
 ): string {
+  const request =
+    ` --request ${oneLine(permission.requestId)}`;
   const lines = [
-    `${style.magenta("permission needed")} › ${oneLine(permission.title || "(untitled tool call)")}`,
+    `${style.magenta("permission needed")} › ${oneLine(permission.title || "(untitled tool call)")}` +
+      (multiple
+        ? style.dim(` · ${oneLine(permission.requestId)}`)
+        : ""),
   ];
   for (const option of permission.options) {
     lines.push(`  ${style.dim(option.kind.padEnd(12))} ${oneLine(option.name)} ${style.dim(`(${oneLine(option.optionId)})`)}`);
@@ -1337,11 +1377,18 @@ export function renderPermission(
     (option) => option.kind === "allow_once" || option.kind === "allow_always",
   );
   if (allowed) {
-    lines.push(`  ${style.dim(`allow: ${commandPrefix} permit ${sessionId} --allow`)}`);
+    lines.push(
+      `  ${style.dim(`allow: ${commandPrefix} permit ${sessionId}${request} --allow`)}`,
+    );
   }
   if (permission.options.some((option) => option.kind === "allow_always")) {
     lines.push(
-      `  ${style.dim(`stop future asks: ${commandPrefix} permit ${sessionId} --allow --always`)}`,
+      `  ${style.dim(`always: ${commandPrefix} permit ${sessionId}${request} --allow --always`)}`,
+    );
+  }
+  if (permission.options.some((option) => option.kind === "reject_always")) {
+    lines.push(
+      `  ${style.dim(`deny always: ${commandPrefix} permit ${sessionId}${request} --deny --always`)}`,
     );
   }
   return lines.join("\n");
@@ -1435,13 +1482,14 @@ export function renderAgentTable(
   width?: number,
 ): string {
   if (agents.length === 0) return style.dim("no backends configured");
-  let headers = ["NAME", "SOURCE", "READY", "CONFIG", "COMMAND", "NOTES"];
+  let headers = ["NAME", "SOURCE", "READY", "MODE", "CONFIG", "COMMAND", "NOTES"];
   let rows = agents.map((agent) => {
     const commandLine = [agent.command, ...agent.args].join(" ");
     return [
       oneLine(agent.name),
       oneLine(agent.source),
       agent.available ? style.green("yes") : style.red("no"),
+      agent.defaultMode ? oneLine(agent.defaultMode) : "—",
       agent.configPath ? truncateMiddle(oneLine(agent.configPath), 40) : "—",
       truncateMiddle(oneLine(commandLine), 60),
       agent.available ? oneLine(agent.description ?? "—") : style.red(oneLine(agent.unavailableReason ?? "unavailable")),
@@ -1460,8 +1508,8 @@ export function renderAgentTable(
       return widths.reduce((sum, value) => sum + value, 0) +
         2 * Math.max(0, headers.length - 1);
     };
-    // NOTES, then CONFIG, then COMMAND, then SOURCE.
-    const droppable = ["NOTES", "CONFIG", "COMMAND", "SOURCE"];
+    // NOTES, then CONFIG, then MODE, then COMMAND, then SOURCE.
+    const droppable = ["NOTES", "CONFIG", "MODE", "COMMAND", "SOURCE"];
     while (total() > width && droppable.length > 0) {
       const name = droppable.shift()!;
       const index = headers.indexOf(name);

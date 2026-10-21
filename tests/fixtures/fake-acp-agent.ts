@@ -23,6 +23,8 @@ const resumeHistory = (process.env.FAKE_RESUME_HISTORY ?? "restored user prompt\
 const delayMs = Number(process.env.FAKE_DELAY_MS ?? 5_000);
 const counterFile = process.env.FAKE_COUNTER_FILE;
 const doneAt = Number(process.env.FAKE_DONE_AT ?? 2);
+const optionMode = process.env.FAKE_NO_ALWAYS === "1" ? "basic" : "full";
+const permissionCount = Number(process.env.FAKE_PERMISSION_COUNT ?? 2);
 
 let nextSession = 0;
 let nextFork = 0;
@@ -75,6 +77,27 @@ const availableModes = [
   { id: "auto", name: "Auto", description: "The agent decides" },
   { id: "bypassPermissions", name: "Bypass", description: "Accept all" },
 ];
+
+/**
+ * The provider's own option set. `always: false` models an adapter that does
+ * not offer either always kind, for the no-fallback `bad_option` tests.
+ */
+function permissionOptions(
+  mode: "full" | "basic" = "full",
+): { optionId: string; name: string; kind: string }[] {
+  if (mode === "basic") {
+    return [
+      { optionId: "allow", name: "Allow once", kind: "allow_once" },
+      { optionId: "reject", name: "Reject", kind: "reject_once" },
+    ];
+  }
+  return [
+    { optionId: "allow", name: "Allow once", kind: "allow_once" },
+    { optionId: "allow-always", name: "Always", kind: "allow_always" },
+    { optionId: "reject", name: "Reject", kind: "reject_once" },
+    { optionId: "reject-always", name: "Never", kind: "reject_always" },
+  ];
+}
 
 const app = agent({ name: "fake-acp" })
   .onRequest("initialize", async ({ params }) => {
@@ -243,11 +266,7 @@ const app = agent({ name: "fake-acp" })
           kind: "execute",
           status: "pending",
         },
-        options: [
-          { optionId: "allow", name: "Allow once", kind: "allow_once" },
-          { optionId: "allow-always", name: "Always", kind: "allow_always" },
-          { optionId: "reject", name: "Reject", kind: "reject_once" },
-        ],
+        options: permissionOptions(optionMode) as never,
       };
       const response = await client.request("session/request_permission", request);
       steerActive = null;
@@ -257,6 +276,61 @@ const app = agent({ name: "fake-acp" })
       } else {
         await message("permission: cancelled");
       }
+      return { stopReason: "end_turn" };
+    }
+
+    if (mode === "permission-multi") {
+      // Parallel tool calls each ask independently. The supervisor must queue
+      // them, not auto-cancel the second.
+      const count = Math.max(1, Math.min(20, permissionCount));
+      const withdrawFirst = process.env.FAKE_WITHDRAW_FIRST === "1";
+      const withdrawMs = Number(process.env.FAKE_WITHDRAW_MS ?? 500);
+      const requests: Promise<{
+        outcome: { outcome: string; optionId?: string };
+      } | null>[] = [];
+      for (let index = 1; index <= count; index += 1) {
+        const toolCallId = `call-multi-${index}`;
+        const title = `Parallel build ${index}`;
+        await send({
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title,
+          kind: "execute",
+          status: "pending",
+        });
+        const withdraw = withdrawFirst && index === 1;
+        const controller = new AbortController();
+        requests.push(
+          client
+            .request(
+              "session/request_permission",
+              {
+                sessionId,
+                toolCall: {
+                  toolCallId,
+                  title,
+                  kind: "execute",
+                  status: "pending",
+                },
+                options: permissionOptions(optionMode) as never,
+              },
+              withdraw ? { cancellationSignal: controller.signal } : undefined,
+            )
+            .catch(() => null) as Promise<{
+            outcome: { outcome: string; optionId?: string };
+          } | null>,
+        );
+        if (withdraw) setTimeout(() => controller.abort(), withdrawMs);
+      }
+      const responses = await Promise.all(requests);
+      const outcomes = responses.map((response) =>
+        response === null
+          ? "withdrawn"
+          : response.outcome.outcome === "selected"
+            ? response.outcome.optionId ?? "selected"
+            : "cancelled",
+      );
+      await message(`permissions: ${outcomes.join(",")}`, "m2");
       return { stopReason: "end_turn" };
     }
 
@@ -383,11 +457,7 @@ const app = agent({ name: "fake-acp" })
               kind: "execute",
               status: "pending",
             },
-            options: [
-              { optionId: "allow", name: "Allow once", kind: "allow_once" },
-              { optionId: "allow-always", name: "Always", kind: "allow_always" },
-              { optionId: "reject", name: "Reject", kind: "reject_once" },
-            ],
+            options: permissionOptions(optionMode) as never,
           });
           const outcome = response.outcome;
           await message(
@@ -421,11 +491,7 @@ const app = agent({ name: "fake-acp" })
               kind: "execute",
               status: "pending",
             },
-            options: [
-              { optionId: "allow", name: "Allow once", kind: "allow_once" },
-              { optionId: "allow-always", name: "Always", kind: "allow_always" },
-              { optionId: "reject", name: "Reject", kind: "reject_once" },
-            ],
+            options: permissionOptions(optionMode) as never,
           },
           { cancellationSignal: controller.signal },
         )
@@ -458,11 +524,7 @@ const app = agent({ name: "fake-acp" })
             kind: "execute",
             status: "pending",
           },
-          options: [
-            { optionId: "allow", name: "Allow once", kind: "allow_once" },
-            { optionId: "allow-always", name: "Always", kind: "allow_always" },
-            { optionId: "reject", name: "Reject", kind: "reject_once" },
-          ],
+          options: permissionOptions(optionMode) as never,
         })
         .catch(() => {
           // The supervisor cancels the pending request when the turn fails.

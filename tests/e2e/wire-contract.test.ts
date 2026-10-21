@@ -102,6 +102,8 @@ test("a raw socket client can observe and control every session", async () => {
       "spawn.createdBy",
       "spawn.resume",
       "spawn.fork",
+      "session.pendingPermissions",
+      "permit.request",
     ];
     for (const capability of expected) {
       assert.ok(hello.capabilities.includes(capability), capability);
@@ -214,7 +216,6 @@ test("a raw client can answer a pending permission", async () => {
       await request(lock, "sessions.spawn", {
         backend: "fake",
         prompt: "ask first",
-        permissionPolicy: "ask",
         env: { FAKE_MODE: "permission" },
       }),
     );
@@ -227,12 +228,64 @@ test("a raw client can answer a pending permission", async () => {
       }),
     );
     assert.equal(waiting.satisfied, true);
-    const pending = waiting.results[0]?.session.pendingPermission;
+    const pending = waiting.results[0]?.session.pendingPermissions[0];
     assert.ok(pending);
     const allow = pending.options.find((option) =>
       option.kind.startsWith("allow"),
     );
     assert.ok(allow);
+
+    // A caller-supplied session id is refused for every operator control.
+    const refusedPermit = await request(
+      lock,
+      "sessions.permit",
+      {
+        sessionId: spawned.session.id,
+        requestId: pending.requestId,
+        optionId: allow.optionId,
+      },
+      spawned.session.id,
+    );
+    assert.equal(refusedPermit.ok, false);
+    assert.equal(refusedPermit.error?.code, "operator_only");
+
+    const refusedMode = await request(
+      lock,
+      "sessions.set_mode",
+      { sessionId: spawned.session.id, modeId: "auto" },
+      spawned.session.id,
+    );
+    assert.equal(refusedMode.ok, false);
+    assert.equal(refusedMode.error?.code, "operator_only");
+
+    const refusedSpawn = await request(
+      lock,
+      "sessions.spawn",
+      { backend: "fake", mode: "auto" },
+      spawned.session.id,
+    );
+    assert.equal(refusedSpawn.ok, false);
+    assert.equal(refusedSpawn.error?.code, "operator_only");
+
+    // Removed 3.0 shapes are unknown, not ignored.
+    const removedPolicy = await request(lock, "sessions.set_policy", {
+      sessionId: spawned.session.id,
+      permissionPolicy: "allow",
+    });
+    assert.equal(removedPolicy.ok, false);
+    assert.equal(removedPolicy.error?.code, "bad_request");
+    assert.match(removedPolicy.error?.message ?? "", /unknown method/);
+
+    const removedSpawnField = await request(lock, "sessions.spawn", {
+      backend: "fake",
+      permissionPolicy: "allow",
+    });
+    assert.equal(removedSpawnField.ok, false);
+    assert.equal(removedSpawnField.error?.code, "bad_request");
+    assert.match(
+      removedSpawnField.error?.message ?? "",
+      /unknown field "permissionPolicy"/,
+    );
 
     const permitted = ok<PermitResult>(
       await request(lock, "sessions.permit", {

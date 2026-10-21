@@ -1,17 +1,18 @@
 import type {
   CreateElicitationRequest,
   CreateElicitationResponse,
-  PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import type { ElicitationView, PermissionPolicy } from "../protocol.js";
+import type { ElicitationView } from "../protocol.js";
 
 export interface PendingPermission {
   requestId: string;
   requestedAt: string;
   request: RequestPermissionRequest;
   resolve: (response: RequestPermissionResponse) => void;
+  /** The one-shot permission deadline, when `permissionTimeoutMs > 0`. */
+  timer?: NodeJS.Timeout;
 }
 
 export interface PendingElicitation {
@@ -82,26 +83,5 @@ export function cancelledResponse(): RequestPermissionResponse {
 
 export function selectedResponse(optionId: string): RequestPermissionResponse {
   return { outcome: { outcome: "selected", optionId } };
-}
-
-export function pickAllowOption(options: PermissionOption[]): PermissionOption | undefined {
-  return (
-    options.find((option) => option.kind === "allow_once") ??
-    options.find((option) => option.kind === "allow_always")
-  );
-}
-
-export function chooseByPolicy(
-  options: PermissionOption[],
-  policy: PermissionPolicy,
-): PermissionOption | "cancelled" | null {
-  if (policy === "ask") return null;
-  if (policy === "allow") {
-    return pickAllowOption(options) ?? "cancelled";
-  }
-  const reject =
-    options.find((option) => option.kind === "reject_once") ??
-    options.find((option) => option.kind === "reject_always");
-  return reject ?? "cancelled";
 }
 

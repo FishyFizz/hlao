@@ -9,8 +9,7 @@ rendering, never the semantics.
 hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-file F]
                 [--stdin] [--wait] [--timeout DUR] [--mode ID] [--model VALUE]
                 [--config KEY=VALUE]... [--parent SESSION]
-                [--permission allow|ask|deny] [--env K=V]...
-                [--no-skill] [--idempotency-key KEY]
+                [--env K=V]... [--no-skill] [--idempotency-key KEY]
                 [--resume PROVIDER_ID | --fork PROVIDER_ID]
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR] [--idempotency-key KEY] [--steer | --queue]
@@ -39,8 +38,9 @@ hlao close [<id>] [--self] [--force] [--tree] [--forget]
 hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run]
                 [--except-self] [--forget] [--force]
 hlao permit [<id>] [--self] [--allow | --deny | --option ID] [--always]
+                [--request ID] [--all-pending] [selectors]
 hlao mode [<id>] [modeId] [--self]
-hlao policy [<id>] [allow|ask|deny] [--self]
+hlao mode --root SESSION|--tree <id>|--status S|--idle DUR <modeId>
 hlao option [<id>] [key value] [--self]
 hlao queue [<id>] [--self]
 hlao queue drop [<id>] <position> [--self]
@@ -81,9 +81,16 @@ Sessions are resolved by exact id first, then unique name, then unique id prefix
 this HLAO instance. Every session in the instance is addressable by every caller. Duplicate
 names and ambiguous prefixes are `ambiguous_id` with `details.candidates`. Commands whose
 first positional is not an id (`send`, `mode`, `rename`) require `--self` to target the
-caller. Read-only forms of `read`, `wait`, `cancel`, `close`, `permit`, `policy`, `option`,
-and `queue` default to `HLAO_SESSION_ID` when it is set and no id is given; their setting
-forms use `--self`. A target supplied both positionally and with `--self` is `bad_request`.
+caller. Read-only forms of `read`, `wait`, `cancel`, `close`, `option`, and `queue` default
+to `HLAO_SESSION_ID` when it is set and no id is given; their setting forms use `--self`. A
+target supplied both positionally and with `--self` is `bad_request`.
+
+Control is operator-only in protocol 3.0. `permit`, a `mode` set (including bulk), and a
+`spawn --mode` from a caller with `HLAO_SESSION_ID` are refused with `operator_only`. The CLI
+checks `HLAO_SESSION_ID` first for a clear message; the supervisor enforces the same rule.
+Reads stay open: an agent may read its mode and its pending requests. The operator uses a
+shell without `HLAO_SESSION_ID` or the dashboard. This is advisory, not an ACL: the instance
+token remains the real authority (N-08).
 
 `--tree` on `close` is a CLI assembly: list the target's subtree (including retained closed
 sessions, so lineage is not broken by an intermediate that already closed), then close each
@@ -91,21 +98,23 @@ live descendant deepest-first. It is not a supervisor method. Its `--json` resul
 `{ count, sessions: SessionView[], skipped }`, where `skipped` counts nodes that were already
 terminal.
 
-`permit --always` (with `--allow`) switches the session's HLAO policy to `allow` after
-answering, preferring the provider's `allow_always` option when offered. `mode` reads
-(`{ currentModeId, availableModes }`) or switches (`{ session }`) the provider's native
-permission mode; an unknown mode is `bad_option`, and a backend with no modes is
-`bad_request`.
+`permit --always` is a provider option selector, not a policy change: with `--allow` it
+requires `allow_always`, with `--deny` it requires `reject_always`, and a missing kind is
+`bad_option` with no fallback. The CLI resolves the option id and sends
+`sessions.permit { sessionId, requestId?, optionId }`. Without `--request`, more than one
+pending request is a `bad_request` that names the ids. `--all-pending` answers every queued
+request, one wire call per request.
+
+`mode` reads (`{ currentModeId, availableModes }`) or switches (`{ session }`) the provider's
+native mode; an unknown mode is `bad_option`, and a backend with no modes is `bad_request`.
+The mode is the permission policy; HLAO does not normalize mode names. Bulk set uses the
+selector grammar below and replaces the removed `policy` bulk command.
 
 `rename` sets an operator label or clears it. A name is stored on the live session and in the
 event log (`session.renamed`); it is injected into the adapter environment as `HLAO_NAME` at
 spawn. Renaming does not change the handle or `HLAO_SESSION_ID`. The live name is part of
 addressing (a unique name resolves), so a rename can change which token addresses the
 session.
-
-`policy` reads a live session's HLAO permission policy or sets it without a pending request.
-Inside a session, `policy` with no id reads self and `policy --self <policy>` sets it. Any
-caller in the instance may re-policy any session.
 
 `option` lists provider config options or sets one (`option <id> <key> <value>`; `--self` for
 the caller). Boolean options accept `true`/`false`; select values must match an advertised
@@ -171,7 +180,7 @@ target that satisfies and `--all` when every target does. The JSON result always
 that does not currently satisfy when the aggregate resolves is `pending`. `--since` is only
 valid with one id. `--type`/`--grep` filter the event that satisfies `--until change`.
 
-`wait`, `cancel`, `permit`, and `policy` accept the `close` selector grammar: `--root SESSION`
+`wait`, `cancel`, `permit`, and `mode` accept the `close` selector grammar: `--root SESSION`
 (the whole job; SESSION must be that job's root), `--tree <id>` (the session and its
 descendants), `--status S[,S]`, `--idle DUR`, and `--except-self`. A child token passed to
 `--root` is refused rather than widened to the job, because that silently includes the caller
@@ -179,11 +188,13 @@ and unrelated siblings. They are client assemblies over `sessions.list`; apart f
 `--tree <id>`, a selector takes no positional id, and `wait` is limited to 100 targets by the
 wire. `cancel --wait` waits for the selected sessions to settle and exits 2 on timeout.
 `permit --all-pending` answers every pending request, reporting per-session failures without
-stopping the others. `policy --root SESSION allow` applies one policy to the set.
+stopping the others. `mode --root SESSION <mode>` applies one provider mode to the set; a
+failed session (for example one whose backend advertises no modes) is reported without
+stopping the others.
 
 `get [<id>]` prints one session's state without events (`sessions.get`): status, turn, queue,
-settlement, provider title, agent name/version, plan, compaction, policy, modes, config
-options, usage, pending permission, lineage, exit, and cwd. `--brief` prints only the standard
+settlement, provider title, agent name/version, plan, compaction, provider mode, config
+options, usage, the pending permission queue, lineage, exit, and cwd. `--brief` prints only the standard
 header. `find TEXT [--all] [--type T]... [--max N]` scans
 live sessions (retained too with `--all`) by paging `read --grep`; it is capped at 20 pages per
 session and reports when a scan was capped.
@@ -348,7 +359,8 @@ There are no ANSI escapes when stdout is not a TTY, when `NO_COLOR` is set, or u
   JSON result. `--verbose` renders bounded tool payloads. Original ACP payloads are returned
   only with `--json --raw`.
 - A pending permission whose `permission.requested` event is in the page is summarized once in
-  the header, not repeated as a full option block.
+  the header, not repeated as a full option block. Each pending request names its `--request`
+  id; `get` shows the queue length and points at `--all-pending`.
 - Failed and closed headers report `ended` and the exit code or signal instead of a pid.
 - A tail read whose history was evicted says how many events are missing and where retained
   history starts.

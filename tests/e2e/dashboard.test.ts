@@ -60,8 +60,6 @@ test("list filters, sorts, and renders a wide or tree dashboard", async (t) => {
       "gated",
       "--env",
       "FAKE_MODE=permission",
-      "--permission",
-      "ask",
     ],
     { HLAO_SESSION_ID: alpha.id },
   );
@@ -117,7 +115,7 @@ test("list filters, sorts, and renders a wide or tree dashboard", async (t) => {
   });
   assert.equal(wide.code, 0);
   assert.match(wide.stdout, /BUSY/);
-  assert.match(wide.stdout, /POLICY/);
+  assert.match(wide.stdout, /MODE/);
   assert.match(wide.stdout, /PENDING/);
   assert.match(wide.stdout, /EXIT/);
   const lines = wide.stdout.split("\n");

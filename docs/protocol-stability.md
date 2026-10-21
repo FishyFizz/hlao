@@ -1,13 +1,16 @@
 # Protocol stability for a dashboard client
 
-**Evaluated:** 2026-10-20, HLAO 0.10.0, wire protocol 2.4.
+**Evaluated:** 2026-10-21, HLAO 0.15.0, wire protocol 3.0.
 **Question:** is the current frame protocol stable enough to start a dashboard side project?
 **Verdict:** **Yes, with a versioned, capability-aware client.** The frame format, persistent
 stream, subscriptions, view/event notifications, and resume cursors are implemented, documented,
 and exercised by the raw-client tests. A dashboard can start now. Three conditions matter:
 
-1. Require wire **major 2** and feature-detect capabilities; do not key behavior off the
-   package version or a minor number.
+1. Require wire **major 3** and feature-detect capabilities; do not key behavior off the
+   package version or a minor number. Protocol 3.0 is a deliberate break: it removes the
+   policy surface and replaces `pendingPermission` with `pendingPermissions`. An old-major
+   supervisor is reported as `version_mismatch` and is never replaced; stop it with the old
+   CLI (or `hlao down`, which uses the legacy connection path) before starting 3.0.
 2. Use a **local process** (Node/Tauri/Electron) that can open the named pipe/Unix socket and
    read the token. A browser needs a local frame bridge; it must never receive the supervisor
    token.
@@ -22,9 +25,12 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
   frames, not over the socket, so a future WebSocket/bridge adapter does not change methods.
 - **Versioning.** `hello.protocolVersion` is `{major, minor}`. Major equality is required;
   minor additions are backward-compatible; `hello.capabilities` is the feature-detect list.
-  The current major has been 2 since 0.4/2.0; 2.1 added persistent streams, 2.2 settled waits
-  and view fields, 2.3 message identity/idempotency/provenance, 2.4 crash and injection
-  metadata. Every addition was optional.
+  Major 2 ran from 0.4 through 0.14 and every minor addition was optional. Major 3 (0.15)
+  is the first deliberate break: it removes `permissionPolicy`, `pendingPermission`,
+  `sessions.set_policy`, and `policy.changed`; adds `pendingPermissions`,
+  `permission.requested.queuePosition`, `PermitParams.requestId`, and `AgentView.defaultMode`;
+  and makes `sessions.permit`/`sessions.set_mode` operator-only. There is no compatibility
+  shim.
 - **Persistent streams.** `hello` with `stream: {persistent: true}` opens a multiplexed
   connection. Requests carry a client-chosen `id`; responses echo it. The server may send
   notification frames. The legacy one-request-per-connection path remains, so a dashboard can
@@ -39,7 +45,7 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
     connection.
   - The initial result includes current views, cursors, and ids whose history was evicted.
 - **Live state.** `SessionView` is the state projection: status, turn, queue depth, settled,
-  pending permission, policy, modes, config options, usage/cost, last event, and lineage. View
+  the pending permission queue, modes, config options, usage/cost, last event, and lineage. View
   notifications are full `SessionView` objects, JSON-diffed server-side; the first notification
   after a reconnect is a full view, so replacing local state is safe.
 - **Events.** `EventView` has `seq`, `at`, `type`, `turn`, and `data`. The event-type taxonomy
@@ -53,10 +59,12 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
   session table; it reconnects and resumes. Rule: never treat a stream close as data loss until
   resume reports truncation.
 - **Control surface.** A dashboard can perform every orchestration operation the CLI does
-  through the wire: spawn, send, cancel, close, permit, mode, policy, config options, queue,
-  rename, read, wait, list, get, export via paging, reload, shutdown, and backend listing.
-  Client-only assemblies (`find`, bulk selectors, `@last`) remain client loops. Local
-  diagnostics (`logs`, `config show`, `skill`, `doctor`) are CLI-local; `hello`,
+  through the wire: spawn, send, cancel, close, permit, mode, config options, queue, rename,
+  read, wait, list, get, export via paging, reload, shutdown, and backend listing.
+  `sessions.permit` and `sessions.set_mode` are operator-only: a dashboard is an operator
+  client and must not send `callerSessionId`. Reads, including `pendingPermissions`, stay
+  open to agents. Client-only assemblies (`find`, bulk selectors, `@last`) remain client
+  loops. Local diagnostics (`logs`, `config show`, `skill`, `doctor`) are CLI-local; `hello`,
   `backends.list`, and `reload` are on the wire.
 
 ## What is tested, and what is only contracted
@@ -115,8 +123,8 @@ handling should be exercised against a slow/stalled consumer before it is truste
 8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
    `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`,
    `spawn.resume`, `spawn.fork`, `read.time`, `read.regex`, `read.context`,
-   `session.firstPrompt`, and the 2.5 provider-state capabilities
-   (`session.compaction`,
+   `session.firstPrompt`, `session.pendingPermissions`, `permit.request`, and the 2.5
+   provider-state capabilities (`session.compaction`,
    `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`).
    A missing capability means "render the old view", not "fail the dashboard". A dashboard
    without `spawn.resume` must keep reporting evicted history as unrecoverable; one with it

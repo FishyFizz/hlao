@@ -414,7 +414,6 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           "model",
           "config",
           "parentSessionId",
-          "permissionPolicy",
           "env",
           "skill",
           "idempotencyKey",
@@ -446,11 +445,6 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         model: optString(object, "model", what, 200),
         config: configRecord(object, "config", what),
         parentSessionId: optString(object, "parentSessionId", what, 64),
-        permissionPolicy: optEnum(object, "permissionPolicy", what, [
-          "ask",
-          "allow",
-          "deny",
-        ] as const),
         env: stringRecord(object, "env", what),
         skill: optBoolean(object, "skill", what),
         idempotencyKey: optString(object, "idempotencyKey", what, 200),
@@ -653,12 +647,11 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
     }
     case "sessions.permit": {
       const object = asObject(raw, what);
-      checkKeys(object, ["sessionId", "optionId", "requestId", "always"], what);
+      checkKeys(object, ["sessionId", "optionId", "requestId"], what);
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
-        optionId: optString(object, "optionId", what, 500),
+        optionId: reqString(object, "optionId", what, 1, 500),
         requestId: optString(object, "requestId", what, 200),
-        always: optBoolean(object, "always", what),
       } as ParamsByMethod[M];
     }
     case "sessions.respond_elicitation": {
@@ -717,18 +710,6 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
         modeId: reqString(object, "modeId", what, 1, 100),
-      } as ParamsByMethod[M];
-    }
-    case "sessions.set_policy": {
-      const object = asObject(raw, what);
-      checkKeys(object, ["sessionId", "permissionPolicy"], what);
-      return {
-        sessionId: reqString(object, "sessionId", what, 1, 64),
-        permissionPolicy: reqEnum(object, "permissionPolicy", what, [
-          "ask",
-          "allow",
-          "deny",
-        ] as const),
       } as ParamsByMethod[M];
     }
     case "sessions.set_config_option": {

@@ -7,7 +7,7 @@ import { displayStatus, resolveInList } from "./session-view.js";
 export { displayStatus, isTerminal } from "./session-view.js";
 
 /**
- * The selector grammar shared by close, wait, cancel, permit, and policy.
+ * The selector grammar shared by close, wait, cancel, permit, and mode.
  * It is a client assembly over `sessions.list`; the supervisor has no notion
  * of a job or a subtree pointer (ADR 0007).
  */
@@ -32,7 +32,7 @@ export function selectorsUsed(flags: SelectorFlags): boolean {
 
 /**
  * Resolve `--root`. A child token silently selects the whole job, including
- * unrelated siblings and the caller, which is a footgun on close/policy/permit;
+ * unrelated siblings and the caller, which is a footgun on close/mode/permit;
  * name the real root instead and use `--tree` for a narrower scope.
  */
 export function resolveJobRoot(

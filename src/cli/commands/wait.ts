@@ -233,16 +233,32 @@ export async function cmdWait(args: string[]): Promise<number> {
       const detail =
         entry.reason === "exit"
           ? exitDetail(entry.session)
-          : entry.reason === "permission" && entry.session.pendingPermission
-            ? entry.session.pendingPermission.title
+          : entry.reason === "permission" &&
+              entry.session.pendingPermissions.length > 0
+            ? entry.session.pendingPermissions
+                .map((permission) => permission.title)
+                .join("; ")
             : entry.reason === "permission" && entry.session.pendingElicitation
               ? entry.session.pendingElicitation.message
               : null;
       out(
         `${entryLabel}: ${reason}` + (detail ? ctx.style.dim(` · ${sanitize(detail)}`) : ""),
       );
-      if (entry.reason === "permission" && entry.session.pendingPermission) {
-        out(renderPermission(entry.session.id, entry.session.pendingPermission, ctx.style));
+      if (
+        entry.reason === "permission" &&
+        entry.session.pendingPermissions.length > 0
+      ) {
+        for (const permission of entry.session.pendingPermissions) {
+          out(
+            renderPermission(
+              entry.session.id,
+              permission,
+              ctx.style,
+              "hlao",
+              entry.session.pendingPermissions.length > 1,
+            ),
+          );
+        }
       }
       if (entry.reason === "permission" && entry.session.pendingElicitation) {
         out(
@@ -304,13 +320,26 @@ function renderSingleWait(
         );
         return code;
       }
+      const permissions = entry.session.pendingPermissions;
       if (until === "permission") {
-        out(`${label} needs permission (waited ${waited})`);
+        out(
+          `${label} needs permission${
+            permissions.length > 1 ? ` (${permissions.length} pending)` : ""
+          } (waited ${waited})`,
+        );
       } else {
         out(`${label} settled (permission) · waited ${waited}`);
       }
-      if (entry.session.pendingPermission) {
-        out(renderPermission(entry.session.id, entry.session.pendingPermission, ctx.style));
+      for (const permission of permissions) {
+        out(
+          renderPermission(
+            entry.session.id,
+            permission,
+            ctx.style,
+            "hlao",
+            permissions.length > 1,
+          ),
+        );
       }
       return code;
     case "exit": {

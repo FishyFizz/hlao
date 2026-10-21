@@ -1,7 +1,8 @@
 {
-  "permissionPolicy": "allow",
   "waitTimeoutMs": 1800000,
   "sendWaitTimeoutMs": 1800000,
+  "permissionTimeoutMs": 1800000,
+  "maxPendingPermissions": 16,
   "startupTimeoutMs": 120000,
   "maxEventsPerSession": 5000,
   "maxEventLogBytes": 16777216,
@@ -14,7 +15,8 @@
       "env": {
         "MY_FLAG": "1"
       },
-      "description": "an in-repo ACP agent"
+      "description": "an in-repo ACP agent",
+      "defaultMode": "auto"
     }
   }
 }

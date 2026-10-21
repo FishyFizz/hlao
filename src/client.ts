@@ -42,9 +42,10 @@ export interface ConnectionOptions {
   /** How long to wait for a starting supervisor. Default 30s. */
   startupTimeoutMs?: number;
   /**
-   * Accept a supervisor with a different wire major. Only `down` uses this, so a
-   * 2.x CLI can stop a pre-2.0 supervisor during an upgrade. Normal commands must
-   * require major equality.
+   * Accept a supervisor with a different wire major. Only `down` uses this, so
+   * the upgrade path can stop a running old-major supervisor with its own
+   * `sessions.list`/`supervisor.shutdown`. Normal commands require major
+   * equality and report `version_mismatch`.
    */
   allowLegacyProtocol?: boolean;
 }
@@ -93,9 +94,17 @@ async function ensureLock(
   options: ConnectionOptions,
 ): Promise<{ lock: LockInfo; started: boolean }> {
   let existing = readLock(options.home);
-  if (existing && (await probeSupervisor(existing, 750))) {
-    warnVersionMismatch(existing);
-    return { lock: existing, started: false };
+  if (existing) {
+    const probe = await probeSupervisor(existing, 750);
+    if (probe.alive) {
+      // A live supervisor of another major is a version fact, not a crash.
+      // Never remove its lock or try to replace it.
+      if (probe.major !== WIRE_PROTOCOL_MAJOR && options.allowLegacyProtocol !== true) {
+        throw versionMismatch(probe.major);
+      }
+      warnVersionMismatch(existing);
+      return { lock: existing, started: false };
+    }
   }
 
   if (options.autostart === false) {
@@ -146,14 +155,15 @@ async function ensureLock(
   while (Date.now() < deadline) {
     const lock = readLock(options.home);
     if (lock) {
-      const expectedMajor = options.allowLegacyProtocol ? null : WIRE_PROTOCOL_MAJOR;
-      if (expectedMajor !== null && lock.protocolVersion !== expectedMajor) {
-        throw new HlaoError(
-          "version_mismatch",
-          `supervisor speaks wire protocol major ${lock.protocolVersion}; this CLI speaks ${WIRE_PROTOCOL_MAJOR}`,
-        );
+      const legacyAllowed = options.allowLegacyProtocol === true;
+      if (!legacyAllowed && lock.protocolVersion !== WIRE_PROTOCOL_MAJOR) {
+        throw versionMismatch(lock.protocolVersion);
       }
-      if (await probeSupervisor(lock, 500, expectedMajor)) {
+      const probe = await probeSupervisor(lock, 500);
+      if (probe.alive) {
+        if (!legacyAllowed && probe.major !== WIRE_PROTOCOL_MAJOR) {
+          throw versionMismatch(probe.major);
+        }
         warnVersionMismatch(lock);
         return { lock, started };
       }
@@ -569,6 +579,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * A live old-major supervisor is reported before any command touches it. The
+ * operator stops it with the old CLI, or with `hlao down` (which uses the
+ * legacy connection path), then starts 0.15.
+ */
+function versionMismatch(major: number | null): HlaoError {
+  return new HlaoError(
+    "version_mismatch",
+    `the running supervisor speaks wire protocol major ${major ?? "unknown"}; this CLI speaks ${WIRE_PROTOCOL_MAJOR}. Stop the old supervisor with its own CLI ("hlao down") or with "hlao down" from this CLI (legacy path), then retry so 0.15 can start. The old supervisor's lock was left in place.`,
+    { supervisorMajor: major, clientMajor: WIRE_PROTOCOL_MAJOR },
+  );
 }
 
 function warnVersionMismatch(lock: LockInfo): void {

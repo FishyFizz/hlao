@@ -17,7 +17,6 @@ import {
   cmdMode,
   cmdOption,
   cmdPermit,
-  cmdPolicy,
   cmdQueue,
   cmdRename,
 } from "./commands/control.js";
@@ -150,7 +149,11 @@ export async function main(argv: string[]): Promise<number> {
       case "mode":
         return await cmdMode(args);
       case "policy":
-        return await cmdPolicy(args);
+        // Removed in protocol 3.0. Name the replacement rather than the
+        // generic unknown-command error: every 0.14 user has this habit.
+        throw usageError(
+          "\"hlao policy\" was removed in 0.15 (protocol 3.0). The provider mode is the permission policy: read it with \"hlao mode <id>\", set it with \"hlao mode <id> <mode>\", and answer provider asks with \"hlao permit\".",
+        );
       case "option":
         return await cmdOption(args);
       case "queue":

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HlaoError } from "../../src/errors.js";
 import {
+  isMethod,
   parseEnvelope,
   parseParams,
   type HelloParams,
+  type PermitParams,
   type ReadParams,
   type SpawnParams,
   type SubscribeParams,
@@ -88,6 +90,45 @@ test("spawn params validate and default", () => {
         backend: "fake",
         resumeSessionId: "provider-1",
         forkSessionId: "provider-1",
+      }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
+test("permit requires optionId and rejects the removed always field", () => {
+  const params = parseParams("sessions.permit", {
+    sessionId: "abc",
+    optionId: "allow",
+    requestId: "req-1",
+  }) as PermitParams;
+  assert.equal(params.optionId, "allow");
+  assert.equal(params.requestId, "req-1");
+
+  assert.throws(
+    () => parseParams("sessions.permit", { sessionId: "abc" }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+  assert.throws(
+    () =>
+      parseParams("sessions.permit", {
+        sessionId: "abc",
+        optionId: "allow",
+        always: true,
+      }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
+test("the removed policy wire surface is not a method or a spawn field", () => {
+  assert.equal(isMethod("sessions.set_policy"), false);
+  assert.throws(
+    () =>
+      parseParams("sessions.spawn", {
+        backend: "fake",
+        permissionPolicy: "allow",
       }),
     (error: unknown) =>
       error instanceof HlaoError && error.code === "bad_request",

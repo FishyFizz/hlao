@@ -16,7 +16,6 @@ test("help teaches universal addressing and drops removed scope language", () =>
     "close",
     "permit",
     "mode",
-    "policy",
     "option",
     "queue",
     "rename",
@@ -35,7 +34,13 @@ test("help teaches universal addressing and drops removed scope language", () =>
 
   assert.doesNotMatch(text, /descendants only|parent may|sees itself/);
   assert.match(text, /addressable by every caller/);
-  assert.match(commandHelp("policy"), /any caller in the instance/);
+  assert.doesNotMatch(fullHelp(), /hlao policy /);
+  assert.match(commandHelp("permit"), /operator-only/);
+  assert.match(commandHelp("permit"), /--request ID/);
+  assert.match(commandHelp("permit"), /--deny --always/);
+  assert.match(commandHelp("mode"), /operator-only/);
+  assert.match(commandHelp("mode"), /--root SESSION/);
+  assert.match(commandHelp("spawn"), /defaultMode/);
   assert.match(commandHelp("wait"), /historical completion condition/);
   assert.match(commandHelp("list"), /--cwd DIR \(exact working directory\)/);
   assert.match(commandHelp("get"), /--brief/);
@@ -49,4 +54,5 @@ test("mistyped commands suggest the nearest names", () => {
   assert.equal(suggestCommands("lst")[0], "list");
   assert.ok(suggestCommands("sernd").includes("send"));
   assert.deepEqual(suggestCommands("frobnicate"), []);
+  assert.equal(suggestCommands("policy").includes("policy"), false);
 });

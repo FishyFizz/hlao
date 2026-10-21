@@ -8,7 +8,6 @@ export type StopReason =
   | "refusal"
   | "cancelled";
 
-export type PermissionPolicy = "ask" | "allow" | "deny";
 export type SessionStatus =
   | "starting"
   | "idle"
@@ -51,7 +50,6 @@ export const EVENT_TYPES = [
   "permission.resolved",
   "elicitation.requested",
   "elicitation.resolved",
-  "policy.changed",
   "notice",
   "usage",
   "mode",
@@ -185,7 +183,8 @@ export interface SessionView {
     title: string | null;
     at: string;
   } | null;
-  pendingPermission: PermissionView | null;
+  /** Provider permission requests awaiting an operator answer, FIFO (3.0). */
+  pendingPermissions: PermissionView[];
   /** A provider question awaiting an operator answer (2.6). */
   pendingElicitation?: ElicitationView | null;
   lastStopReason: StopReason | null;
@@ -204,7 +203,6 @@ export interface SessionView {
   forkedFrom?: string | null;
   processId: number | null;
   exit: { code: number | null; signal: string | null } | null;
-  permissionPolicy: PermissionPolicy;
   modes: SessionModes | null;
   configOptions: SessionConfigOptionView[] | null;
   /**
@@ -255,6 +253,8 @@ export interface AgentView {
   configPath?: string;
   available: boolean;
   unavailableReason?: string;
+  /** The operator's per-backend spawn mode, when configured (3.0). */
+  defaultMode?: string;
 }
 
 /** A configured adapter, as exposed by `backends.list`. */
@@ -320,7 +320,6 @@ const METHODS = [
   "sessions.permit",
   "sessions.respond_elicitation",
   "sessions.set_mode",
-  "sessions.set_policy",
   "sessions.set_config_option",
   "sessions.queue",
   "sessions.queue_drop",
@@ -409,7 +408,6 @@ export interface SpawnParams {
   model?: string;
   config?: Record<string, string | boolean>;
   parentSessionId?: string;
-  permissionPolicy?: PermissionPolicy;
   env?: Record<string, string>;
   /** Include the HLAO skill pointer in the first prompt. Default true. */
   skill?: boolean;
@@ -603,9 +601,9 @@ export interface CloseResult {
 }
 export interface PermitParams {
   sessionId: string;
-  optionId?: string;
+  optionId: string;
+  /** Required when more than one request is pending. */
   requestId?: string;
-  always?: boolean;
 }
 export interface PermitResult {
   session: SessionView;
@@ -625,13 +623,6 @@ export interface RespondElicitationResult {
   requestId: string;
   action: "accept" | "decline" | "cancel";
   by: string;
-}
-export interface SetPolicyParams {
-  sessionId: string;
-  permissionPolicy: PermissionPolicy;
-}
-export interface SetPolicyResult {
-  session: SessionView;
 }
 export interface QueueItemView {
   /** Stable message id; the active turn's id is also in its prompt.sent event. */
@@ -719,7 +710,6 @@ export type ParamsByMethod = {
   "sessions.permit": PermitParams;
   "sessions.respond_elicitation": RespondElicitationParams;
   "sessions.set_mode": SetModeParams;
-  "sessions.set_policy": SetPolicyParams;
   "sessions.set_config_option": SetConfigOptionParams;
   "sessions.queue": QueueParams;
   "sessions.queue_drop": QueueDropParams;

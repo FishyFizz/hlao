@@ -1,6 +1,10 @@
-
 import { HlaoError } from "../../errors.js";
-import type { GetResult, PermitResult, SessionView } from "../../protocol.js";
+import type {
+  GetResult,
+  PermitResult,
+  PermissionView,
+  SessionView,
+} from "../../protocol.js";
 
 import { booleanOption, expectPositionals, numberOption, parseArgs, stringOption, usageError } from "../args.js";
 import { COMMON, connect, contextFrom, out, resolveTarget, sessionLabel, writeJson } from "../context.js";
@@ -17,6 +21,7 @@ export async function cmdPermit(args: string[]): Promise<number> {
     { name: "allow", type: "boolean" },
     { name: "deny", type: "boolean" },
     { name: "always", type: "boolean" },
+    { name: "request", type: "string", valueName: "REQUEST" },
     { name: "all-pending", type: "boolean" },
     { name: "root", type: "string", valueName: "SESSION" },
     { name: "tree", type: "boolean" },
@@ -26,6 +31,15 @@ export async function cmdPermit(args: string[]): Promise<number> {
   ]);
   if (helpRequested(parsed, "permit")) return 0;
   expectPositionals(parsed, "permit", 0, 1);
+
+  // Answering a request is operator-only. The supervisor enforces it; this
+  // early check keeps an agent from mistaking its own answer for progress.
+  if (process.env.HLAO_SESSION_ID?.trim()) {
+    throw new HlaoError(
+      "operator_only",
+      "only an operator shell without HLAO_SESSION_ID may answer a permission request; report the blocker to the operator",
+    );
+  }
 
   const optionFlag = stringOption(parsed, "option");
   const wantsAllow = booleanOption(parsed, "allow") === true;
@@ -39,10 +53,14 @@ export async function cmdPermit(args: string[]): Promise<number> {
   if (chosenFlags > 1) {
     throw usageError("choose exactly one of --allow, --deny, --option");
   }
-  const always = booleanOption(parsed, "always") ?? false;
-  if (always && !wantsAllow) {
-    throw usageError("--always must be used with --allow");
+  const always = booleanOption(parsed, "always") === true;
+  if (always && optionFlag !== undefined) {
+    throw usageError("--always selects the provider's always option; combine it with --allow or --deny, not --option");
   }
+  if (always && !wantsAllow && !wantsDeny) {
+    throw usageError("--always must be used with --allow or --deny");
+  }
+  const requestFilter = stringOption(parsed, "request");
 
   const ctx = contextFrom(parsed);
   const conn = await connect(ctx);
@@ -74,7 +92,7 @@ export async function cmdPermit(args: string[]): Promise<number> {
     }
     const selected = await selectSessions(conn, ctx, selectorFlags);
     const pending = selected.filter(
-      (session) => !isTerminal(session) && session.pendingPermission !== null,
+      (session) => !isTerminal(session) && session.pendingPermissions.length > 0,
     );
     if (pending.length === 0) {
       if (ctx.json) writeJson({ count: 0, resolved: [], failed: [] });
@@ -83,29 +101,39 @@ export async function cmdPermit(args: string[]): Promise<number> {
     }
 
     const resolved: PermitResult[] = [];
-    const failed: { sessionId: string; message: string }[] = [];
+    const failed: { sessionId: string; requestId: string; message: string }[] = [];
     for (const session of pending) {
-      const permission = session.pendingPermission!;
-      try {
-        const optionId = choosePermitOption(
-          permission,
-          optionFlag,
-          wantsAllow,
-          always,
-        );
-        const result = await conn.request<PermitResult>("sessions.permit", {
-          sessionId: session.id,
-          requestId: permission.requestId,
-          optionId,
-          ...(always ? { always: true } : {}),
-        });
-        resolved.push(result);
-      } catch (error) {
-        failed.push({
-          sessionId: session.id,
-          message: String((error as Error).message ?? error),
-        });
+      for (const permission of session.pendingPermissions) {
+        if (requestFilter !== undefined && permission.requestId !== requestFilter) {
+          continue;
+        }
+        try {
+          const optionId = choosePermitOption(
+            permission,
+            optionFlag,
+            wantsAllow,
+            always,
+          );
+          const result = await conn.request<PermitResult>("sessions.permit", {
+            sessionId: session.id,
+            requestId: permission.requestId,
+            optionId,
+          });
+          resolved.push(result);
+        } catch (error) {
+          failed.push({
+            sessionId: session.id,
+            requestId: permission.requestId,
+            message: String((error as Error).message ?? error),
+          });
+        }
       }
+    }
+
+    if (resolved.length === 0 && failed.length === 0) {
+      if (ctx.json) writeJson({ count: 0, resolved: [], failed: [] });
+      else out(`no pending permission with request id ${requestFilter}`);
+      return 0;
     }
 
     if (ctx.json) {
@@ -118,10 +146,14 @@ export async function cmdPermit(args: string[]): Promise<number> {
       );
     }
     for (const failure of failed) {
-      out(ctx.style.yellow(`${failure.sessionId}: ${failure.message}`));
+      out(
+        ctx.style.yellow(
+          `${failure.sessionId}/${failure.requestId}: ${failure.message}`,
+        ),
+      );
     }
     out(
-      `permitted ${resolved.length} session${resolved.length === 1 ? "" : "s"}` +
+      `permitted ${resolved.length} request${resolved.length === 1 ? "" : "s"}` +
         (failed.length > 0 ? ` · ${failed.length} failed` : ""),
     );
     return failed.length > 0 ? 1 : 0;
@@ -129,20 +161,17 @@ export async function cmdPermit(args: string[]): Promise<number> {
 
   const sessionId = resolveTarget(parsed, "permit", "selfDefault");
   const current = await conn.request<GetResult>("sessions.get", { sessionId });
-  const permission = current.session.pendingPermission;
-  if (!permission) {
-    throw new HlaoError(
-      "no_pending_permission",
-      `session ${current.session.id} has no pending permission`,
-    );
-  }
-
-  const optionId = choosePermitOption(permission, optionFlag, wantsAllow, always);
+  const permission = selectPending(current.session, requestFilter);
+  const optionId = choosePermitOption(
+    permission,
+    optionFlag,
+    wantsAllow,
+    always,
+  );
   const result = await conn.request<PermitResult>("sessions.permit", {
     sessionId: current.session.id,
     requestId: permission.requestId,
     optionId,
-    ...(always ? { always: true } : {}),
   });
 
   if (ctx.json) {
@@ -153,14 +182,53 @@ export async function cmdPermit(args: string[]): Promise<number> {
   out(
     `${styleStatus(result.session.status, ctx.style)} ${sessionLabel(ctx, result.session)} — ` +
       `${option?.kind ?? "selected"} ${optionId}` +
-      (permission.title ? ctx.style.dim(` · ${sanitize(permission.title)}`) : "") +
-      (always ? ctx.style.dim(" · future requests will be allowed automatically") : ""),
+      (permission.title ? ctx.style.dim(` · ${sanitize(permission.title)}`) : ""),
   );
   return 0;
 }
 
+/** Pick the request to answer, or explain why the command is ambiguous. */
+function selectPending(
+  session: SessionView,
+  requestId: string | undefined,
+): PermissionView {
+  const pending = session.pendingPermissions;
+  if (pending.length === 0) {
+    throw new HlaoError(
+      "no_pending_permission",
+      `session ${session.id} has no pending permission`,
+    );
+  }
+  if (requestId !== undefined) {
+    const found = pending.find((entry) => entry.requestId === requestId);
+    if (!found) {
+      throw new HlaoError(
+        "no_pending_permission",
+        `no pending permission with request id ${requestId}`,
+        { requestIds: pending.map((entry) => entry.requestId) },
+      );
+    }
+    return found;
+  }
+  if (pending.length > 1) {
+    throw new HlaoError(
+      "bad_request",
+      `session ${session.id} has ${pending.length} pending permission requests; pass --request <id> (${pending
+        .map((entry) => entry.requestId)
+        .join(", ")}) or --all-pending`,
+      { requestIds: pending.map((entry) => entry.requestId) },
+    );
+  }
+  return pending[0]!;
+}
+
+/**
+ * `--always` is a provider option selector, never a policy mutation:
+ * `--allow --always` requires `allow_always`, `--deny --always` requires
+ * `reject_always`, and a missing kind is `bad_option` with no fallback.
+ */
 function choosePermitOption(
-  permission: NonNullable<SessionView["pendingPermission"]>,
+  permission: PermissionView,
   optionId: string | undefined,
   wantsAllow: boolean,
   always: boolean,
@@ -175,24 +243,22 @@ function choosePermitOption(
     }
     return optionId;
   }
-  const option = wantsAllow
-    ? (always
-        ? permission.options.find((candidate) => candidate.kind === "allow_always")
-        : permission.options.find((candidate) => candidate.kind === "allow_once")) ??
-      permission.options.find(
-        (candidate) =>
-          candidate.kind === "allow_once" || candidate.kind === "allow_always",
-      )
-    : permission.options.find(
-        (candidate) =>
-          candidate.kind === "reject_once" || candidate.kind === "reject_always",
-      );
-  if (!option) {
-    throw new HlaoError(
-      "bad_option",
-      `no ${wantsAllow ? "allow" : "deny"} option was offered; use --option`,
-      { options: permission.options },
-    );
+  const kinds = always
+    ? [wantsAllow ? "allow_always" : "reject_always"]
+    : wantsAllow
+      ? ["allow_once", "allow_always"]
+      : ["reject_once", "reject_always"];
+  for (const kind of kinds) {
+    const option = permission.options.find((candidate) => candidate.kind === kind);
+    if (option) return option.optionId;
   }
-  return option.optionId;
+  throw new HlaoError(
+    "bad_option",
+    always
+      ? `this permission request offers no ${
+          wantsAllow ? "allow_always" : "reject_always"
+        } option; use --option to name one exactly`
+      : `no ${wantsAllow ? "allow" : "deny"} option was offered; use --option`,
+    { options: permission.options },
+  );
 }

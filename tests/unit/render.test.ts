@@ -39,12 +39,11 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     settled: true,
     lastSeq: 3,
     lastEvent: null,
-    pendingPermission: null,
+    pendingPermissions: [],
     lastStopReason: null,
     agentSessionId: "agent-1",
     processId: 4242,
     exit: null,
-    permissionPolicy: "allow",
     modes: null,
     configOptions: null,
     usage: null,
@@ -146,7 +145,7 @@ test("pending permission is summarized once when its event is in the page", () =
     {
       session: session({
         status: "waiting_permission",
-        pendingPermission: pending,
+        pendingPermissions: [pending],
         lastSeq: 1,
       }),
     },
@@ -154,7 +153,7 @@ test("pending permission is summarized once when its event is in the page", () =
   const output = renderReadResult(result, style);
   assert.equal(occurrences(output, "permission needed"), 1);
   assert.equal(occurrences(output, "pending permission:"), 1);
-  assert.match(output, /hlao permit abc123 --allow/);
+  assert.match(output, /hlao permit abc123 --request req-1 --allow/);
 });
 
 test("pending permission renders its full block when the event is outside the page", () => {
@@ -172,14 +171,37 @@ test("pending permission renders its full block when the event is outside the pa
   const result = readResult([event(10, "agent.message", { text: "x" })], {
     session: session({
       status: "waiting_permission",
-      pendingPermission: pending,
+      pendingPermissions: [pending],
       lastSeq: 10,
     }),
   });
   const output = renderReadResult(result, style);
   assert.equal(occurrences(output, "permission needed"), 1);
   assert.match(output, /Write a file/);
-  assert.match(output, /stop future asks: hlao permit abc123 --allow --always/);
+  assert.match(output, /always: hlao permit abc123 --request req-9 --allow --always/);
+});
+
+test("multiple pending permissions name the queue and per-request answers", () => {
+  const pending = (id: string, title: string) => ({
+    requestId: id,
+    toolCallId: null,
+    title,
+    kind: "execute",
+    options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    requestedAt: AT,
+  });
+  const output = renderSessionState(
+    session({
+      status: "waiting_permission",
+      pendingPermissions: [
+        pending("req-1", "Run one"),
+        pending("req-2", "Run two"),
+      ],
+    }),
+    style,
+  );
+  assert.match(output, /pending\s+2 pending: Run one; Run two/);
+  assert.match(output, /--all-pending --allow/);
 });
 
 test("terminal headers report ended and exit instead of a pid", () => {
@@ -508,24 +530,26 @@ test("get's state block carries the promised fields", () => {
         cost: { amount: 1234, currency: "USD" },
         at: AT,
       },
-      pendingPermission: {
-        requestId: "req-1",
-        toolCallId: "call-1",
-        title: "Run the build",
-        kind: "execute",
-        options: [],
-        requestedAt: AT,
-      },
+      pendingPermissions: [
+        {
+          requestId: "req-1",
+          toolCallId: "call-1",
+          title: "Run the build",
+          kind: "execute",
+          options: [],
+          requestedAt: AT,
+        },
+      ],
     }),
     style,
   );
 
   assert.match(output, /state\s+not settled · turn 2 · queued 1/);
-  assert.match(output, /policy\s+allow · mode default \(2 available\)/);
+  assert.match(output, /mode\s+default \(2 available\)/);
   assert.match(output, /config\s+model=opus/);
   assert.match(output, /usage\s+42\/200\.0k tokens · 12\.34 USD/);
   assert.match(output, /lineage\s+created by operator · parent parent1 · root parent1 · depth 1/);
-  assert.match(output, /pending\s+Run the build .* permit abc123 --allow/);
+  assert.match(output, /pending\s+Run the build .* permit abc123 --request req-1 --allow/);
   assert.match(output, /exit\s+pid 4242/);
   assert.match(output, /cwd\s+D:\\work/);
 });

@@ -78,8 +78,6 @@ import {
   type SetConfigOptionResult,
   type SetModeParams,
   type SetModeResult,
-  type SetPolicyParams,
-  type SetPolicyResult,
   type ShutdownParams,
   type ShutdownResult,
   type SpawnParams,
@@ -334,10 +332,22 @@ class SupervisorServer {
           removeLock(this.#home, existing.token);
         } else if (pidAlive(existing.pid)) {
           const age = Date.now() - Date.parse(existing.startedAt);
-          if (Number.isFinite(age) && age < 30_000) {
+          const probe = await probeSupervisor(existing);
+          if (probe.alive) {
+            // A live old-major supervisor is never a crash. Refuse the start
+            // and leave its lock and endpoint untouched.
+            if (probe.major !== WIRE_PROTOCOL_MAJOR) {
+              throw new HlaoError(
+                "version_mismatch",
+                `a live supervisor speaks wire protocol major ${probe.major ?? "unknown"}; this supervisor is ${WIRE_PROTOCOL_MAJOR}. Stop the old one with its own CLI ("hlao down") or with this CLI's legacy "hlao down", then start again. Its lock was left in place.`,
+                { supervisorMajor: probe.major, supervisorVersion: existing.version },
+              );
+            }
             throw new AlreadyRunningError(existing);
           }
-          if (await probeSupervisor(existing)) {
+          if (Number.isFinite(age) && age < 30_000) {
+            // A just-written lock may belong to a supervisor that is still
+            // binding its endpoint; give it the startup window.
             throw new AlreadyRunningError(existing);
           }
           detectedCrash = this.#crashFromLock(existing);
@@ -613,8 +623,6 @@ class SupervisorServer {
         );
       case "sessions.set_mode":
         return this.#setMode(params as SetModeParams, caller);
-      case "sessions.set_policy":
-        return this.#setPolicy(params as SetPolicyParams, caller);
       case "sessions.set_config_option":
         return this.#setConfigOption(params as SetConfigOptionParams, caller);
       case "sessions.queue":
@@ -647,6 +655,15 @@ class SupervisorServer {
   async #spawn(params: SpawnParams, caller: string | null): Promise<SpawnResult> {
     if (!this.#acceptingNew) {
       throw new HlaoError("session_closed", "the supervisor is shutting down");
+    }
+
+    // Control is operator-only. Checked before idempotency/resume early
+    // returns too, so a caller cannot smuggle a mode past a duplicate path.
+    if (params.mode !== undefined && caller !== null) {
+      throw new HlaoError(
+        "operator_only",
+        "only an operator shell without HLAO_SESSION_ID may pass --mode; an agent-spawned session uses the backend's defaultMode",
+      );
     }
 
     const key = params.idempotencyKey;
@@ -791,7 +808,8 @@ class SupervisorServer {
     const id = generateSessionId((candidate) => this.#sessions.has(candidate));
     const rootId = parent?.rootId ?? id;
     const depth = parent ? parent.depth + 1 : 0;
-    const policy = params.permissionPolicy ?? this.#config.permissionPolicy;
+    // operator --mode -> backend defaultMode -> the provider's own default.
+    const effectiveMode = params.mode ?? backend.defaultMode;
 
     const session = await Session.spawn({
       id,
@@ -802,9 +820,10 @@ class SupervisorServer {
       depth,
       name: params.name ?? null,
       createdBy: actor(caller),
-      requestedMode: params.mode,
+      requestedMode: effectiveMode,
       env: params.env ?? {},
-      permissionPolicy: policy,
+      permissionTimeoutMs: this.#config.permissionTimeoutMs,
+      maxPendingPermissions: this.#config.maxPendingPermissions,
       home: this.#home,
       config: {
         startupTimeoutMs: this.#config.startupTimeoutMs,
@@ -830,9 +849,9 @@ class SupervisorServer {
       throw new HlaoError("session_closed", "the supervisor is shutting down");
     }
 
-    if (params.mode !== undefined) {
+    if (effectiveMode !== undefined) {
       try {
-        await session.setMode(params.mode, actor(caller));
+        await session.setMode(effectiveMode, actor(caller));
       } catch (error) {
         await session.close(true, actor(caller));
         throw error;
@@ -1015,7 +1034,7 @@ class SupervisorServer {
     if (until === "change") return false;
     const view = session.view();
     const awaitingInput =
-      view.pendingPermission !== null || view.pendingElicitation !== null;
+      view.pendingPermissions.length > 0 || view.pendingElicitation !== null;
     switch (until) {
       case "idle":
         return view.status === "idle";
@@ -1235,14 +1254,18 @@ class SupervisorServer {
             if (terminal) {
               return { session: view, satisfied: true, reason: "exit" };
             }
-            if (view.pendingPermission !== null) {
+            if (
+              view.pendingPermissions.length > 0 ||
+              view.pendingElicitation !== null
+            ) {
               return { session: view, satisfied: true, reason: "permission" };
             }
             return view.settled
               ? { session: view, satisfied: true, reason: "idle" }
               : { session: view, satisfied: false, reason: "pending" };
           case "permission":
-            return view.pendingPermission !== null
+            return view.pendingPermissions.length > 0 ||
+              view.pendingElicitation !== null
               ? { session: view, satisfied: true, reason: "permission" }
               : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
           case "exit":
@@ -1366,18 +1389,21 @@ class SupervisorServer {
   }
 
   #permit(params: PermitParams, caller: string | null): PermitResult {
+    // The supervisor is the authority; the CLI pre-check is only a clear early
+    // message. An agent may read pending requests but never answer one.
+    if (caller !== null) {
+      throw new HlaoError(
+        "operator_only",
+        "only an operator shell without HLAO_SESSION_ID may answer a permission request; report the blocker to the operator",
+      );
+    }
     const session = this.#resolve(params.sessionId);
-    const resolved = session.permit(
-      params.optionId,
-      params.requestId,
-      params.always ?? false,
-      actor(caller),
-    );
+    const resolved = session.permit(params.optionId, params.requestId, "operator");
     return {
       session: session.view(),
       requestId: resolved.requestId,
       optionId: resolved.optionId,
-      by: actor(caller),
+      by: "operator",
     };
   }
 
@@ -1401,14 +1427,14 @@ class SupervisorServer {
   }
 
   async #setMode(params: SetModeParams, caller: string | null): Promise<SetModeResult> {
+    if (caller !== null) {
+      throw new HlaoError(
+        "operator_only",
+        "only an operator shell without HLAO_SESSION_ID may change a provider mode; reads stay open through sessions.get",
+      );
+    }
     const session = this.#resolve(params.sessionId);
-    await session.setMode(params.modeId, actor(caller));
-    return { session: session.view() };
-  }
-
-  #setPolicy(params: SetPolicyParams, caller: string | null): SetPolicyResult {
-    const session = this.#resolve(params.sessionId);
-    session.setPolicy(params.permissionPolicy, actor(caller));
+    await session.setMode(params.modeId, "operator");
     return { session: session.view() };
   }
 

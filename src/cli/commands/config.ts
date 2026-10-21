@@ -52,10 +52,17 @@ export async function cmdConfig(args: string[]): Promise<number> {
 
   out(`config ${file}${existsSync(file) ? "" : " (missing; defaults)"}`);
   if (loaded.error) out(ctx.style.red(`invalid: ${loaded.error.message}`));
-  out(`  permissionPolicy   ${redacted.permissionPolicy}`);
   out(`  waitTimeoutMs      ${formatDuration(redacted.waitTimeoutMs)}`);
   out(`  sendWaitTimeoutMs  ${formatDuration(redacted.sendWaitTimeoutMs)}`);
   out(`  startupTimeoutMs   ${formatDuration(redacted.startupTimeoutMs)}`);
+  out(
+    `  permissionTimeoutMs ${
+      redacted.permissionTimeoutMs === 0
+        ? "0 (park)"
+        : formatDuration(redacted.permissionTimeoutMs)
+    }`,
+  );
+  out(`  maxPendingPermissions ${redacted.maxPendingPermissions}`);
   out(`  maxEventsPerSession ${redacted.maxEventsPerSession}`);
   out(`  maxEventLogBytes   ${redacted.maxEventLogBytes}`);
   out(`  maxEventBytes      ${redacted.maxEventBytes}`);

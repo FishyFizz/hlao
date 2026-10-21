@@ -76,8 +76,6 @@ test("a visible pending permission is summarized once in the header", async (t) 
     "gate",
     "--env",
     "FAKE_MODE=permission",
-    "--permission",
-    "ask",
   ]);
   assert.equal(spawned.code, 0);
   const id = spawned.value.session.id;
