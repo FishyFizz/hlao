@@ -69,9 +69,15 @@ The permission keys bound the relay:
 `permissionPolicy` was removed in protocol 3.0. Its presence is rejected with a migration
 message naming `backends.<name>.defaultMode`, not the generic unknown-key error.
 
-`defaultMode` is accepted in user and project backend manifests. The effective spawn mode is
-the operator's `--mode` → the backend's `defaultMode` → the provider's own default. Mode
-names are not normalized; an unknown name is reported by the adapter at spawn.
+`defaultMode` is accepted in user and project backend manifests. The effective new-session
+mode is the operator's `--mode` → the backend's `defaultMode` → the provider's own default.
+A resumed or forked session keeps the provider's persisted mode instead. Mode names are not
+normalized; an unknown name is reported by the adapter at spawn.
+
+Provider session discovery (`backends.sessions`) uses the same merged manifest for the
+requested cwd. There is no config key to enable it: the adapter must advertise ACP
+`session/list`. The short-lived probe inherits the manifest `env` but no `HLAO_*` identity,
+because it is not an HLAO session.
 
 ## Project config — `<cwd>/.hlao/agents.json`
 

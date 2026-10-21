@@ -1,6 +1,6 @@
 # Protocol stability for a dashboard client
 
-**Evaluated:** 2026-10-21, HLAO 0.15.0, wire protocol 3.0.
+**Evaluated:** 2026-10-21, HLAO 0.16.0, wire protocol 3.1.
 **Question:** is the current frame protocol stable enough to start a dashboard side project?
 **Verdict:** **Yes, with a versioned, capability-aware client.** The frame format, persistent
 stream, subscriptions, view/event notifications, and resume cursors are implemented, documented,
@@ -8,9 +8,10 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
 
 1. Require wire **major 3** and feature-detect capabilities; do not key behavior off the
    package version or a minor number. Protocol 3.0 is a deliberate break: it removes the
-   policy surface and replaces `pendingPermission` with `pendingPermissions`. An old-major
-   supervisor is reported as `version_mismatch` and is never replaced; stop it with the old
-   CLI (or `hlao down`, which uses the legacy connection path) before starting 3.0.
+   policy surface and replaces `pendingPermission` with `pendingPermissions`. Protocol 3.1
+   is additive: it adds `backends.sessions` for provider discovery. An old-major supervisor
+   is reported as `version_mismatch` and is never replaced; stop it with the old CLI (or
+   `hlao down`, which uses the legacy connection path) before starting 3.x.
 2. Use a **local process** (Node/Tauri/Electron) that can open the named pipe/Unix socket and
    read the token. A browser needs a local frame bridge; it must never receive the supervisor
    token.
@@ -30,7 +31,8 @@ and exercised by the raw-client tests. A dashboard can start now. Three conditio
   `sessions.set_policy`, and `policy.changed`; adds `pendingPermissions`,
   `permission.requested.queuePosition`, `PermitParams.requestId`, and `AgentView.defaultMode`;
   and makes `sessions.permit`/`sessions.set_mode` operator-only. There is no compatibility
-  shim.
+  shim. 3.1 adds `backends.sessions` (provider catalog, live-joined) without changing an
+  existing method; a 3.0 client can ignore it.
 - **Persistent streams.** `hello` with `stream: {persistent: true}` opens a multiplexed
   connection. Requests carry a client-chosen `id`; responses echo it. The server may send
   notification frames. The legacy one-request-per-connection path remains, so a dashboard can
@@ -95,7 +97,7 @@ handling should be exercised against a slow/stalled consumer before it is truste
 ## Recommended dashboard shape
 
 1. **Startup:** read `<HLAO_HOME>/supervisor.json` (endpoint + token) or ask the operator for
-   the home. Call `hello` without persistence first; require `protocolVersion.major === 2`,
+   the home. Call `hello` without persistence first; require `protocolVersion.major === 3`,
    and check `stream.persistent`, `stream.subscribe`, and `stream.resume` before using push.
 2. **Persistent connection:** call `hello` again with `stream: {persistent: true}` (or send the
    persistent hello first if the supervisor is known to be 2.1+).
@@ -122,13 +124,16 @@ handling should be exercised against a slow/stalled consumer before it is truste
    WebSocket) is not shipped; local IPC is the supported dashboard transport today.
 8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
    `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`,
-   `spawn.resume`, `spawn.fork`, `read.time`, `read.regex`, `read.context`,
-   `session.firstPrompt`, `session.pendingPermissions`, `permit.request`, and the 2.5
-   provider-state capabilities (`session.compaction`,
+   `spawn.resume`, `spawn.fork`, `backends.sessions`, `read.time`, `read.regex`,
+   `read.context`, `session.firstPrompt`, `session.pendingPermissions`, `permit.request`,
+   and the 2.5 provider-state capabilities (`session.compaction`,
    `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`).
    A missing capability means "render the old view", not "fail the dashboard". A dashboard
    without `spawn.resume` must keep reporting evicted history as unrecoverable; one with it
-   can offer "open the provider transcript" instead.
+   can offer "open the provider transcript" instead. Without `backends.sessions`, keep the
+   manual provider-id input; with it, offer the provider catalog picker. The catalog read is
+   on demand and starts an adapter, so load it when the user opens the provider-session
+   surface, not on every render.
 
 ## Known gaps and how to handle them now
 
@@ -159,7 +164,7 @@ handling should be exercised against a slow/stalled consumer before it is truste
 
 ## Go/no-go checklist
 
-- [ ] Client requires `hello.protocolVersion.major === 2`.
+- [ ] Client requires `hello.protocolVersion.major === 3`.
 - [ ] Client checks `stream.persistent`, `stream.subscribe`, `stream.resume` before push.
 - [ ] Fleet subscription drives the session list; a per-session subscription drives the
       transcript; new sessions are added by resubscribing.
@@ -172,6 +177,7 @@ handling should be exercised against a slow/stalled consumer before it is truste
 - [ ] Read time/regex/context filters are offered only when the corresponding capability is
       present.
 
-**Conclusion:** the dashboard can start now against wire major 2 with capability detection.
+**Conclusion:** the dashboard can start now against wire major 3 with capability detection,
+and 3.1's provider catalog is an optional picker rather than a prerequisite.
 0.13's observation additions are in wire 2.8 and are additive; a 2.7 client ignores them, so
 the same view can grow without a protocol break or a second surface.

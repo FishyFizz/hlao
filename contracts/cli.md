@@ -11,6 +11,9 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--config KEY=VALUE]... [--parent SESSION]
                 [--env K=V]... [--no-skill] [--idempotency-key KEY]
                 [--resume PROVIDER_ID | --fork PROVIDER_ID]
+hlao provider sessions <backend> [--cwd DIR | --all] [--cursor CURSOR]
+hlao adopt <backend> <provider-id> [--cwd DIR] [--name LABEL]
+                [--parent SESSION] [--fork] [--no-skill]
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR] [--idempotency-key KEY] [--steer | --queue]
 hlao read [<id>] [--self] [--since N | --before N] [--limit N]
@@ -258,6 +261,24 @@ has the provider context but the client sees no history, and `session.forked` re
 the single `sessions.spawn` call and its `firstTurn` result. A long human wait on `spawn
 --wait`, `send --wait`, `wait`, or `read --follow` writes one progress line to stderr after two
 seconds when stderr is a TTY; pipes and JSON never see it.
+
+`provider sessions <backend>` reads the adapter's own ACP `session/list` for one backend,
+optionally scoped to an absolute `--cwd` or across cwds with `--all`. It prints provider
+session id, updated age, title, cwd, and the live HLAO attachment when this instance
+currently drives the row. The read starts a short-lived adapter and creates no HLAO session.
+A backend without `session/list` fails with a clear error. `--json` returns
+`ProviderSessionsResult`; `--cursor` continues from `nextCursor`.
+
+`adopt <backend> <provider-id>` is a client assembly over `provider sessions` and
+`sessions.spawn`. It finds the provider row, uses its cwd unless `--cwd` is supplied, refuses
+a mismatched explicit cwd, and reattaches with ACP `session/load`. The new session gets a new
+HLAO id, name, parent/root, and environment; the old HLAO id is not restored. An operator
+adoption is a root unless `--parent` names a live session; an agent adoption defaults to the
+caller as parent. A live attachment returns `duplicate: true` without opening a second
+adapter. `--fork` copies the provider session with ACP `session/fork` instead; the source
+keeps running. `--name` labels the new session and `--no-skill` omits the first-prompt skill
+pointer. A resumed or forked session keeps the provider's persisted mode; `defaultMode`
+applies to new sessions only.
 
 `agents`, `config`, and `doctor` are local and non-mutating; none autostarts a supervisor.
 `agents` reports the file that defined each user or project backend, middle-truncated in human

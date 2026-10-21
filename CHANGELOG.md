@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.16.0 — unreleased
+
+Provider session discovery and adoption. HLAO can read the provider's own
+session catalog and take an existing provider conversation into the instance
+as a new HLAO session. It still keeps no durable provider-to-agent registry:
+the provider owns the catalog, and the supervisor's live table is the only
+address space.
+
+### Added
+
+- `backends.sessions` (protocol 3.1): a capability-gated read of ACP
+  `session/list` for a backend and absolute cwd (or across cwds when omitted).
+  Rows are provider-owned provider session ids with cwd, title, and updatedAt,
+  live-joined to any non-terminal HLAO session that currently holds the same
+  provider id. The read starts a short-lived adapter and creates no HLAO
+  session and no provider conversation.
+- `hlao provider sessions <backend> [--cwd DIR | --all] [--cursor CURSOR]`:
+  the human/JSON surface for the provider catalog. Provider-only rows are
+  labelled as such; they can be adopted into the instance.
+- `hlao adopt <backend> <provider-id> [--cwd DIR] [--name LABEL] [--fork]
+  [--no-skill]`: a client assembly over `backends.sessions` and
+  `sessions.spawn` that takes an existing provider conversation into the
+  instance. It uses the provider row's cwd by default, refuses a mismatched
+  explicit cwd, and reports an already-attached provider session as a
+  duplicate instead of opening a second adapter. `--fork` copies the provider
+  session instead of attaching it.
+- Capability `backends.sessions`. Protocol minor moves to 3.1; existing 3.0
+  clients are unaffected.
+
+### Changed
+
+- A resumed or forked session keeps the provider's persisted mode. A backend's
+  `defaultMode` now applies only to a genuinely new session; an explicit
+  operator `--mode` still overrides. This prevents a crash recovery or an
+  adoption from silently changing the conversation's permission policy.
+- The test fixture adapter can expose a durable provider catalog
+  (`FAKE_PROVIDER_CATALOG_FILE`) and external rows
+  (`FAKE_PROVIDER_SESSIONS`), and can omit `session/list`
+  (`FAKE_NO_LIST_SESSION=1`).
+
+### Notes
+
+- This is a read of the provider, not a second authority. There is still no
+  persisted HLAO session index, no durable lineage, and no automatic job-tree
+  recovery. Adopting a provider session creates a new HLAO id, name, and
+  lineage; the old HLAO id is not restored.
+- HLAO cannot detect another client or another HLAO home driving the same
+  provider session. Use `--fork` when the source must stay untouched.
+
 ## 0.15.0 — unreleased
 
 Protocol 3.0. HLAO no longer owns a permission policy: the provider's mode is the

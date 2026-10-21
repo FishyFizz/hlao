@@ -36,6 +36,10 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
   the supervisor's file), which end with the CLI process.
 - The supervisor owns live sessions and their child processes. Its in-memory process table
   is the state; there is no session database and no global session registry.
+- Provider session discovery is a read of the provider's `session/list`, not a second
+  registry. The supervisor starts a short-lived adapter for the read, joins the rows to
+  the live table for attachment status, and writes nothing. Adoption is a client assembly
+  over that read and `sessions.spawn`.
 - Each HLAO session is one adapter process running one ACP session. Isolation is deliberate:
   a crash, a permission block, or a close touches one session.
 - On a graceful exit the supervisor closes its sessions. If it is killed hard, the session
@@ -52,15 +56,17 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `time` | Duration parsing/formatting | — | — |
 | `ids` | Session handle generation/validation | — | — |
 | `version` | Package version at runtime | — | — |
+| `acp` | The client capabilities HLAO advertises to an adapter | — | ACP SDK types |
 | `paths` | Runtime file and socket locations | location naming | `errors` |
 | `protocol` | Client↔supervisor wire contract and boundary validation | wire schema, version, capabilities | `errors` |
+| `provider` | Read the provider's own session catalog with a short-lived adapter | probe lifecycle and normalization | `acp`, `config`, `errors`, `protocol`, `session/async`, `session/process`, `version` |
 | `stream` | Framed message streams over a transport | framing, buffering, transport adapters | `protocol`, `errors` |
 | `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `stream`, `errors` |
 | `logger` | Supervisor diagnostics log | log rotation | `paths` |
 | `config` | Backend manifests and user/project config | config merge rules | `paths`, `errors` |
 | `crash` | Diagnostic marker for a supervisor replaced after a crash | — | `paths`, `protocol` |
 | `events` | Bounded, seq-addressed event log | retention and cursors | — |
-| `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
+| `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `acp`, `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
 | `supervisor` | Process lifecycle, lock/listener, dispatch, universal addressing | live session table | `session`, `config`, `crash`, `lock`, `logger`, `paths`, `protocol`, `stream`, `errors` |
 | `client` | Client-side transport and autostart | — | `config`, `crash`, `lock`, `protocol`, `paths`, `stream`, `time`, `errors` |
 | `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
@@ -205,10 +211,10 @@ request is relayed to the operator:
   `permit`, `mode` set, and a spawn `mode` are operator-only; reads stay open.
 
 Provider-native modes are the policy layer: the session view reports the adapter's `modes`,
-`spawn --mode` selects one, and `hlao mode` reads or switches it. The effective spawn mode is
-operator `--mode` → the backend's `defaultMode` → the provider's default. The provider can
-therefore stop asking at the source; the relay keeps every remaining ask visible and
-bounded.
+`spawn --mode` selects one, and `hlao mode` reads or switches it. The effective mode for a
+new session is operator `--mode` → the backend's `defaultMode` → the provider's default. A
+resumed or forked session keeps the provider's persisted mode. The provider can therefore
+stop asking at the source; the relay keeps every remaining ask visible and bounded.
 
 ## Addressing and isolation
 
@@ -237,6 +243,7 @@ bounded.
 | Client disconnects during `wait`/`send --wait` | the waiter is removed; the session is unaffected |
 | Supervisor exits gracefully | all child sessions end; lock and socket are removed |
 | Supervisor is killed hard | the session table is gone; adapter processes can survive on Windows; `down --force` removes an unverified stale lock without killing its pid |
+| Provider catalog read fails | `bad_request` when the adapter does not advertise `session/list`; `spawn_failed` when its probe cannot start or times out. No HLAO session is created. |
 | Stale lock after a crash | next command detects a dead pid, removes the lock, autostarts |
 | Event log evicts unread events | `read` reports `truncated: true` and the earliest retained sequence; the provider's transcript is still reachable with `spawn --resume <provider id>` (ADR 0011) |
 
@@ -246,6 +253,8 @@ bounded.
 - No durable event store or transcript authority. The provider owns the transcript;
   `spawn --resume` reads it with ACP `session/load`, and `spawn --fork` copies it with
   `session/fork` (ADR 0011).
+- No provider-to-agent registry or persisted HLAO session index. Provider discovery is a
+  capability-gated read of the provider's catalog, joined to the live table (ADR 0014).
 - No cold-host lineage reconstruction; the tree is the live handles.
 - No provider-internal subagent surfacing: `clientCapabilities.subagents` is never
   advertised, so provider subagents stay inside the leaf.
@@ -266,3 +275,6 @@ bounded.
 - `0011-provider-session-resume.md` — the provider session id is the durable handle;
   `spawn --resume` reads the provider's transcript through ACP `session/load`, and
   `spawn --fork` copies it through `session/fork`.
+- `0014-provider-session-discovery.md` — provider discovery is a capability-gated read of
+  ACP `session/list`, joined to the live table; adoption is a client assembly, not a
+  persisted registry.

@@ -258,14 +258,15 @@ The token is the instance boundary.
   compatible with an older client; a newer client must use capabilities or version checks
   before relying on an addition.
 - `capabilities` lists additive features this supervisor implements. Unknown capabilities must
-  be ignored. Known values: `backends.list`, `session.usage`, `read.filters`, `read.before`,
-  `wait.multi`, `stream.persistent`, `stream.subscribe`, `stream.resume`, `wait.settled`,
-  `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
-  `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
-  `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
-  `session.messages`, `session.elicitation`, `spawn.resume`, `spawn.fork`,
-  `read.time`, `read.regex`, `read.context`, `session.firstPrompt`, `send.steering`,
-  `session.pendingPermissions`, `permit.request`.
+  be ignored. Known values: `backends.list`, `backends.sessions`, `session.usage`,
+  `read.filters`, `read.before`, `wait.multi`, `stream.persistent`, `stream.subscribe`,
+  `stream.resume`, `wait.settled`, `wait.filters`, `session.settled`, `session.lastEvent`,
+  `send.messageId`, `send.idempotency`, `spawn.idempotency`, `spawn.createdBy`,
+  `supervisor.lastCrash`, `prompt.injected`, `session.compaction`, `session.notices`,
+  `session.plan`, `session.title`, `session.agent`, `session.messages`,
+  `session.elicitation`, `spawn.resume`, `spawn.fork`, `read.time`, `read.regex`,
+  `read.context`, `session.firstPrompt`, `send.steering`, `session.pendingPermissions`,
+  `permit.request`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -307,6 +308,12 @@ The token is the instance boundary.
   gains optional `steered`, `SessionView` gains optional `steeringSupported`, and the
   `prompt.steered` event type marks the delivery. Capability: `send.steering`. A client that
   omits `steer` keeps the queued behavior.
+- **3.1** adds provider session discovery: `backends.sessions`, which reads the adapter's
+  own `session/list` for a backend and an optional cwd, joined to the live table. New
+  types `ProviderSessionsParams`, `ProviderSessionView`, and `ProviderSessionsResult`; new
+  capability `backends.sessions`. The read creates no HLAO session and stores no mapping.
+  A resume or fork keeps the provider's mode; `BackendManifest.defaultMode` applies to new
+  sessions only. A 3.0 client that does not call the method is unaffected.
 - **3.0** is a breaking change: HLAO no longer owns a permission policy. Removed:
   `PermissionPolicy`, `SessionView.permissionPolicy`, `SessionView.pendingPermission`,
   `SpawnParams.permissionPolicy`, `sessions.set_policy`, `policy.changed`,
@@ -350,6 +357,7 @@ Method index:
 | Method | Params | Result |
 |---|---|---|| `hello` | `HelloParams` | `HelloResult` |
 | `backends.list` | `{ cwd? }` | `{ backends: AgentView[] }` |
+| `backends.sessions` | `{ backend, cwd?, cursor? }` | `ProviderSessionsResult` |
 | `sessions.spawn` | `SpawnParams` | `SpawnResult` |
 | `sessions.list` | `{ includeClosed?, cwd? }` | `{ sessions: SessionView[] }` |
 | `sessions.get` | `{ sessionId }` | `{ session: SessionView }` |
@@ -449,6 +457,56 @@ type AgentView = {
 };
 ```
 
+### `backends.sessions`
+
+Params:
+
+```ts
+{
+  backend: string;   // a configured backend name
+  cwd?: string;      // absolute cwd filter; omit to read the provider's catalog across cwds
+  cursor?: string;   // opaque cursor from an earlier nextCursor
+}
+```
+
+Result:
+
+```ts
+{
+  backend: string;
+  cwd: string | null;        // the filter used, or null when reading across cwds
+  agentName: string | null;  // the adapter's initialize agentInfo
+  agentVersion: string | null;
+  sessions: ProviderSessionView[];
+  nextCursor: string | null;
+}
+
+type ProviderSessionView = {
+  sessionId: string;         // the provider's durable id, not an HLAO id
+  cwd: string;
+  title: string | null;
+  updatedAt: string | null;
+  attached: boolean;         // a non-terminal HLAO session holds this provider id
+  hlaoSessionId: string | null;
+  hlaoName: string | null;
+  hlaoStatus: SessionStatus | null;
+  loadable: boolean;         // the adapter advertises ACP loadSession
+  forkable: boolean;         // the adapter advertises ACP session/fork
+};
+```
+
+This reads the provider's own catalog through ACP `session/list`; it is not an HLAO
+session list and it stores no mapping. The supervisor starts a short-lived adapter,
+checks `sessionCapabilities.list`, asks for one page, and kills the adapter. It creates
+no HLAO session and no provider conversation. `attached` is a live lookup by provider id;
+a row without it is provider-only and must not be presented as an HLAO session. A
+provider session already live in this instance is marked attached; adopting it through
+`sessions.spawn` returns a duplicate instead of opening a second adapter.
+
+Errors: `backend_not_found`, `backend_unavailable`, `bad_request` when the adapter does
+not advertise `session/list`, and `spawn_failed` when the probe cannot start, handshake,
+or answer within `startupTimeoutMs`. The caller's abort signal kills the probe.
+
 ### `sessions.spawn`
 
 Params:
@@ -524,6 +582,11 @@ id and `SessionView.forkedFrom` records the source. When the backend also advert
 `loadSession`, HLAO immediately loads the new session so the copied history is replayed with
 `replay: true`; otherwise the fork starts with the copied context but sends no history.
 `resumeSessionId` and `forkSessionId` are mutually exclusive.
+
+A resume or fork continues an existing conversation. Its effective mode is the provider's
+persisted mode; `backends.<name>.defaultMode` applies only to a new session. An explicit
+operator `mode` still overrides. `ProviderSessionsResult` carries the provider row's cwd,
+which is the safe default for a reconnect after a restart.
 
 ### `sessions.list`
 

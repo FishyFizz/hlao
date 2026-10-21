@@ -224,6 +224,38 @@ test("backends.list validates an absolute cwd", () => {
   );
 });
 
+test("backends.sessions requires a backend and validates an absolute cwd", () => {
+  assert.deepEqual(parseParams("backends.sessions", { backend: "fake" }), {
+    backend: "fake",
+    cwd: undefined,
+    cursor: undefined,
+  });
+  assert.deepEqual(
+    parseParams("backends.sessions", {
+      backend: "fake",
+      cwd: "C:\\work",
+      cursor: "next",
+    }),
+    { backend: "fake", cwd: "C:\\work", cursor: "next" },
+  );
+  assert.throws(
+    () => parseParams("backends.sessions", { backend: "" }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+  assert.throws(
+    () => parseParams("backends.sessions", { backend: "fake", cwd: "relative" }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+  assert.throws(
+    () =>
+      parseParams("backends.sessions", { backend: "fake", unknown: true }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
 test("read filters validate and since/before are exclusive", () => {
   const params = parseParams("sessions.read", {
     sessionId: "abc",

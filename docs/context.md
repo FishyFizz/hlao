@@ -7,8 +7,8 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.15.0, built 2026-10-21 on `dev`
-  (provider-owned permissions and the operator relay; protocol 3.0 breaking).
+- **Version:** 0.16.0, built 2026-10-21 on `dev`
+  (provider session discovery and adoption; protocol 3.1 additive).
 - **Status:** the primitive surface, supervisor, CLI, tests, the four acceptance
   assemblies, and the dashboard client are implemented and green. The socket is a public
   client contract: the bundled CLI, the dashboard, and an MCP server are interchangeable
@@ -22,14 +22,20 @@ surfaces. This file is the map between them and the code.
   supervisor remains turn-serial: steering is a provider request, not a second local turn.
   HLAO owns no permission policy (ADR 0013): the provider mode is the coarse policy, every
   provider ask is relayed to the operator through a bounded FIFO, and a one-shot timeout
-  fails closed. `permit`, `mode` set, and a spawn `mode` are operator-only.
-- **Verification:** `npm test` runs 262 tests: 260 pass, 2 skipped (POSIX-only process-group
+  fails closed. `permit`, `mode` set, and a spawn `mode` are operator-only. Provider
+  session discovery is a capability-gated read of ACP `session/list` (`backends.sessions`),
+  live-joined to the supervisor table; `hlao adopt` loads one as a new HLAO session. There
+  is no persisted provider-to-agent registry (ADR 0014). A resumed or forked session keeps
+  the provider's mode; `defaultMode` applies to new sessions only.
+- **Verification:** `npm test` runs 269 tests: 267 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
-  ACP agent, including the acceptance assemblies and a raw-NDJSON conformance test that never
-  invokes the CLI. The dashboard typechecks, passes 24 tests, and builds against wire 3.0.
+  ACP agent, including the acceptance assemblies, provider discovery/adoption, and a
+  raw-NDJSON conformance test that never invokes the CLI. The dashboard typechecks, passes 33
+  tests, and builds against wire 3.1.
 - **Next:** N-08 containment (a scoped credential or separate instance), N-11's general
-  resource bounds, and RF-01 provider continuity hardening remain. The dashboard
-  wire-readiness assessment is `docs/protocol-stability.md`.
+  resource bounds, and the remaining provider continuity hardening (RF-01, RF-02, RF-03,
+  RF-06, RF-07, RF-08) remain. The dashboard wire-readiness assessment is
+  `docs/protocol-stability.md`.
 - **Real Claude verified on this machine (2026-10-19):** the bundled `claude` adapter
   completed a prompt, ran a shell tool, parked on a permission request that surfaced through
   `wait --until permission`, resumed after `hlao permit`, and — from inside its own shell —
@@ -53,6 +59,8 @@ A small set of plain operations both a human and an agent use:
 - `wait` — one-shot await on idle, permission, exit, or change.
 - `list` — every session in this HLAO instance; there is no per-session scope.
 - `cancel` / `close` / `permit` — the lifecycle operations around the five observables.
+- `provider sessions` / `adopt` — a read of the provider's own catalog and a client
+  assembly that loads one as a new HLAO session. Neither is a registry.
 
 There is no scheduler. Recurring work is a loop the caller writes, using a bounded wait's
 timeout as the timer. There is no shared-state object. Shared state is a file named by path
@@ -62,12 +70,14 @@ and announced by reference; the examples show it.
 
 1. **No durable orchestration store.** The supervisor's live session table is the truth.
    The lock file is discovery only; the event log is bounded memory; the supervisor log is
-   diagnostics.
+   diagnostics. Provider session discovery is a read of the provider's catalog, joined to
+   the live table, never a persisted HLAO registry.
 2. **`wait` never re-arms.** No recurring timers anywhere in `src/`.
 3. **Reads are bounded and cursor-addressed.** Eviction is reported through `truncated` and
    `earliestRetainedSeq`.
 4. **Identity is generated before the adapter process starts** and placed in its
-   environment. ACP session ids stay internal.
+   environment. The ACP session id is the durable provider handle, exposed as
+   `SessionView.agentSessionId`; the HLAO id remains the supervisor-lifetime alias.
 5. **One adapter process per session.** A crash, permission block, or close touches one
    session.
 6. **One HLAO instance is one address space.** Every session in it is addressable by every
@@ -85,6 +95,8 @@ and announced by reference; the examples show it.
 | the wire schema or validation | `src/protocol.ts`, `contracts/protocol.md` |
 | ACP handshake, prompt queue, permissions, cancellation | `src/session.ts`, `contracts/session.md` |
 | supervisor lifecycle, universal addressing, dispatch | `src/supervisor.ts` |
+| provider catalog reads (`backends.sessions`) | `src/provider.ts` |
+| provider discovery/adoption commands | `src/cli/commands/provider.ts`, `src/cli/commands/adopt.ts` |
 | autostart, lock probing, request transport | `src/client.ts`, `src/lock.ts` |
 | backend manifests and config merge | `src/config.ts`, `contracts/backends.md` |
 | retention / cursor / eviction rules | `src/events.ts`, ADR 0002 |
@@ -112,6 +124,8 @@ hlao doctor
 hlao agents
 hlao spawn claude "Reply with exactly: hello" --wait
 hlao read <id> --since 0
+hlao provider sessions claude --cwd "$PWD"
+hlao adopt claude <provider-id> --cwd "$PWD"
 hlao close <id>
 hlao down
 ```
@@ -123,6 +137,8 @@ hlao down
 - Provider history is read, never authored. The provider session id is the durable handle;
   `spawn --resume` reopens it with ACP `session/load`, and `spawn --fork` copies it with
   `session/fork`: ADR 0011.
+- Provider session discovery is a capability-gated read of ACP `session/list`, joined to
+  the live table; adoption is a client assembly, not a stored mapping: ADR 0014.
 - Identity generated before process start; ACP ids internal: ADR 0003.
 - Permission requests are orchestration state; the provider owns the policy, every ask is
   relayed to the operator, and control is operator-only: ADR 0013 (superseding the policy
@@ -135,7 +151,9 @@ No scheduler, DAG, workflow engine, global registry, SQLite/NATS, task table, HT
 MCP-only surface, provider subagent surfacing, client fs/terminal capabilities, cold-host
 lineage reconstruction, or durable event store. Each absence is a constraint from
 `PRODUCT.md`, not an unfinished feature. Provider history is not absent: it lives in the
-provider, and `spawn --resume` reads it through ACP `session/load` (ADR 0011).
+provider, and `spawn --resume` reads it through ACP `session/load` (ADR 0011). Provider
+discovery is not a registry: `backends.sessions` reads the provider's catalog and joins the
+live table (ADR 0014).
 
 ## Known limitations and edges
 
@@ -152,6 +170,9 @@ provider, and `spawn --resume` reads it through ACP `session/load` (ADR 0011).
 - **The instance is the coordination boundary, not a security boundary.** A process that
   strips its environment can act as the operator. Inside an instance, any caller can address
   any session; isolation is another instance.
+- **Provider sessions can be driven from outside the instance.** HLAO cannot detect another
+  client or another HLAO home holding the same provider session. `hlao adopt --fork` is the
+  safe option when the source must stay untouched; there is no cross-instance lease.
 - **ACP v1 is the only transport.** The optional `node-pty` fallback in `STACK.md` is not
   implemented in 0.1.0 and is not installed. A backend without an ACP adapter cannot be
   driven yet.

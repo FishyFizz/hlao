@@ -57,6 +57,9 @@ import {
   type NotificationFrame,
   type PermitParams,
   type PermitResult,
+  type ProviderSessionView,
+  type ProviderSessionsParams,
+  type ProviderSessionsResult,
   type RespondElicitationParams,
   type RespondElicitationResult,
   type QueueDropParams,
@@ -91,6 +94,7 @@ import {
   type WaitTargetResult,
 } from "./protocol.js";
 import { isTerminalStatus } from "./protocol.js";
+import { listProviderSessions } from "./provider.js";
 import { Session } from "./session.js";
 
 /** A persistent connection may have this many requests in flight. */
@@ -598,6 +602,12 @@ class SupervisorServer {
       }
       case "backends.list":
         return this.#backends(params as BackendsListParams, caller);
+      case "backends.sessions":
+        return this.#providerSessions(
+          params as ProviderSessionsParams,
+          caller,
+          signal,
+        );
       case "sessions.spawn":
         return this.#spawn(params as SpawnParams, caller);
       case "sessions.list":
@@ -809,7 +819,14 @@ class SupervisorServer {
     const rootId = parent?.rootId ?? id;
     const depth = parent ? parent.depth + 1 : 0;
     // operator --mode -> backend defaultMode -> the provider's own default.
-    const effectiveMode = params.mode ?? backend.defaultMode;
+    // A reattach (resume or fork) continues an existing conversation: the
+    // provider's persisted mode is the default, and the backend defaultMode
+    // applies only to a genuinely new session. An explicit operator --mode
+    // still wins.
+    const reattaching =
+      params.resumeSessionId !== undefined || params.forkSessionId !== undefined;
+    const effectiveMode =
+      params.mode ?? (reattaching ? undefined : backend.defaultMode);
 
     const session = await Session.spawn({
       id,
@@ -974,6 +991,86 @@ class SupervisorServer {
       backends: Object.values(merged)
         .map(toAgentView)
         .sort((left, right) => left.name.localeCompare(right.name)),
+    };
+  }
+
+  /**
+   * Read the provider's own session catalog and join it to the live table.
+   *
+   * The provider owns the rows; the live join answers "does this HLAO instance
+   * currently drive this provider session?" without persisting any mapping.
+   * A row with `attached: false` is provider-only: it may be an external
+   * session, or a session this instance used before a restart. The caller
+   * decides whether to adopt it.
+   */
+  async #providerSessions(
+    params: ProviderSessionsParams,
+    caller: string | null,
+    signal: AbortSignal,
+  ): Promise<ProviderSessionsResult> {
+    if (!this.#acceptingNew) {
+      throw new HlaoError("session_closed", "the supervisor is shutting down");
+    }
+    if (this.#configError !== null) {
+      throw new HlaoError("config_invalid", this.#configError);
+    }
+    const callerSession = caller !== null ? this.#sessions.get(caller) : undefined;
+    const mergeCwd = params.cwd ?? callerSession?.cwd ?? process.cwd();
+    const merged = mergeBackends(this.#config.backends, mergeCwd);
+    const backend = merged[params.backend];
+    if (backend === undefined) {
+      throw new HlaoError(
+        "backend_not_found",
+        `unknown backend "${params.backend}" — available: ${Object.keys(merged).sort().join(", ")}`,
+      );
+    }
+    if (!backend.available) {
+      throw new HlaoError(
+        "backend_unavailable",
+        `backend "${backend.name}" is unavailable: ${backend.unavailableReason ?? "unknown reason"}`,
+      );
+    }
+
+    const catalog = await listProviderSessions({
+      backend,
+      ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
+      ...(params.cursor !== undefined ? { cursor: params.cursor } : {}),
+      timeoutMs: this.#config.startupTimeoutMs,
+      processCwd: mergeCwd,
+      signal,
+      log: (line) => this.#logger.info(line),
+    });
+
+    const live = [...this.#sessions.values()].filter(
+      (candidate) =>
+        !candidate.isTerminal && candidate.backend === backend.name,
+    );
+    const sessions: ProviderSessionView[] = catalog.sessions.map((row) => {
+      const attached = live.find(
+        (candidate) => candidate.view().agentSessionId === row.sessionId,
+      );
+      const view = attached?.view();
+      return {
+        sessionId: row.sessionId,
+        cwd: row.cwd,
+        title: row.title,
+        updatedAt: row.updatedAt,
+        attached: view !== undefined,
+        hlaoSessionId: view?.id ?? null,
+        hlaoName: view?.name ?? null,
+        hlaoStatus: view?.status ?? null,
+        loadable: catalog.capabilities.load,
+        forkable: catalog.capabilities.fork,
+      };
+    });
+
+    return {
+      backend: backend.name,
+      cwd: params.cwd ?? null,
+      agentName: catalog.agentName,
+      agentVersion: catalog.agentVersion,
+      sessions,
+      nextCursor: catalog.nextCursor,
     };
   }
 

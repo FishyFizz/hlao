@@ -13,6 +13,7 @@ import type {
   RequestPermissionResponse,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
+import { HLAO_CLIENT_CAPABILITIES } from "./acp.js";
 import type { BackendManifest } from "./config.js";
 import { HlaoError, describeError } from "./errors.js";
 import { EventLog } from "./events.js";
@@ -1792,26 +1793,7 @@ export class Session {
     const init = await withTimeout(
       this.#conn.agent.request("initialize", {
         protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: {
-          session: {
-            // Boolean config options are optional in ACP; advertising support
-            // lets an adapter include them and accept boolean set requests.
-            configOptions: { boolean: {} },
-            // Provider-native context state. A compliant adapter only sends
-            // compaction updates and live notices when these are advertised.
-            compaction: {},
-            notices: {},
-          },
-          // Experimental plan deltas/removals. Full plan replacements remain
-          // valid for an adapter that does not opt into the experimental form.
-          plan: {},
-          // Form elicitation. Adapters gate AskUserQuestion and MCP
-          // elicitation on this; without it the model never sees the question
-          // tools. URL mode is deliberately not advertised: HLAO has no URL
-          // surface, and the adapter then declines URL requests instead of
-          // leaving them unanswerable.
-          elicitation: { form: {} },
-        },
+        clientCapabilities: HLAO_CLIENT_CAPABILITIES,
         clientInfo: { name: "hlao", version: VERSION },
       }),
       this.#config.startupTimeoutMs,

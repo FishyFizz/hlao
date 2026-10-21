@@ -9,7 +9,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 3, minor: 0 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 3, minor: 1 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -46,6 +46,7 @@ export const ACP_PROTOCOL_VERSION = 1;
  */
 export const PROTOCOL_CAPABILITIES = [
   "backends.list",
+  "backends.sessions",
   "session.usage",
   "read.filters",
   "read.before",

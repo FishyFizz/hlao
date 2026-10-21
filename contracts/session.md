@@ -72,7 +72,9 @@ export interface SpawnOptions {
   depth: number;
   name: string | null;
   createdBy: string;             // "operator" or the requesting session id; provenance only
-  requestedMode?: string;        // effective mode at spawn; recorded in session.created
+  requestedMode?: string;        // explicit/new-session mode; recorded in session.created.
+                                 // Absent on a resume/fork without an explicit mode, so the
+                                 // provider's persisted mode is preserved.
   env: Record<string, string>;   // includes the HLAO_* identity variables, including HLAO_NAME
   permissionTimeoutMs: number;   // one-shot deadline (0 parks); captured at spawn
   maxPendingPermissions: number; // FIFO bound; captured at spawn
@@ -208,12 +210,14 @@ export class Session {
     `session.resumed` records the seq range. A backend without the `loadSession` capability
     is refused with `spawn_failed`; the session never starts empty under a resumed id. The
     event log is still a bounded projection: a transcript larger than retention evicts its
-    own earliest replay events, and says so.
+    own earliest replay events, and says so. A resume keeps the provider's reported mode;
+    the supervisor does not apply the backend's `defaultMode` to a reattached conversation.
 15. **Fork copies; it does not mutate.** With `forkSessionId`, startup calls ACP
     `session/fork` and adopts the provider-assigned id. The source session is untouched.
     When `loadSession` is also available, the new session is loaded immediately so the copied
     history is replayed and marked like a resume; otherwise `session.forked` reports
-    `historyLoaded: false`. Fork and resume cannot be combined.
+    `historyLoaded: false`. Fork and resume cannot be combined. Like a resume, a fork keeps
+    the provider's reported mode; `defaultMode` applies to new sessions only.
 
 ## Dependencies the session expects
 

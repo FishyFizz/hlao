@@ -26,6 +26,7 @@ import { cmdUsage } from "./commands/usage.js";
 import { cmdWatch } from "./commands/watch.js";
 import { cmdList } from "./commands/list.js";
 import {
+  cmdAdopt,
   cmdExport,
   cmdRead,
   cmdSend,
@@ -38,6 +39,7 @@ import {
   cmdDoctor,
   cmdDown,
   cmdLogs,
+  cmdProvider,
   cmdReload,
   cmdStatus,
   cmdWhoami,
@@ -120,6 +122,10 @@ export async function main(argv: string[]): Promise<number> {
     switch (first) {
       case "spawn":
         return await cmdSpawn(args);
+      case "adopt":
+        return await cmdAdopt(args);
+      case "provider":
+        return await cmdProvider(args);
       case "send":
         return await cmdSend(args);
       case "read":

@@ -35,10 +35,11 @@ test("package, lock, CLI, skill, and changelog versions agree", async () => {
   assert.match(read("CHANGELOG.md"), new RegExp(`^## ${pkg.version} —`, "m"));
 });
 
-test("the wire is 3.0 with the permission relay capabilities", () => {
-  assert.deepEqual(WIRE_PROTOCOL_VERSION, { major: 3, minor: 0 });
+test("the wire is 3.1 with provider discovery and the permission relay capabilities", () => {
+  assert.deepEqual(WIRE_PROTOCOL_VERSION, { major: 3, minor: 1 });
   const capabilities = PROTOCOL_CAPABILITIES as readonly string[];
   for (const capability of [
+    "backends.sessions",
     "session.compaction",
     "session.notices",
     "session.plan",

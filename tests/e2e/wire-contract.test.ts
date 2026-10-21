@@ -7,6 +7,7 @@ import type {
   HelloResult,
   PermitResult,
   ProtocolCapability,
+  ProviderSessionsResult,
   ReadResult,
   SendResult,
   SpawnResult,
@@ -92,6 +93,7 @@ test("a raw socket client can observe and control every session", async () => {
     assert.deepEqual(hello.protocolVersion, WIRE_PROTOCOL_VERSION);
     const expected: ProtocolCapability[] = [
       "backends.list",
+      "backends.sessions",
       "session.usage",
       "read.filters",
       "read.before",
@@ -122,6 +124,17 @@ test("a raw socket client can observe and control every session", async () => {
     assert.ok(fake);
     assert.equal(fake.source, "user");
     assert.equal(fake.available, true);
+
+    const providers = ok<ProviderSessionsResult>(
+      await request(lock, "backends.sessions", {
+        backend: "fake",
+        cwd: process.cwd(),
+      }),
+    );
+    assert.equal(providers.backend, "fake");
+    assert.equal(providers.cwd, process.cwd());
+    assert.equal(providers.agentName, "fake-acp");
+    assert.deepEqual(providers.sessions, []);
 
     const local = await harness.json<{
       agents: { name: string; source: string; available: boolean }[];

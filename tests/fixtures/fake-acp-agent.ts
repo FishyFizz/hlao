@@ -6,7 +6,8 @@
  * timing, permissions, cancellation, and crashes without a provider account.
  */
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { agent, ndJsonStream } from "@agentclientprotocol/sdk";
 import type {
@@ -19,6 +20,9 @@ const mode = process.env.FAKE_MODE ?? "echo";
 const steeringEnabled = process.env.FAKE_NO_STEERING !== "1";
 const loadEnabled = process.env.FAKE_LOAD_SESSION === "1";
 const forkEnabled = process.env.FAKE_FORK_SESSION === "1";
+const listEnabled = process.env.FAKE_NO_LIST_SESSION !== "1";
+const catalogFile = process.env.FAKE_PROVIDER_CATALOG_FILE;
+const externalSessions = process.env.FAKE_PROVIDER_SESSIONS;
 const resumeHistory = (process.env.FAKE_RESUME_HISTORY ?? "restored user prompt\nrestored first reply\nrestored second reply").split("\n");
 const delayMs = Number(process.env.FAKE_DELAY_MS ?? 5_000);
 const counterFile = process.env.FAKE_COUNTER_FILE;
@@ -72,6 +76,86 @@ type SteerParams = {
   _meta?: { steering?: { idleBehavior?: string } };
 };
 
+interface CatalogRow {
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  updatedAt?: string | null;
+}
+
+/**
+ * The provider's durable catalog for tests. A file makes the catalog visible
+ * across adapter processes: the supervisor's session process and the
+ * short-lived provider-list probe are different processes.
+ */
+function appendCatalog(row: CatalogRow): void {
+  if (!catalogFile) return;
+  try {
+    appendFileSync(catalogFile, `${JSON.stringify(row)}\n`);
+  } catch {
+    // A missing catalog file is an environment problem, not a session failure.
+  }
+}
+
+function readCatalog(): CatalogRow[] {
+  const rows: CatalogRow[] = [];
+  if (catalogFile) {
+    try {
+      for (const line of readFileSync(catalogFile, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          rows.push(JSON.parse(line) as CatalogRow);
+        } catch {
+          // Skip a torn line; the writer is append-only.
+        }
+      }
+    } catch {
+      // No catalog yet.
+    }
+  }
+  if (externalSessions) {
+    try {
+      const parsed = JSON.parse(externalSessions) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const row of parsed) {
+          if (row && typeof row === "object") rows.push(row as CatalogRow);
+        }
+      }
+    } catch {
+      // Ignore a malformed fixture value.
+    }
+  }
+  return rows;
+}
+
+function sameCwd(left: string, right: string): boolean {
+  // Model the real adapters' native-path comparison: separators and, on
+  // Windows, case do not distinguish two project directories.
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === "win32"
+    ? a.toLowerCase() === b.toLowerCase()
+    : a === b;
+}
+
+function listCatalog(cwd: string | null): { sessions: CatalogRow[]; nextCursor: null } {
+  const byId = new Map<string, CatalogRow>();
+  for (const row of readCatalog()) {
+    if (typeof row.sessionId !== "string" || typeof row.cwd !== "string") continue;
+    if (cwd !== null && !sameCwd(row.cwd, cwd)) continue;
+    byId.set(row.sessionId, {
+      sessionId: row.sessionId,
+      cwd: row.cwd,
+      title: typeof row.title === "string" ? row.title : null,
+      updatedAt:
+        typeof row.updatedAt === "string"
+          ? row.updatedAt
+          : new Date().toISOString(),
+    });
+  }
+  return { sessions: [...byId.values()], nextCursor: null };
+}
+
 const availableModes = [
   { id: "default", name: "Manual", description: "Always ask" },
   { id: "auto", name: "Auto", description: "The agent decides" },
@@ -115,7 +199,7 @@ const app = agent({ name: "fake-acp" })
         loadSession: loadEnabled,
         sessionCapabilities: {
           close: {},
-          list: {},
+          ...(listEnabled ? { list: {} } : {}),
           ...(loadEnabled ? { resume: {} } : {}),
           ...(forkEnabled ? { fork: {} } : {}),
         },
@@ -129,8 +213,15 @@ const app = agent({ name: "fake-acp" })
       throw new Error("session/fork is not advertised");
     }
     nextFork += 1;
+    const sessionId = `${params.sessionId}-fork-${nextFork}`;
+    appendCatalog({
+      sessionId,
+      cwd: params.cwd,
+      title: null,
+      updatedAt: new Date().toISOString(),
+    });
     return {
-      sessionId: `${params.sessionId}-fork-${nextFork}`,
+      sessionId,
       modes: {
         currentModeId: currentMode,
         availableModes,
@@ -167,8 +258,15 @@ const app = agent({ name: "fake-acp" })
   })
   .onRequest("session/new", ({ params }) => {
     nextSession += 1;
+    const sessionId = `fake-${nextSession}`;
+    appendCatalog({
+      sessionId,
+      cwd: params.cwd,
+      title: null,
+      updatedAt: new Date().toISOString(),
+    });
     return {
-      sessionId: `fake-${nextSession}`,
+      sessionId,
       modes: {
         currentModeId: currentMode,
         availableModes,
@@ -201,7 +299,14 @@ const app = agent({ name: "fake-acp" })
     });
     return { configOptions: options as never };
   })
-  .onRequest("session/list", () => ({ sessions: [] }))
+  .onRequest("session/list", ({ params }) => {
+    if (!listEnabled) {
+      throw new Error("session/list is not advertised");
+    }
+    return listCatalog(
+      typeof params.cwd === "string" && params.cwd.length > 0 ? params.cwd : null,
+    );
+  })
   .onRequest("session/close", () => ({}))
   .onNotification("session/cancel", () => {
     cancelActive?.();

@@ -24,6 +24,10 @@ There is no scheduler and no session store.
 
 Usage:
   hlao spawn <backend> [message] [options]     open a session
+  hlao adopt <backend> <provider-id> [--cwd DIR] [--fork] [--parent S]
+                                             take a provider session into this instance
+  hlao provider sessions <backend> [--cwd DIR | --all]
+                                             list the provider's own sessions
   hlao send [<id>] [message] [--wait]          deliver a prompt (steer or queue)
   hlao read [<id>] [--since N | --before N] [--type T] [--grep TEXT]
                 [--after TIME] [--until TIME] [--regex] [--context N]
@@ -100,6 +104,8 @@ Exit codes: 0 ok · 1 error · 2 a bounded wait expired (work continues) ·
 
 Examples:
   hlao spawn claude "Audit the build log and report the first failure."
+  hlao provider sessions claude --cwd D:\work\svc        # the provider's own list
+  hlao adopt claude 7f3c9a1e --cwd D:\work\svc           # take it into this instance
   hlao spawn claude --resume 7f3c9a1e --cwd D:\work\svc   # reattach by provider id
   hlao spawn claude --fork 7f3c9a1e --cwd D:\work\svc     # copy it, leave the source alone
   hlao send --self "Check the log again."     # deferred until this turn ends
@@ -161,6 +167,8 @@ function editDistance(left: string, right: string): number {
 
 const COMMAND_HELP_NAMES = new Set([
   "spawn",
+  "adopt",
+  "provider",
   "send",
   "read",
   "export",
@@ -220,10 +228,11 @@ Options:
                          new session. The source is untouched; the copy's
                          history is replayed when the backend supports loading.
 
-The provider mode is the permission policy. With no --mode, a spawn uses
-backends.<name>.defaultMode from config and then the provider's own default.
-An agent-spawned child always takes the backend default; a caller may not pass
---mode. The spawn result includes the handle, label, provider id, effective
+The provider mode is the permission policy. For a new session, with no --mode,
+a spawn uses backends.<name>.defaultMode from config and then the provider's
+own default. A resumed or forked session keeps the provider's persisted mode.
+An agent-spawned new session always takes the backend default; a caller may not
+pass --mode. The spawn result includes the handle, label, provider id, effective
 mode, and cursor. The first message id is printed when a message is sent. Text passed
 as a positional or --prompt is visible in process listings and shell history;
 use --stdin or --prompt-file for secrets.
@@ -237,7 +246,52 @@ returns that session instead of opening a second adapter.
 --fork creates a new provider session from a copy of the given one. The source
 keeps running unchanged; the fork gets its own provider id. --resume and --fork
 cannot be combined. A backend that does not advertise the ACP capability is
-refused rather than silently ignored.`,
+refused rather than silently ignored. A resume or fork keeps the provider's
+persisted mode; backends.<name>.defaultMode applies to new sessions only.`,
+    adopt: `hlao adopt <backend> <provider-id> [options]
+
+Take an existing provider conversation into this HLAO instance as a new HLAO
+session. This is the recovery path after a supervisor restart and the adoption
+path for a conversation created outside HLAO.
+
+The provider session is loaded with ACP session/load; its history is replayed
+into the new event log with replay: true. The interrupted turn is not replayed,
+so re-issue the prompt. The new session gets a new HLAO id, name, parent/root,
+and environment. The old HLAO id (if any) is not restored: the provider id is
+the durable handle, and this command creates a new attachment to it.
+
+Options:
+  --cwd DIR              the provider session's cwd; looked up when omitted
+  --name LABEL           operator label for the new HLAO session
+  --parent SESSION       lineage for the new session (default: the caller for an
+                         agent, a root for an operator shell)
+  --no-skill             omit the HLAO skill pointer from the first prompt
+  --fork                 copy the provider session instead of attaching it
+                         (the source keeps running; the copy gets a new id)
+
+The provider catalog is read first when the supervisor advertises
+backends.sessions. If the id is found, its cwd is used and a mismatched --cwd
+is refused. If the catalog cannot be read, pass --cwd explicitly. A provider
+session already live in this instance is returned as a duplicate; no second
+adapter is opened. HLAO cannot detect another client or another HLAO home
+driving the same provider session; use --fork when the source must stay
+untouched.`,
+    provider: `hlao provider sessions <backend> [--cwd DIR | --all] [--cursor CURSOR]
+
+List the provider's own session catalog through ACP session/list. These are
+provider conversations, not HLAO sessions. A live join marks rows this HLAO
+instance currently drives; a provider-only row can be adopted with
+"hlao adopt <backend> <provider-id>".
+
+Options:
+  --cwd DIR      filter to one absolute working directory (default: current)
+  --all          read the catalog across working directories
+  --cursor C     continue from a previous page's next cursor
+
+The read starts a short-lived adapter process; it does not create an HLAO
+session or a provider conversation. A backend that does not advertise
+session/list is refused. The supervisor's live table remains the instance-wide
+address space.`,
     send: `hlao send [<id>] [message] [options]
 
 Deliver a prompt. When the target is idle it runs a turn immediately. When it

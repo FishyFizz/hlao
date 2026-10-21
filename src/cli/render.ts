@@ -4,6 +4,7 @@ import type {
   ElicitationView,
   EventView,
   PermissionView,
+  ProviderSessionsResult,
   ReadResult,
   SessionStatus,
   SessionView,
@@ -1537,6 +1538,69 @@ export function renderAgentTable(
   }
 
   return renderTable(headers, rows, style);
+}
+
+export function renderProviderSessionTable(
+  result: ProviderSessionsResult,
+  style: Style,
+  width?: number,
+): string {
+  const scope = result.cwd ? `cwd ${oneLine(result.cwd)}` : "all cwds";
+  const heading =
+    `${style.bold(result.backend)} provider sessions · ${scope}` +
+    (result.agentName
+      ? style.dim(
+          ` · ${oneLine(result.agentName)}${result.agentVersion ? `@${oneLine(result.agentVersion)}` : ""}`,
+        )
+      : "");
+  if (result.sessions.length === 0) {
+    return `${heading}\n${style.dim("no provider sessions")}`;
+  }
+
+  let headers = ["SESSION ID", "UPDATED", "TITLE", "CWD", "HLAO"];
+  let rows = result.sessions.map((row) => [
+    oneLine(row.sessionId),
+    row.updatedAt ? formatAge(row.updatedAt) : "—",
+    row.title ? truncateRight(oneLine(row.title), 40) : "—",
+    truncateMiddle(oneLine(row.cwd), 40),
+    row.attached
+      ? `${oneLine(row.hlaoSessionId ?? "?")}${
+          row.hlaoName ? ` · ${oneLine(row.hlaoName)}` : ""
+        }${row.hlaoStatus ? ` · ${row.hlaoStatus}` : ""}`
+      : style.dim("provider-only"),
+  ]);
+
+  if (width !== undefined && width > 0) {
+    const total = (): number => {
+      const widths = headers.map((header, column) => {
+        let value = displayWidth(header);
+        for (const row of rows) {
+          value = Math.max(value, displayWidth(row[column] ?? ""));
+        }
+        return value;
+      });
+      return (
+        widths.reduce((sum, value) => sum + value, 0) +
+        2 * Math.max(0, headers.length - 1)
+      );
+    };
+    // Keep SESSION ID and HLAO at every width; drop the display-only columns.
+    const droppable = ["TITLE", "CWD", "UPDATED"];
+    while (total() > width && droppable.length > 0) {
+      const name = droppable.shift()!;
+      const index = headers.indexOf(name);
+      if (index === -1) continue;
+      headers = headers.filter((_, position) => position !== index);
+      rows = rows.map((row) => row.filter((_, position) => position !== index));
+    }
+  }
+
+  return (
+    `${heading}\n${renderTable(headers, rows, style)}` +
+    (result.nextCursor
+      ? `\n${style.dim(`next cursor ${oneLine(result.nextCursor)}`)}`
+      : "")
+  );
 }
 
 export interface DoctorCheck {

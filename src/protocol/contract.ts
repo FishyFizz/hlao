@@ -309,6 +309,7 @@ export type NotificationFrame =
 const METHODS = [
   "hello",
   "backends.list",
+  "backends.sessions",
   "sessions.spawn",
   "sessions.list",
   "sessions.get",
@@ -396,6 +397,43 @@ export interface BackendsListParams {
 }
 export interface BackendsListResult {
   backends: BackendView[];
+}
+/**
+ * A read of the provider's own session catalog (ACP `session/list`). This is
+ * not an HLAO session index: the provider owns the rows, and HLAO only joins
+ * the live table to mark rows it currently drives. (3.1)
+ */
+export interface ProviderSessionsParams {
+  backend: string;
+  /** Absolute cwd filter. Omit to list the provider's catalog across cwds. */
+  cwd?: string;
+  /** Opaque cursor from an earlier `nextCursor`. */
+  cursor?: string;
+}
+/** One provider-owned session row, with its live HLAO attachment when present. */
+export interface ProviderSessionView {
+  sessionId: string;
+  cwd: string;
+  title: string | null;
+  updatedAt: string | null;
+  /** True when a non-terminal HLAO session currently holds this provider id. */
+  attached: boolean;
+  hlaoSessionId: string | null;
+  hlaoName: string | null;
+  hlaoStatus: SessionStatus | null;
+  /** The adapter advertises ACP `loadSession` (resume/adopt is possible). */
+  loadable: boolean;
+  /** The adapter advertises ACP `session/fork` (copying is possible). */
+  forkable: boolean;
+}
+export interface ProviderSessionsResult {
+  backend: string;
+  /** The cwd filter used, or null when the catalog was read across cwds. */
+  cwd: string | null;
+  agentName: string | null;
+  agentVersion: string | null;
+  sessions: ProviderSessionView[];
+  nextCursor: string | null;
 }
 export interface SpawnParams {
   backend: string;
@@ -699,6 +737,7 @@ export interface ReloadResult {
 export type ParamsByMethod = {
   hello: HelloParams;
   "backends.list": BackendsListParams;
+  "backends.sessions": ProviderSessionsParams;
   "sessions.spawn": SpawnParams;
   "sessions.list": ListParams;
   "sessions.get": GetParams;

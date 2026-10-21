@@ -399,6 +399,15 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         cwd: absolutePath(optString(object, "cwd", what, 1_000), `${what}.cwd`),
       } as ParamsByMethod[M];
     }
+    case "backends.sessions": {
+      const object = asObject(raw, what);
+      checkKeys(object, ["backend", "cwd", "cursor"], what);
+      return {
+        backend: reqString(object, "backend", what, 1, 200),
+        cwd: absolutePath(optString(object, "cwd", what, 1_000), `${what}.cwd`),
+        cursor: optString(object, "cursor", what, 4_096),
+      } as ParamsByMethod[M];
+    }
     case "sessions.spawn": {
       const object = asObject(raw, what);
       checkKeys(

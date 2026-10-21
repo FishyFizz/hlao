@@ -143,8 +143,10 @@ Building the orchestrator on them would reproduce frozen orchestration under a n
   `session/load` / `session/resume`. This must be decided in architecture before any code.
 - **ACP v2 is a draft.** The stable wire version is `1`.
 - **`session/list` is capability-gated and agent-scoped.** It does not provide a global
-  address space. HLAO does not depend on it for addressing; the supervisor's live table is the
-  instance-wide address space. ACP list remains a provider-side recovery aid, not an authority.
+  address space. HLAO exposes it as `backends.sessions` for provider discovery and adoption,
+  but does not depend on it for addressing; the supervisor's live table remains the
+  instance-wide address space. The catalog is a provider-side recovery aid, not an authority,
+  and it is never persisted (ADR 0014).
 - **License check:** every proposed core dependency is Apache-2.0 or MIT. No copyleft. The one
   exception is the proprietary Claude Agent SDK behind the Claude adapter.
 
@@ -178,7 +180,7 @@ transport, and `session/fork`.
 | # | Question | Answer |
 |---|---|---|
 | 1 | Shape of read/observe | ACP provides a typed event stream. Reads are cursor-addressed and bounded; the orchestration projection reports turn state, pending prompts, pending permissions, and last sequence, separate from raw leaf output |
-| 2 | Where orchestration state lives | Live provider sessions are the truth; ACP can reconstruct lists/history/resume. Lineage is not system state at all: identity is injected into the child at spawn, and a parent's knowledge of its descendants is the handles it holds. A durable contact list, if wanted, is an agent-maintained file convention — not a primitive, not a store. No database, no global registry, no cold-host tree reconstruction |
+| 2 | Where orchestration state lives | Live provider sessions are the truth; ACP can reconstruct lists/history/resume. Lineage is not system state at all: identity is injected into the child at spawn, and a parent's knowledge of its descendants is the handles it holds. Provider discovery reads ACP `session/list` and joins the live table; it is not a persisted registry. A durable contact list, if wanted, is an agent-maintained file convention — not a primitive, not a store. No database, no global registry, no cold-host tree reconstruction |
 | 4 | The ratchet / who can halt | `session/cancel` is the graceful halt (session survives); process kill is the hard halt. Both are existing primitives, no new object |
 | 6 | Visibility: global or scoped | Resolved 2026-10-20 (ADR 0008): one HLAO instance is one address space and one swarm boundary. Every session in it is addressable by every caller; `callerSessionId` is attribution, not scope; lineage is context. Isolation is another instance. ACP `session/list` is not the mechanism — the supervisor's live table is |
 | 7/8 | Ledger delivery and write authority | Delivery: first prompt as a reference, with `systemPrompt` as an unstable optional path. Write authority remains a product decision; ACP does not constrain it |

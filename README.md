@@ -49,6 +49,15 @@ renamed builder (k7m2qp)
 $ hlao spawn claude "Check whether the retry package is declared in package.json." --name check
 spawned check (3f9xw2) (claude) in D:\work\svc  provider 7b31de02  parent k7m2qp  mode default
 
+$ hlao provider sessions claude --cwd D:\work\svc
+claude provider sessions · cwd D:\work\svc · claude-agent-acp@0.93.0
+SESSION ID                           UPDATED  TITLE                CWD           HLAO
+4f2a9c1e-…                           2m       Audit the build log  D:\work\svc   k7m2qp · builder · idle
+9c0d3b71-…                           1h       —                    D:\work\svc   provider-only
+
+$ hlao adopt claude 9c0d3b71-… --name recovered
+adopted recovered (p8k3xz) (claude) in D:\work\svc  provider 9c0d3b71-…  mode auto
+
 Every session in an HLAO instance is addressable by every caller. An agent can `send` to,
 read, wait on, cancel, or close its parent, a sibling, or an unrelated session; `parentId` is
 lineage, not authority. `HLAO_SESSION_ID` is attribution and self-defaulting, not a scope. If
@@ -86,7 +95,9 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 
 | Command | What it does |
 |---|---|
-| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn; `--resume PROVIDER_ID` reopens the provider session an earlier spawn reported, replaying its durable history through ACP `session/load`; `--fork PROVIDER_ID` copies it through ACP `session/fork` and leaves the source untouched. |
+| `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn; `--resume PROVIDER_ID` reopens the provider session an earlier spawn reported, replaying its durable history through ACP `session/load`; `--fork PROVIDER_ID` copies it through ACP `session/fork` and leaves the source untouched. A resume or fork keeps the provider's persisted mode. |
+| `hlao provider sessions <backend>` | Read the provider's own session catalog through ACP `session/list`, scoped to `--cwd DIR` or across cwds with `--all`. Prints provider id, age, title, cwd, and the live HLAO attachment when this instance drives the row. Provider-only rows are not HLAO sessions. The read starts a short-lived adapter and stores nothing. |
+| `hlao adopt <backend> <provider-id>` | Take an existing provider conversation into this instance as a new HLAO session. Uses the provider row's cwd, refuses a mismatched `--cwd`, replays history through ACP `session/load`, and returns an already-live provider session as a duplicate. `--fork` copies it instead; `--name` labels it; `--parent` sets lineage; `--no-skill` omits the skill pointer. |
 | `hlao send [<id>] [message]` | Deliver a prompt. An idle target runs it immediately; a busy target takes it according to the caller: a session steers into the running turn when the adapter supports it, an operator shell queues. `--steer` / `--queue` override. `--self` targets the caller's session. `--wait` waits for the turn (for a steered message, the running turn). `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep` (literal or `--regex`), `--after`/`--until` time bounds, and `--context N` neighbors; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
 | `hlao export [<id>] [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. `--all --out DIR` writes every session plus `manifest.json`; it refuses to overwrite an existing export. |
@@ -198,8 +209,10 @@ agent  -> CLI / MCP        --/
 
 Call `hello` first: it returns `protocolVersion: { major, minor }` and a capability list.
 Major versions must match; minor versions are additive. The same contract defines
-`backends.list`, filtered/backward/time reads with optional context, multi-id `wait`, and the
-`usage` and `firstPrompt` fields on every session view.
+`backends.list`, `backends.sessions` (the provider's own catalog, live-joined to the
+supervisor table), filtered/backward/time reads with optional context, multi-id `wait`, and
+the `usage` and `firstPrompt` fields on every session view. Protocol 3.1 is additive; a 3.0
+client that does not call `backends.sessions` is unaffected.
 
 Polling `sessions.list`/`sessions.read` is the 2.0 live-update model and remains supported.
 Protocol 2.1 adds an opt-in persistent stream: `hello` with `stream.persistent`, then
@@ -235,10 +248,12 @@ these are Manual, Accept edits, Plan, Auto, and (where allowed) Bypass permissio
 mode is the way to stop the provider from asking at the source. Setting a mode is
 operator-only; an agent can read its mode but not change it.
 
-**The operator's default.** `backends.<name>.defaultMode` in config sets the mode a spawn
-uses when the operator supplies none. The effective mode is operator `--mode` → backend
-`defaultMode` → the provider's own default. Agent-spawned children always use the backend
-default. This is the replacement for policy inheritance.
+**The operator's default.** `backends.<name>.defaultMode` in config sets the mode a **new**
+session uses when the operator supplies none. The effective mode for a new session is
+operator `--mode` → backend `defaultMode` → the provider's own default. Agent-spawned
+children always use the backend default for a new session. A resumed or forked session
+keeps the provider's persisted mode; an explicit operator `--mode` still overrides. This is
+the replacement for policy inheritance.
 
 **Every ask parks.** A request appears in `SessionView.pendingPermissions`, in `list
 --pending`, in `read`, and satisfies `wait --until permission`. The operator answers with
@@ -315,6 +330,8 @@ hlao read --since 42
 hlao wait <other-id> --until settled --timeout 10m
 hlao send --self "Check the log again."        # runs after this turn
 hlao send "$HLAO_PARENT_ID" "Blocked: the lock file is held by another worker."
+hlao provider sessions "$HLAO_BACKEND" --cwd "$PWD"   # provider conversations
+hlao adopt "$HLAO_BACKEND" <provider-id> --cwd "$PWD" # take one in as a new agent
 ```
 
 Do not run `send --self ... --wait` from inside a turn: the message queues behind the turn
@@ -410,7 +427,9 @@ operator / agent shell
   processes. There is no database and no global registry. A graceful `hlao down` closes
   every session; a hard kill loses the table and can orphan adapter processes (especially
   on Windows), so `down` is the supported shutdown path. The design accepts this to avoid a
-  second authority over "which sessions exist".
+  second authority over "which sessions exist". Provider discovery does not change that:
+  `backends.sessions` reads the provider's own catalog and joins the live table; it stores
+  no mapping.
 - **Identity is generated before the process starts** and injected into its environment, so
   every leaf tool sees it from birth. The HLAO id is an alias for this supervisor's lifetime;
   ACP's own session id is the durable provider handle, reported as
@@ -427,6 +446,13 @@ operator / agent shell
   provider session with ACP `session/fork`; the source keeps running and keeps its id. When
   the backend can also load, the copy's history is replayed into the new log. Nothing about
   the fork is recorded in the source session.
+- **Provider sessions are discoverable without a registry.** `hlao provider sessions
+  <backend> --cwd DIR` reads ACP `session/list` through a short-lived adapter and shows
+  provider-only rows alongside live HLAO attachments. `hlao adopt <backend> <provider-id>`
+  loads one as a new HLAO session, using the provider row's cwd and keeping the provider's
+  mode. The new session has a new HLAO id and lineage; no old HLAO identity is restored.
+  The provider session id remains the durable handle, and the spawner's own context remains
+  the designed record of which ids it spawned.
 - **A session runs one turn at a time.** A message sent by an agent to a busy peer is
   injected into that turn when the adapter advertises ACP steering; otherwise, and for
   operator sends by default, it queues visibly. A steered message never starts a second
@@ -475,6 +501,12 @@ in-memory history. `export` pages the full history; `read --out` saves one bound
 **An agent cannot find a session.** It may be in another HLAO instance (a different
 `HLAO_HOME`), already forgotten, or misspelled. Run `hlao list` in the intended instance;
 every session in that instance is addressable.
+
+**A provider session is missing from `hlao list`.** It may be provider-only: the provider
+has a conversation but this instance does not currently drive it. Run `hlao provider
+sessions <backend> --cwd DIR` and then `hlao adopt <backend> <provider-id>`. The provider
+catalog is not the HLAO live table; provider-only rows are labelled, never presented as
+live sessions.
 
 **`hlao agents` shows an old backend.** `agents` reads the file on disk, while spawns use the
 supervisor's loaded config. Run `hlao reload` for new spawns; live sessions keep their settings.

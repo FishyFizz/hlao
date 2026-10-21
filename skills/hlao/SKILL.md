@@ -48,6 +48,8 @@ hlao get <id>                   # state only, no events
 hlao find "text"                # search other sessions' events
 hlao usage                      # fleet cost and context snapshots
 hlao list --mine                # the sessions in your job's root subtree
+hlao provider sessions <backend> --cwd <dir>              # the provider's own catalog
+hlao adopt <backend> <provider-id> [--cwd <dir>]          # take one in as a new agent
 hlao spawn <backend> --resume <provider-id> --cwd <dir>   # pull an interrupted agent back up
 hlao spawn <backend> --fork <provider-id> --cwd <dir>     # copy one; the source is untouched
 ```
@@ -58,6 +60,13 @@ provider id survives a restart. `spawn --resume <provider-id> --cwd <original cw
 that provider session and replays its history; the interrupted turn is not replayed, so
 re-send the instruction. `spawn --fork <provider-id> --cwd <original cwd>` copies the session
 instead; the source keeps running and can still be resumed separately.
+
+If you do not have the provider id, `hlao provider sessions <backend> --cwd <dir>` reads the
+provider's own catalog and shows which rows this instance already drives. A provider-only
+row can be adopted with `hlao adopt <backend> <provider-id>`; it gets a new HLAO id, name,
+and lineage, and keeps the provider's history and mode. Use `adopt --fork` when the source
+may still be open in another client or HLAO home. HLAO cannot detect that other driver, so
+the choice is yours; a resume is a takeover, a fork leaves the source alone.
 
 A session runs one turn at a time. A message to an idle session starts a turn directly. A
 message from one session to another that is mid-turn is **steered** into that running turn
