@@ -1,0 +1,4 @@
+[submodule "dashboard"]
+	path = dashboard
+	url = https://github.com/FishyFizz/hlao-dashboard.git
+	branch = dev

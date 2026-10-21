@@ -5,8 +5,6 @@ dist-test/
 .tmp-*/
 .hlao/
 .claude/worktrees/
-# separate git repository; its own client project
-/dashboard/
 board.md
 npm-debug.log*
 .DS_Store
