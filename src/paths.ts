@@ -65,3 +65,25 @@ export function supervisorEndpoint(home: string): string {
 export function isWindows(): boolean {
   return process.platform === "win32";
 }
+
+/**
+ * A comparison key for paths from the same host. Windows paths are
+ * case-insensitive, and both separator styles resolve to the same file, so
+ * both are normalized before comparison.
+ */
+export function pathKey(value: string): string {
+  const normalized = resolve(value).replace(/\\/g, "/");
+  const withoutTrailing =
+    normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
+  return isWindows() ? withoutTrailing.toLowerCase() : withoutTrailing;
+}
+
+/** True when `child` is `parent` or lies inside it (segment-aware). */
+export function isPathWithin(child: string, parent: string): boolean {
+  const childKey = pathKey(child);
+  const parentKey = pathKey(parent);
+  if (childKey === parentKey) return true;
+  return parentKey.endsWith("/")
+    ? childKey.startsWith(parentKey)
+    : childKey.startsWith(`${parentKey}/`);
+}

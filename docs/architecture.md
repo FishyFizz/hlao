@@ -59,39 +59,59 @@ which means no frozen decisions hiding in a store, a schema, or a daemon's priva
 | `time` | Duration parsing/formatting | — | — |
 | `ids` | Session handle generation/validation | — | — |
 | `version` | Package version at runtime | — | — |
-| `acp` | The client capabilities HLAO advertises to an adapter | — | ACP SDK types |
-| `paths` | Runtime file and socket locations | location naming | `errors` |
+| `acp` | The client capabilities HLAO advertises, and the shared initialize handshake | — | ACP SDK types, `errors`, `protocol/version`, `version` |
+| `paths` | Runtime file and socket locations; host path comparison | location naming, `pathKey`, `isPathWithin` | `errors` |
 | `protocol` | Client↔supervisor wire contract and boundary validation | wire schema, version, capabilities | `errors` |
 | `provider` | Read the provider's own session catalog with a short-lived adapter | probe lifecycle and normalization | `acp`, `config`, `errors`, `protocol`, `session/async`, `session/process`, `version` |
 | `ledger` | Historical spawn receipts keyed by parent provider id | JSONL format, dedupe and malformed-line tolerance | `paths` |
 | `stream` | Framed message streams over a transport | framing, buffering, transport adapters | `protocol`, `errors` |
 | `lock` | Lock file read/write, pid liveness, liveness probe | discovery semantics | `paths`, `protocol`, `stream`, `errors` |
 | `logger` | Supervisor diagnostics log | log rotation | `paths` |
-| `config` | Backend manifests and user/project config | config merge rules | `paths`, `errors` |
+| `config` | Backend manifests and user/project config | config merge rules, command resolution | `paths`, `errors`, `config/backends` |
 | `crash` | Diagnostic marker for a supervisor replaced after a crash | — | `paths`, `protocol` |
 | `events` | Bounded, seq-addressed event log | retention and cursors | — |
-| `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `acp`, `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version` |
-| `supervisor` | Process lifecycle, lock/listener, dispatch, universal addressing | live session table | `session`, `config`, `crash`, `lock`, `logger`, `paths`, `protocol`, `stream`, `errors` |
-| `client` | Client-side transport and autostart | — | `config`, `crash`, `lock`, `protocol`, `paths`, `stream`, `time`, `errors` |
+| `session` | One ACP-backed session: process, handshake, prompt queue, permissions, waits | session state machine | `acp`, `protocol`, `events`, `config`, `errors`, `ids`, `time`, `version`; submodules in `session/*` |
+| `supervisor` | Process lifecycle, lock/listener, dispatch, universal addressing | live session table | `session`, `config`, `crash`, `lock`, `logger`, `paths`, `protocol`, `stream`, `errors`; submodules in `supervisor/*` |
+| `client` | Client-side transport and autostart | — | `config`, `crash`, `lock`, `protocol`, `paths`, `stream`, `time`, `errors`; submodules in `client/*` |
 | `cli` | Bundled reference client: argument parsing and human/JSON rendering | presentation only | `client`, `config`, `lock`, `protocol`, `paths`, `errors`, `time`, `version`, `supervisor` (the hidden `__supervisor` entry) |
 
-Three modules have focused submodules. `protocol.ts` is a barrel over `protocol/version.ts`
-(wire constants and capabilities), `protocol/contract.ts` (types and method names), and
-`protocol/parse.ts` (boundary validation). `session.ts` keeps the `Session` state machine;
-`session/{queue,async,process,permissions,projection}.ts` hold its pure helpers.
-`session/projection.ts` also maps ACP provider updates (agent/thought chunks, tools, plans,
-compaction, notices, titles, and inter-session messages) into first-class events; the session
-keeps the latest provider state in `SessionView`.
-`supervisor.ts` keeps the server; `supervisor/{util,resolve}.ts` hold helpers and token
-resolution. Submodules never import their own barrel.
+Focused submodules carry the detail; a maintainer should be able to change one concern by
+opening one submodule.
+
+- `protocol.ts` is a barrel over `protocol/version.ts` (wire constants and capabilities),
+  `protocol/contract.ts` (a barrel over `protocol/views.ts` and `protocol/methods.ts`), and
+  `protocol/parse.ts` (envelope validation and dispatch over `parse/{common,session,system}.ts`).
+- `session.ts` keeps the `Session` state machine. `session/{async,env,process,projection,queue,steering,types}.ts`
+  hold pure helpers; `session/pending-input.ts` owns the permission/elicitation FIFO and its
+  one-shot deadline; `session/provider-state.ts` projects the provider's latest compaction,
+  plan, title, and context-pressure notices; `session/read.ts` owns the context-expansion
+  projection; `session/waits.ts` owns the single wait-condition predicate shared by the
+  session and supervisor.
+- `supervisor.ts` keeps the server: lifecycle, lock/listener, dispatch, and the thin method
+  handlers. `supervisor/{connections,spawn,discovery,waits,wait-graph,resolve,util}.ts` own
+  persistent streams and subscriptions, spawn/resume/fork and its retry window, the
+  instance-level reads (backends, provider catalog, receipts), multi-target waits, wait-cycle
+  detection, and token resolution.
+- `config.ts` keeps the manifest model, load/merge, and redaction. `config/backends.ts` owns
+  builtin discovery and the one PATH resolver both builtin and configured backends use.
+- `client.ts` is the boundary. `client/autostart.ts` resolves or starts the supervisor;
+  `client/request.ts` owns the one-shot request frame; `client/streaming.ts` owns the
+  multiplexed persistent connection; `client/types.ts` holds the shared connection interfaces.
+
+Submodules never import their own barrel.
 
 The CLI is split by responsibility: `main.ts` dispatches and owns global exits; `context.ts`
-resolves the runtime home, caller identity, and targets, and formats errors; `args.ts` and
-`input.ts` parse flags and messages; `help.ts` holds the help text; `render.ts` renders tables
-and events; and `commands/` has one module per command. `commands/session-view.ts` holds the
-shared display/terminal/resolve projections and `commands/prompt-support.ts` the bounded
-partial-output helper. `commands/{control,prompts,ops}.ts` remain as barrels for stable
-imports. No command module owns orchestration state.
+resolves the runtime home, caller identity, and targets, and re-exports the stable CLI
+surface; `output.ts` owns stdout and the JSON envelope; `connect.ts` owns connection setup and
+capability probing; `errors.ts` renders a failure; `args.ts`, `input.ts`, and `time-args.ts`
+parse flags, messages, and time bounds; `event-filters.ts` parses the shared `--type`/`--grep`
+options; `help.ts` is a barrel over `help/{overview,commands,names}.ts`; `render.ts` is a
+barrel over `render/{style,text,table,session-fields,session-table,session,entities,events}.ts`;
+and `commands/` has one module per command. Shared command assemblies live beside them:
+`session-view.ts` (display/terminal/resolve projections), `selectors.ts` (the selector
+grammar), `list-filters.ts`, `read-follow.ts`, `wait-render.ts`, `watch-format.ts`,
+`exporting.ts`, and `prompt-support.ts`. `commands/{control,prompts,ops}.ts` remain as barrels
+for stable imports. No command module owns orchestration state.
 
 Edges point one way. `session` does not import `supervisor`; `client` does not import
 `session`; no core module imports `src/cli/*` (guarded by a unit test). A module's public

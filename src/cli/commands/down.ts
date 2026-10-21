@@ -1,21 +1,15 @@
 import { resolve } from "node:path";
-import { isTerminalStatus } from "../../protocol.js";
-
-
 import { connectSupervisor } from "../../client.js";
-
 import { HlaoError } from "../../errors.js";
 import { pidAlive, probeSupervisor, readLock, removeLock } from "../../lock.js";
-
-import { type ListResult } from "../../protocol.js";
-
+import { isTerminalStatus, type ListResult } from "../../protocol.js";
 import {
   booleanOption,
   expectPositionals,
   parseArgs,
   stringOption,
 } from "../args.js";
-import { COMMON, contextFrom, out, writeJson } from "../context.js";
+import { COMMON, contextFrom, out, waitFor, writeJson } from "../context.js";
 import { helpRequested } from "../help.js";
 import { sanitize } from "../render.js";
 import { exportAll } from "./exporting.js";
@@ -239,22 +233,4 @@ export async function cmdDown(args: string[]): Promise<number> {
 
 function waitForLockRemoval(home: string, timeoutMs: number): Promise<boolean> {
   return waitFor(() => readLock(home) === null, timeoutMs);
-}
-
-function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolvePromise) => {
-    const deadline = Date.now() + timeoutMs;
-    const tick = (): void => {
-      if (predicate()) {
-        resolvePromise(true);
-        return;
-      }
-      if (Date.now() >= deadline) {
-        resolvePromise(false);
-        return;
-      }
-      setTimeout(tick, 100);
-    };
-    tick();
-  });
 }

@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import { HlaoError, toHlaoError } from "../../errors.js";
+import { pathKey } from "../../paths.js";
 import type {
   ProviderSessionView,
   ProviderSessionsResult,
@@ -59,14 +60,6 @@ async function findProviderSession(
     if (cursor === null) return { row: null, error: null };
   }
   return { row: null, error: null };
-}
-
-function samePath(left: string, right: string): boolean {
-  const a = resolve(left);
-  const b = resolve(right);
-  return process.platform === "win32"
-    ? a.toLowerCase() === b.toLowerCase()
-    : a === b;
 }
 
 /**
@@ -156,7 +149,7 @@ export async function cmdAdopt(args: string[]): Promise<number> {
         `${backend} cannot fork provider session ${providerId}: the adapter does not advertise ACP session/fork`,
       );
     }
-    if (givenCwd !== undefined && !samePath(givenCwd, row.cwd)) {
+    if (givenCwd !== undefined && pathKey(givenCwd) !== pathKey(row.cwd)) {
       throw new HlaoError(
         "bad_request",
         `provider session ${providerId} belongs to ${row.cwd}, not ${resolve(givenCwd)}; omit --cwd to use the provider's cwd`,

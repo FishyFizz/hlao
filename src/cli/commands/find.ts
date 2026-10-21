@@ -1,10 +1,8 @@
 import { isTerminalStatus } from "../../protocol.js";
-import type { ListResult, EventType, EventView, ReadResult } from "../../protocol.js";
-import { EVENT_TYPES } from "../../protocol.js";
+import type { ListResult, EventView, ReadResult } from "../../protocol.js";
 import {
   booleanOption,
   expectPositionals,
-  multipleOption,
   numberOption,
   parseArgs,
   stringOption,
@@ -21,6 +19,8 @@ import {
 import { helpRequested } from "../help.js";
 import { sanitize } from "../render.js";
 import { parseTimeBound, toIsoTimestamp } from "../time-args.js";
+import { parseEventTypes } from "../event-filters.js";
+import { labelOf } from "./session-view.js";
 
 const PAGE_SIZE = 1_000;
 const MAX_PAGES_PER_SESSION = 20;
@@ -62,14 +62,7 @@ export async function cmdFind(args: string[]): Promise<number> {
   if (query.trim().length === 0) {
     throw usageError("find needs non-empty text");
   }
-  const types = multipleOption(parsed, "type") as EventType[];
-  for (const type of types) {
-    if (!(EVENT_TYPES as readonly string[]).includes(type)) {
-      throw usageError(
-        `unknown event type "${type}" — known types: ${EVENT_TYPES.join(", ")}`,
-      );
-    }
-  }
+  const types = parseEventTypes(parsed);
   const max = numberOption(parsed, "max") ?? 1_000;
   if (max < 1 || max > 10_000) {
     throw usageError("--max must be between 1 and 10000");
@@ -128,8 +121,7 @@ export async function cmdFind(args: string[]): Promise<number> {
   const errors: ScanError[] = [];
 
   for (const session of sessions) {
-    const sessionLabel =
-      session.name ?? session.title ?? session.firstPrompt ?? session.id;
+    const sessionLabel = labelOf(session);
     let since = 0;
     for (let pageNumber = 0; pageNumber < MAX_PAGES_PER_SESSION; pageNumber += 1) {
       let page: ReadResult;

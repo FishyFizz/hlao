@@ -1,17 +1,11 @@
-import { resolve } from "node:path";
 import { toHlaoError } from "../errors.js";
-import { isWindows } from "../paths.js";
 import type { ResponseEnvelope } from "../protocol.js";
 
 export function actor(caller: string | null): string {
   return caller ?? "operator";
 }
 
-/** Windows paths are case-insensitive; `--cwd` must agree with `--cwd-prefix`. */
-export function pathKey(value: string): string {
-  const normalized = resolve(value);
-  return isWindows() ? normalized.toLowerCase() : normalized;
-}
+export { pathKey } from "../paths.js";
 
 export function failure(id: number, error: unknown): ResponseEnvelope {
   const converted = toHlaoError(error);

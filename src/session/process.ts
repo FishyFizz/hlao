@@ -66,3 +66,40 @@ export function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boo
   });
 }
 
+/**
+ * Stop an adapter whose stdio has already been closed. On POSIX the process
+ * group is signaled so tools it started do not outlive it; on Windows the tree
+ * is taken with taskkill. Returns true when a kill was required.
+ */
+export async function stopAdapterProcess(
+  child: ChildProcess,
+  force: boolean,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return false;
+  let killed = false;
+
+  if (process.platform === "win32") {
+    if (!force) {
+      const exited = await waitForExit(child, 1_500);
+      if (!exited) {
+        killed = true;
+        killProcessTree(child);
+        await waitForExit(child, 3_000);
+      }
+    } else {
+      await waitForExit(child, 3_000);
+    }
+    return killed;
+  }
+
+  if (force) killed = true;
+  signalProcessGroup(child, force ? "SIGKILL" : "SIGTERM");
+  const exited = await waitForExit(child, force ? 2_000 : 5_000);
+  if (!exited) {
+    killed = true;
+    signalProcessGroup(child, "SIGKILL");
+    await waitForExit(child, 2_000);
+  }
+  return killed;
+}
+

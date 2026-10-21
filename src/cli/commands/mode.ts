@@ -5,7 +5,7 @@ import type { GetResult, SetModeResult } from "../../protocol.js";
 import { booleanOption, expectPositionals, numberOption, parseArgs, stringOption, usageError } from "../args.js";
 import { COMMON, connect, contextFrom, out, sessionLabel, writeJson, type CommandContext } from "../context.js";
 import { helpRequested } from "../help.js";
-import { parseStatuses } from "./list.js";
+import { parseStatuses } from "./list-filters.js";
 import { isTerminal, selectSessions, selectorsUsed, type SelectorFlags } from "./selectors.js";
 
 /**

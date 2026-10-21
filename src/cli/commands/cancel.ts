@@ -7,7 +7,7 @@ import { booleanOption, expectPositionals, numberOption, parseArgs, stringOption
 import { COMMON, connect, contextFrom, out, resolveTarget, sessionLabel, writeJson } from "../context.js";
 import { helpRequested } from "../help.js";
 import { styleStatus } from "../render.js";
-import { parseStatuses } from "./list.js";
+import { parseStatuses } from "./list-filters.js";
 import { isTerminal, selectSessions, selectorsUsed, type SelectorFlags } from "./selectors.js";
 
 export async function cmdCancel(args: string[]): Promise<number> {

@@ -8,13 +8,11 @@ import {
   type ListSessionsResponse,
 } from "@agentclientprotocol/sdk";
 
-import { HLAO_CLIENT_CAPABILITIES } from "./acp.js";
+import { assertAcpVersion, initializeParams } from "./acp.js";
 import type { BackendManifest } from "./config.js";
 import { HlaoError, describeError } from "./errors.js";
-import { ACP_PROTOCOL_VERSION } from "./protocol.js";
 import { withTimeout } from "./session/async.js";
 import { killProcessTree, waitForExit } from "./session/process.js";
-import { VERSION } from "./version.js";
 
 /** One row of the provider's own session catalog. */
 export interface ProviderSessionRow {
@@ -143,21 +141,11 @@ export async function listProviderSessions(
         protocolVersion: number;
         agentCapabilities?: AgentCapabilities;
         agentInfo?: { name?: string; version?: string } | null;
-      }>("initialize", {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: HLAO_CLIENT_CAPABILITIES,
-        clientInfo: { name: "hlao", version: VERSION },
-      }),
+      }>("initialize", initializeParams()),
       timeoutMs,
       "ACP initialize",
     );
-
-    if (init.protocolVersion !== ACP_PROTOCOL_VERSION) {
-      throw new HlaoError(
-        "spawn_failed",
-        `${backend.name} speaks ACP v${init.protocolVersion}; HLAO requires v${ACP_PROTOCOL_VERSION}`,
-      );
-    }
+    assertAcpVersion(backend.name, init.protocolVersion);
 
     const capabilities = init.agentCapabilities ?? {};
     const listable =

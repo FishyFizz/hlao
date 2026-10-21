@@ -1,4 +1,7 @@
 import type { ClientCapabilities } from "@agentclientprotocol/sdk";
+import { HlaoError } from "./errors.js";
+import { ACP_PROTOCOL_VERSION } from "./protocol/version.js";
+import { VERSION } from "./version.js";
 
 /**
  * The client capabilities HLAO advertises to an adapter. Shared by a real
@@ -26,3 +29,26 @@ export const HLAO_CLIENT_CAPABILITIES: ClientCapabilities = {
   // them unanswerable.
   elicitation: { form: {} },
 };
+
+/** The `initialize` params every HLAO adapter connection sends. */
+export function initializeParams(): {
+  protocolVersion: number;
+  clientCapabilities: ClientCapabilities;
+  clientInfo: { name: string; version: string };
+} {
+  return {
+    protocolVersion: ACP_PROTOCOL_VERSION,
+    clientCapabilities: HLAO_CLIENT_CAPABILITIES,
+    clientInfo: { name: "hlao", version: VERSION },
+  };
+}
+
+/** HLAO speaks one ACP major; a mismatch is a spawn failure with both sides. */
+export function assertAcpVersion(backend: string, protocolVersion: number): void {
+  if (protocolVersion !== ACP_PROTOCOL_VERSION) {
+    throw new HlaoError(
+      "spawn_failed",
+      `${backend} speaks ACP v${protocolVersion}; HLAO requires v${ACP_PROTOCOL_VERSION}`,
+    );
+  }
+}

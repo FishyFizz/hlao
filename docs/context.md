@@ -29,7 +29,7 @@ surfaces. This file is the map between them and the code.
   pairs parent and child provider ids for manual recovery after a restart; it is history,
   not liveness, and `hlao children` reads it (ADR 0015). A resumed or forked session keeps
   the provider's mode; `defaultMode` applies to new sessions only.
-- **Verification:** `npm test` runs 276 tests: 274 pass, 2 skipped (POSIX-only process-group
+- **Verification:** `npm test` runs 283 tests: 281 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
   ACP agent, including the acceptance assemblies, provider discovery/adoption, the
   post-reboot receipt recovery, and a raw-NDJSON conformance test that never invokes the CLI.
@@ -104,15 +104,25 @@ and announced by reference; the examples show it.
 
 | Need to change… | Go to |
 |---|---|
-| a CLI command, flag, or human rendering | `src/cli/main.ts`, `src/cli/render.ts` |
-| the wire schema or validation | `src/protocol.ts`, `contracts/protocol.md` |
-| ACP handshake, prompt queue, permissions, cancellation | `src/session.ts`, `contracts/session.md` |
-| supervisor lifecycle, universal addressing, dispatch | `src/supervisor.ts` |
-| provider catalog reads (`backends.sessions`) | `src/provider.ts` |
+| a CLI command or flag | `src/cli/main.ts` and the matching `src/cli/commands/*.ts` |
+| human/JSON rendering | `src/cli/render.ts` (barrel) and `src/cli/render/*` |
+| a formatter or table rule | `src/cli/render/{text,table,session-table,entities,events,session}.ts` |
+| the wire schema | `src/protocol/{views,methods}.ts`, `contracts/protocol.md` |
+| boundary validation for a method | `src/protocol/parse/{session,system,common}.ts` |
+| ACP handshake, prompt queue, cancellation | `src/session.ts`, `contracts/session.md` |
+| permission/elicitation queue and deadline | `src/session/pending-input.ts` |
+| provider-state projection (plan, compaction, title) | `src/session/provider-state.ts` |
+| read context pages, wait conditions | `src/session/read.ts`, `src/session/waits.ts` |
+| supervisor lifecycle, addressing, dispatch | `src/supervisor.ts` |
+| persistent streams and subscriptions | `src/supervisor/connections.ts` |
+| spawn/resume/fork and its retry window | `src/supervisor/spawn.ts` |
+| backends/provider-catalog/receipt reads | `src/supervisor/discovery.ts` |
+| wait-cycle detection and multi-session waits | `src/supervisor/{wait-graph,waits}.ts` |
+| provider catalog probe (`backends.sessions`) | `src/provider.ts` |
 | provider discovery/adoption commands | `src/cli/commands/provider.ts`, `src/cli/commands/adopt.ts` |
 | spawn receipts and their read surface | `src/ledger.ts`, `src/cli/commands/children.ts` |
-| autostart, lock probing, request transport | `src/client.ts`, `src/lock.ts` |
-| backend manifests and config merge | `src/config.ts`, `contracts/backends.md` |
+| autostart, lock probing, request transport | `src/client.ts`, `src/client/*`, `src/lock.ts` |
+| backend manifests, config merge, command resolution | `src/config.ts`, `src/config/backends.ts`, `contracts/backends.md` |
 | retention / cursor / eviction rules | `src/events.ts`, ADR 0002 |
 | timeouts, ids, errors, paths | the matching leaf module in `src/` |
 | acceptance assemblies | `examples/acceptance/` |

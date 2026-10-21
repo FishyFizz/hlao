@@ -64,6 +64,17 @@ liveness.
   (`FAKE_PROVIDER_SESSIONS`), and can omit `session/list`
   (`FAKE_NO_LIST_SESSION=1`).
 
+### Maintenance
+
+- Internal modules were split along their existing responsibilities without
+  changing the wire, CLI, or filesystem contracts: `session`, `supervisor`,
+  `client`, `config`, `protocol`, and the CLI renderer/help now delegate to
+  focused submodules (the map is in `docs/architecture.md`). The dashboard's
+  socket contract is unchanged.
+- Path comparison has one implementation (`paths.pathKey` /
+  `paths.isPathWithin`). As a consequence, `list --cwd-prefix /work/foo` no
+  longer matches `/work/foobar`; the value is treated as a directory.
+
 ### Notes
 
 - This is a read of the provider, not a second authority. There is still no

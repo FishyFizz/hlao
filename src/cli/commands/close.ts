@@ -1,14 +1,14 @@
 import { isTerminalStatus } from "../../protocol.js";
 import type { SupervisorConnection } from "../../client.js";
 
-import type { CloseResult, ForgetResult, GetResult, ListResult, SessionView } from "../../protocol.js";
+import type { CloseResult, ForgetResult, GetResult, SessionView } from "../../protocol.js";
 
 import { booleanOption, expectPositionals, numberOption, parseArgs, stringOption, usageError } from "../args.js";
 import { COMMON, connect, contextFrom, out, resolveTarget, sessionLabel, writeJson, type CommandContext } from "../context.js";
 import { helpRequested } from "../help.js";
 import { renderTable, sanitize, styleStatus } from "../render.js";
-import { parseStatuses } from "./list.js";
-import { collectSubtree, resolveJobRoot } from "./selectors.js";
+import { parseStatuses } from "./list-filters.js";
+import { selectSessions } from "./selectors.js";
 
 export async function cmdClose(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
@@ -51,18 +51,19 @@ export async function cmdClose(args: string[]): Promise<number> {
     ) {
       throw usageError("--self and --tree are only for a single session id");
     }
-    return await closeBulk(conn, ctx, {
-      idle,
-      statuses: new Set([
+    const statuses = [
+      ...new Set([
         ...(failed ? ["failed"] : []),
         ...(parseStatuses(statusRaw) ?? []),
       ]),
-      rootToken,
-      force,
-      forget,
-      dryRun,
+    ];
+    const targets = await selectSessions(conn, ctx, {
+      ...(idle !== undefined ? { idle } : {}),
+      ...(statuses.length > 0 ? { statuses } : {}),
+      ...(rootToken !== undefined ? { root: rootToken } : {}),
       exceptSelf: booleanOption(parsed, "except-self") === true,
     });
+    return await closeBulk(conn, ctx, targets, { force, forget, dryRun });
   }
 
   expectPositionals(parsed, "close", 0, 1);
@@ -70,17 +71,12 @@ export async function cmdClose(args: string[]): Promise<number> {
 
   if (booleanOption(parsed, "tree") === true) {
     if (forget) throw usageError("--forget cannot be combined with --tree");
-    const target = await conn.request<GetResult>("sessions.get", { sessionId });
     // Closed intermediates are retained for lineage; including them lets the
     // subtree reach live grandchildren whose parent has already been closed.
-    const list = await conn.request<ListResult>("sessions.list", {
-      includeClosed: true,
-    });
-    const subtree = collectSubtree(target.session, list.sessions);
+    const subtree = await selectSessions(conn, ctx, { tree: sessionId });
     const live = subtree.filter(
       (session) => !isTerminalStatus(session.status),
     );
-    live.sort((left, right) => right.depth - left.depth);
 
     // A dry run must report before any close. This branch used to sit before
     // the dry-run check and closed the tree for real.
@@ -188,54 +184,17 @@ export async function cmdClose(args: string[]): Promise<number> {
 }
 
 interface CloseBulkOptions {
-  idle?: number;
-  statuses: Set<string>;
-  rootToken?: string;
   force: boolean;
   forget: boolean;
   dryRun: boolean;
-  exceptSelf: boolean;
 }
 
 async function closeBulk(
   conn: SupervisorConnection,
   ctx: CommandContext,
+  targets: SessionView[],
   options: CloseBulkOptions,
 ): Promise<number> {
-  const list = await conn.request<ListResult>("sessions.list", {
-    includeClosed: true,
-  });
-  let targets = list.sessions;
-  if (options.rootToken !== undefined) {
-    const root = resolveJobRoot(list.sessions, options.rootToken);
-    targets = targets.filter((session) => session.rootId === root.id);
-  }
-  if (options.statuses.size > 0) {
-    // `status: idle` with a queued prompt is still work; surface it as busy so
-    // a bulk cleanup cannot discard the queue.
-    targets = targets.filter((session) =>
-      options.statuses.has(
-        session.status === "idle" && session.queued > 0
-          ? "busy"
-          : session.status,
-      ),
-    );
-  }
-  if (options.idle !== undefined) {
-    const now = Date.now();
-    targets = targets.filter((session) => {
-      if (!session.settled) return false;
-      const last = Date.parse(session.lastActivityAt);
-      return Number.isFinite(last) && now - last >= options.idle!;
-    });
-  }
-  if (options.exceptSelf && ctx.callerSessionId !== null) {
-    targets = targets.filter(
-      (session) => session.id !== ctx.callerSessionId,
-    );
-  }
-  targets = [...targets].sort((left, right) => right.depth - left.depth);
-
   if (targets.length === 0) {
     if (ctx.json) {
       writeJson({ count: 0, forgotten: 0, skipped: 0, sessions: [] });

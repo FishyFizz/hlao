@@ -5,15 +5,10 @@ import type {
   AgentCapabilities,
   ClientConnection,
   ContentBlock,
-  CreateElicitationRequest,
-  CreateElicitationResponse,
   NewSessionResponse,
-  PermissionOption,
-  RequestPermissionRequest,
-  RequestPermissionResponse,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
-import { HLAO_CLIENT_CAPABILITIES } from "./acp.js";
+import { assertAcpVersion, initializeParams } from "./acp.js";
 import type { BackendManifest } from "./config.js";
 import { HlaoError, describeError } from "./errors.js";
 import { EventLog } from "./events.js";
@@ -24,38 +19,30 @@ import type {
   EventType,
   EventView,
   QueueItemView,
-  SessionCompactionView,
   SessionConfigOptionView,
   SessionModes,
-  SessionPlanEntryView,
-  SessionPlanView,
   SessionStatus,
   SessionUsageView,
   SessionView,
   StopReason,
   WaitUntil,
 } from "./protocol.js";
-import { ACP_PROTOCOL_VERSION, MAX_PROMPT_CHARS, isTerminalStatus } from "./protocol.js";
+import { MAX_PROMPT_CHARS, isTerminalStatus } from "./protocol.js";
 import { raceWithTimeout, withTimeout } from "./session/async.js";
-import {
-  cancelledElicitation,
-  cancelledResponse,
-  elicitationResponse,
-  selectedResponse,
-  toElicitationView,
-  type ElicitationAction,
-  type ElicitationContent,
-  type PendingElicitation,
-  type PendingPermission,
-} from "./session/permissions.js";
+import { buildSessionEnv } from "./session/env.js";
+import { PendingInputs } from "./session/pending-input.js";
 import {
   killProcessTree,
-  signalProcessGroup,
+  stopAdapterProcess,
   waitForExit,
 } from "./session/process.js";
 import {
-  contentBlocksText,
-  contentText,
+  applyProviderState,
+  checkContextPressure,
+  createProviderState,
+  type ProviderState,
+} from "./session/provider-state.js";
+import {
   eventTitle,
   firstPromptPreview,
   previewText,
@@ -63,104 +50,35 @@ import {
   queueItemView,
   skillPointer,
   toConfigOptionViews,
-  toPermissionView,
 } from "./session/projection.js";
 import {
   createQueueItem,
   type PromptCompletion,
   type QueueItem,
 } from "./session/queue.js";
+import { readPage } from "./session/read.js";
+import { steeringSupported } from "./session/steering.js";
+import type {
+  ReadOptions,
+  ReadResult,
+  SendResult,
+  SessionConfig,
+  SpawnOptions,
+  WaitResult,
+} from "./session/types.js";
+import { waitForSession, type WaitState } from "./session/waits.js";
 
 export type { PromptCompletion } from "./session/queue.js";
+export type {
+  ReadOptions,
+  ReadResult,
+  SendResult,
+  SessionConfig,
+  SpawnOptions,
+  WaitResult,
+} from "./session/types.js";
 
 const MAX_QUEUED_PROMPTS = 1_000;
-/** Bound on a context-expanded read page; matches always survive the trim. */
-const MAX_CONTEXT_EVENTS = 2_000;
-
-export interface SessionConfig {
-  startupTimeoutMs: number;
-  maxEventsPerSession: number;
-  maxEventLogBytes: number;
-  maxEventBytes: number;
-}
-
-export interface SpawnOptions {
-  id: string;
-  backend: BackendManifest;
-  cwd: string;
-  parentId: string | null;
-  rootId: string;
-  depth: number;
-  name: string | null;
-  /** "operator" or the requesting session id. Provenance only. */
-  createdBy: string;
-  requestedMode?: string;
-  env: Record<string, string>;
-  /** One-shot operator wait before a request fails closed; 0 parks (3.0). */
-  permissionTimeoutMs: number;
-  /** Bound on the pending permission FIFO, captured at spawn (3.0). */
-  maxPendingPermissions: number;
-  home: string;
-  config: SessionConfig;
-  cliPath: string;
-  /** Include the skill pointer in the first prompt. Default true at the boundary. */
-  skill: boolean;
-  skillPath: string;
-  skillVersion: string;
-  /** Provider session to reopen with ACP `session/load` instead of `session/new`. */
-  resumeSessionId?: string;
-  /** Provider session to copy with ACP `session/fork`. */
-  forkSessionId?: string;
-  log: (line: string) => void;
-}
-
-
-export interface SendResult {
-  messageId: string;
-  queued: boolean;
-  /** True when the prompt was injected into the running turn. */
-  steered?: boolean;
-  /** On a duplicate: true when the original message is still active or queued. */
-  pending?: boolean;
-  turn: number | null;
-  completed: boolean;
-  timedOut: boolean;
-  stopReason?: StopReason;
-  text?: string;
-  outcome?: "completed" | "cancelled" | "timed_out";
-  duplicate?: boolean;
-}
-
-export interface ReadOptions {
-  since?: number;
-  before?: number;
-  limit?: number;
-  raw?: boolean;
-  types?: EventType[];
-  turn?: number;
-  grep?: string;
-  afterAt?: number;
-  beforeAt?: number;
-  regex?: boolean;
-  context?: number;
-}
-
-export interface ReadResult {
-  events: EventView[];
-  earliestRetainedSeq: number;
-  lastSeq: number;
-  nextSeq: number;
-  nextBefore: number | null;
-  hasMore: boolean;
-  truncated: boolean;
-  matchedSeqs?: number[];
-}
-
-export interface WaitResult {
-  satisfied: boolean;
-  reason: WaitUntil | "timeout";
-  waitedMs: number;
-}
 
 
 /**
@@ -204,18 +122,13 @@ export class Session {
   #pumping = false;
   #turnText = "";
   #lastMessageId: string | null = null;
-  /** FIFO of provider permission requests, keyed by ACP request id. */
-  #pending = new Map<string, PendingPermission>();
-  #pendingElicitation: PendingElicitation | null = null;
   #lastStopReason: StopReason | null = null;
   #usage: SessionUsageView | null = null;
-  #compaction: SessionCompactionView | null = null;
-  #plan: SessionPlanView | null = null;
-  #title: string | null = null;
+  /** The provider's latest compaction, plan, title, and pressure notices. */
+  #provider: ProviderState = createProviderState();
   #firstPrompt: string | null = null;
   #agentName: string | null = null;
   #agentVersion: string | null = null;
-  #contextPressure = { warn75: false, warn90: false };
   #lastActivityAt: string;
   #endedAt: string | null = null;
   #exit: { code: number | null; signal: string | null } | null = null;
@@ -229,8 +142,8 @@ export class Session {
   #stderrTail: string[] = [];
   #config: SessionConfig;
   #backendManifest: BackendManifest;
-  #permissionTimeoutMs: number;
-  #maxPendingPermissions: number;
+  /** The bounded permission FIFO and parked elicitation, with their deadline. */
+  #pendingInputs: PendingInputs;
   #env: Record<string, string>;
   #home: string;
   #cliPath: string;
@@ -258,8 +171,6 @@ export class Session {
     this.#lastActivityAt = this.createdAt;
     this.#config = options.config;
     this.#backendManifest = options.backend;
-    this.#permissionTimeoutMs = options.permissionTimeoutMs;
-    this.#maxPendingPermissions = options.maxPendingPermissions;
     this.#env = options.env;
     this.#home = options.home;
     this.#cliPath = options.cliPath;
@@ -273,6 +184,31 @@ export class Session {
       maxBytes: options.config.maxEventLogBytes,
       maxEventBytes: options.config.maxEventBytes,
     });
+    this.#pendingInputs = new PendingInputs(
+      options.id,
+      {
+        permissionTimeoutMs: options.permissionTimeoutMs,
+        maxPermissions: options.maxPendingPermissions,
+      },
+      {
+        isTerminal: () => this.isTerminal,
+        isClosing: () => this.#closing,
+        isCancelling: () => this.#cancelling,
+        hasActiveTurn: () => this.#active !== null,
+        block: () => {
+          this.#status = "waiting_permission";
+          this.#changed();
+        },
+        refreshStatus: () => this.#refreshInputStatus(),
+        refreshStatusIfWaiting: () => {
+          if (this.#status === "waiting_permission") this.#refreshInputStatus();
+        },
+        emit: (type, data) => {
+          this.#emit(type, data);
+        },
+        changed: () => this.#changed(),
+      },
+    );
   }
 
   static async spawn(options: SpawnOptions): Promise<Session> {
@@ -300,12 +236,10 @@ export class Session {
 
   /** Operator input of either kind blocks the session the same way. */
   get #awaitingInput(): boolean {
-    return this.#pending.size > 0 || this.#pendingElicitation !== null;
+    return this.#pendingInputs.awaiting;
   }
 
   view(): SessionView {
-    const pending = [...this.#pending.values()];
-    const elicitation = this.#pendingElicitation;
     return {
       id: this.id,
       name: this.name,
@@ -325,16 +259,8 @@ export class Session {
       settled: this.#status === "idle" && this.#queue.length === 0,
       lastSeq: this.#log.lastSeq,
       lastEvent: this.#lastEvent ? { ...this.#lastEvent } : null,
-      pendingPermissions: pending.map((entry) =>
-        toPermissionView(entry.requestId, entry.requestedAt, entry.request),
-      ),
-      pendingElicitation: elicitation
-        ? toElicitationView(
-            elicitation.requestId,
-            elicitation.requestedAt,
-            elicitation.request,
-          )
-        : null,
+      pendingPermissions: this.#pendingInputs.permissionViews(),
+      pendingElicitation: this.#pendingInputs.elicitationView(),
       lastStopReason: this.#lastStopReason,
       agentSessionId: this.#agentSessionId,
       forkedFrom: this.#forkSessionId,
@@ -358,16 +284,22 @@ export class Session {
             cost: this.#usage.cost ? { ...this.#usage.cost } : null,
           }
         : null,
-      compaction: this.#compaction ? { ...this.#compaction } : null,
-      plan: this.#plan
+      compaction: this.#provider.compaction
+        ? { ...this.#provider.compaction }
+        : null,
+      plan: this.#provider.plan
         ? {
-            ...this.#plan,
-            ...(this.#plan.entries
-              ? { entries: this.#plan.entries.map((entry) => ({ ...entry })) }
+            ...this.#provider.plan,
+            ...(this.#provider.plan.entries
+              ? {
+                  entries: this.#provider.plan.entries.map((entry) => ({
+                    ...entry,
+                  })),
+                }
               : {}),
           }
         : null,
-      title: this.#title,
+      title: this.#provider.title,
       firstPrompt: this.#firstPrompt,
       agentName: this.#agentName,
       agentVersion: this.#agentVersion,
@@ -386,15 +318,8 @@ export class Session {
     from = "operator",
     options: { messageId?: string; idempotencyKey?: string; steer?: boolean } = {},
   ): Promise<SendResult> {
-    if (this.isTerminal || this.#closing) {
-      throw new HlaoError(
-        "session_closed",
-        `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`,
-      );
-    }
-    if (!this.#ready || !this.#conn || !this.#agentSessionId) {
-      throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);
-    }
+    this.#assertOpen();
+    this.#assertReady();
     if (text.length === 0 || text.length > MAX_PROMPT_CHARS) {
       throw new HlaoError("bad_request", "prompt text is empty or too long");
     }
@@ -771,8 +696,7 @@ export class Session {
         const stopReason: StopReason = "cancelled";
         this.#cancelling = false;
         this.#lastStopReason = stopReason;
-        this.#clearPending("cancel");
-        this.#clearPendingElicitation("cancel");
+        this.#pendingInputs.clearAll("cancel");
         this.#settleItem(item, {
           ok: true,
           turn,
@@ -796,8 +720,7 @@ export class Session {
         });
       } else {
         const message = describeError(error);
-        this.#clearPending("prompt-failed");
-        this.#clearPendingElicitation("prompt-failed");
+        this.#pendingInputs.clearAll("prompt-failed");
         this.#emit("error", { message, phase: "prompt" }, turn);
         this.#settleItem(item, {
           ok: false,
@@ -825,8 +748,7 @@ export class Session {
     const turn = item.turn!;
     const text = this.#turnText;
     this.#cancelling = false;
-    this.#clearPending("turn-ended");
-    this.#clearPendingElicitation("turn-ended");
+    this.#pendingInputs.clearAll("turn-ended");
     this.#lastStopReason = stopReason;
     this.#emit("turn.ended", { turn, stopReason, textLength: text.length }, turn);
     this.#settleItem(item, { ok: true, turn, stopReason, text });
@@ -867,58 +789,7 @@ export class Session {
   // -------------------------------------------------------------------------
 
   read(options: ReadOptions): ReadResult {
-    const base = this.#log.read({
-      since: options.since,
-      before: options.before,
-      limit: options.limit ?? 100,
-      raw: options.raw ?? false,
-      types: options.types,
-      turn: options.turn,
-      grep: options.grep,
-      afterAt: options.afterAt,
-      beforeAt: options.beforeAt,
-      regex: options.regex,
-    });
-    const context = options.context ?? 0;
-    if (context <= 0 || base.events.length === 0) return base;
-
-    // Context is a display projection, not a second filter. `limit` bounds the
-    // matches; neighbors are fetched around each match and merged by seq. The
-    // page cursors still advance by matches, so a neighbor may repeat on the
-    // next page. That is deliberate: context must never hide a match.
-    const matched = new Set(base.events.map((event) => event.seq));
-    const bySeq = new Map<number, EventView>();
-    for (const event of base.events) bySeq.set(event.seq, event);
-    // A neighbor must not cross the caller's cursor: `since` is exclusive and
-    // `before` is exclusive, even when a match sits at the page edge.
-    const minSeq = options.since === undefined ? 0 : options.since + 1;
-    const maxSeq = options.before === undefined ? Number.MAX_SAFE_INTEGER : options.before - 1;
-    for (const match of base.events) {
-      const window = this.#log.read({
-        before: match.seq + context + 1,
-        limit: context * 2 + 1,
-        raw: options.raw ?? false,
-      });
-      for (const event of window.events) {
-        if (event.seq < minSeq || event.seq > maxSeq) continue;
-        bySeq.set(event.seq, event);
-      }
-    }
-
-    let events = [...bySeq.values()].sort((left, right) => left.seq - right.seq);
-    if (events.length > MAX_CONTEXT_EVENTS) {
-      const matches = events.filter((event) => matched.has(event.seq));
-      const neighbors = events.filter((event) => !matched.has(event.seq));
-      const room = Math.max(0, MAX_CONTEXT_EVENTS - matches.length);
-      events = [...matches, ...neighbors.slice(0, room)].sort(
-        (left, right) => left.seq - right.seq,
-      );
-    }
-    return {
-      ...base,
-      events,
-      matchedSeqs: [...matched].sort((left, right) => left - right),
-    };
+    return readPage(this.#log, options);
   }
 
   waitFor(
@@ -929,83 +800,45 @@ export class Session {
     types?: EventType[],
     grep?: string,
   ): Promise<WaitResult> {
-    const startedAt = Date.now();
-    let changeCursor = until === "change" ? (since ?? this.#log.lastSeq) : (since ?? 0);
-
-    return new Promise<WaitResult>((resolve) => {
-      let finished = false;
-      let timer: NodeJS.Timeout | undefined;
-
-      const finish = (satisfied: boolean, reason: WaitUntil | "timeout"): void => {
-        if (finished) return;
-        finished = true;
-        if (timer) clearTimeout(timer);
-        this.#waiters.delete(check);
-        if (signal) signal.removeEventListener("abort", onAbort);
-        resolve({ satisfied, reason, waitedMs: Date.now() - startedAt });
-      };
-
-      const check = (): void => {
-        switch (until) {
-          case "idle":
-            if (this.#status === "idle") finish(true, "idle");
-            else if (this.isTerminal) finish(false, "exit");
-            return;
-          case "settled":
-            // Completion: a terminal session is done, a pending permission is
-            // an actionable stop, and idle alone is not enough while the queue
-            // still has work.
-            if (this.isTerminal) finish(true, "exit");
-            else if (this.#awaitingInput) finish(true, "permission");
-            else if (this.#status === "idle" && this.#queue.length === 0) {
-              finish(true, "idle");
-            }
-            return;
-          case "permission":
-            if (this.#awaitingInput) finish(true, "permission");
-            else if (this.isTerminal) finish(false, "exit");
-            return;
-          case "exit":
-            if (this.isTerminal) finish(true, "exit");
-            return;
-          case "change": {
-            const page = this.#log.read({
-              since: changeCursor,
-              limit: 1,
-              raw: false,
-              types,
-              grep,
-            });
-            if (page.events.length > 0) {
-              finish(true, "change");
-              return;
-            }
-            // Advance past scanned non-matching events; the corrected cursor
-            // is the last scanned seq, so a filtered waiter does not rescan.
-            changeCursor = page.nextSeq;
-            if (this.isTerminal) finish(false, "exit");
-            return;
-          }
-        }
-      };
-
-      const onAbort = (): void => finish(false, "timeout");
-
-      if (signal?.aborted) {
-        finish(false, "timeout");
-        return;
-      }
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.#waiters.add(check);
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => finish(false, "timeout"), timeoutMs);
-        timer.unref?.();
-      }
-      check();
-    });
+    return waitForSession(
+      {
+        state: () => this.#waitState(),
+        lastSeq: this.#log.lastSeq,
+        readChange: (cursor, filterTypes, filterGrep) => {
+          const page = this.#log.read({
+            since: cursor,
+            limit: 1,
+            raw: false,
+            types: filterTypes,
+            grep: filterGrep,
+          });
+          return { events: page.events, nextSeq: page.nextSeq };
+        },
+        addWaiter: (check) => {
+          this.#waiters.add(check);
+          return () => {
+            this.#waiters.delete(check);
+          };
+        },
+      },
+      until,
+      since,
+      timeoutMs,
+      signal,
+      types,
+      grep,
+    );
   }
 
-  // -------------------------------------------------------------------------
+  #waitState(): WaitState {
+    return {
+      status: this.#status,
+      queued: this.#queue.length,
+      awaitingInput: this.#awaitingInput,
+      terminal: this.isTerminal,
+    };
+  }
+
   // cancel, close, permissions
   // -------------------------------------------------------------------------
 
@@ -1015,8 +848,7 @@ export class Session {
   ): Promise<{ discarded: number }> {
     if (this.isTerminal) return { discarded: 0 };
     const discarded = keepQueue ? 0 : this.#discardQueue("cancel", by);
-    this.#clearPending("cancel", by);
-    this.#clearPendingElicitation("cancel", by);
+    this.#pendingInputs.clearAll("cancel", by);
     if (this.#active) {
       this.#cancelling = true;
       this.#emit("cancel.requested", {
@@ -1043,8 +875,7 @@ export class Session {
     this.#closing = true;
     this.#closingBy = by;
     this.#discardQueue("close", by);
-    this.#clearPending("close", by);
-    this.#clearPendingElicitation("close", by);
+    this.#pendingInputs.clearAll("close", by);
 
     if (!force && this.#conn && this.#agentSessionId) {
       const canClose = this.#caps.sessionCapabilities?.close !== undefined &&
@@ -1093,137 +924,21 @@ export class Session {
       // Already ended.
     }
 
-    if (child && child.exitCode === null && child.signalCode === null) {
-      if (process.platform === "win32") {
-        if (!force) {
-          const exited = await waitForExit(child, 1_500);
-          if (!exited) {
-            killed = true;
-            killProcessTree(child);
-            await waitForExit(child, 3_000);
-          }
-        } else {
-          await waitForExit(child, 3_000);
-        }
-      } else {
-        // The adapter leads its process group; signal the group so tools it
-        // spawned do not outlive it.
-        if (force) killed = true;
-        signalProcessGroup(child, force ? "SIGKILL" : "SIGTERM");
-        const exited = await waitForExit(child, force ? 2_000 : 5_000);
-        if (!exited) {
-          killed = true;
-          signalProcessGroup(child, "SIGKILL");
-          await waitForExit(child, 2_000);
-        }
-      }
+    if (child) {
+      killed = (await stopAdapterProcess(child, force)) || killed;
     }
 
     this.#finalize("closed", undefined, by);
     return { killed, wasTerminal: false };
   }
 
-  /**
-   * Answer one pending request with the provider's own option id. The option
-   * must be offered; HLAO never invents a fallback. With several requests
-   * pending, `requestId` is required.
-   */
+  /** Answer one pending request with the provider's own option id. */
   permit(
     optionId: string,
     requestId?: string,
     by = "operator",
   ): { requestId: string; optionId: string } {
-    if (this.#pending.size === 0) {
-      throw new HlaoError(
-        "no_pending_permission",
-        `session ${this.id} has no pending permission`,
-      );
-    }
-    let pending: PendingPermission;
-    if (requestId !== undefined) {
-      const found = this.#pending.get(requestId);
-      if (!found) {
-        const ids = [...this.#pending.keys()];
-        throw new HlaoError(
-          "no_pending_permission",
-          `no pending permission with request id ${requestId}`,
-          { requestIds: ids },
-        );
-      }
-      pending = found;
-    } else if (this.#pending.size > 1) {
-      const ids = [...this.#pending.keys()];
-      throw new HlaoError(
-        "bad_request",
-        `session ${this.id} has ${ids.length} pending permission requests; pass --request <id> (${ids.join(", ")}) or --all-pending`,
-        { requestIds: ids },
-      );
-    } else {
-      pending = this.#pending.values().next().value!;
-    }
-
-    const chosen = pending.request.options.find(
-      (option) => option.optionId === optionId,
-    );
-    if (!chosen) {
-      throw new HlaoError(
-        "bad_option",
-        `permission option "${optionId}" was not offered`,
-        {
-          options: pending.request.options.map((option) => ({
-            optionId: option.optionId,
-            name: option.name,
-            kind: option.kind,
-          })),
-        },
-      );
-    }
-    this.#resolvePending(pending, chosen, by);
-    return { requestId: pending.requestId, optionId: chosen.optionId };
-  }
-
-  /** Answer one parked request and wake the turn. */
-  #resolvePending(
-    pending: PendingPermission,
-    chosen: PermissionOption,
-    by: string,
-    reason?: string,
-  ): void {
-    if (this.#pending.get(pending.requestId) !== pending) return;
-    this.#pending.delete(pending.requestId);
-    if (pending.timer !== undefined) clearTimeout(pending.timer);
-    this.#refreshInputStatus();
-    this.#emit("permission.resolved", {
-      requestId: pending.requestId,
-      optionId: chosen.optionId,
-      optionName: chosen.name,
-      by,
-      ...(reason !== undefined ? { reason } : {}),
-    });
-    pending.resolve(selectedResponse(chosen.optionId));
-    this.#changed();
-  }
-
-  /**
-   * Start the one absolute deadline for a request. On expiry the request fails
-   * closed: prefer `reject_once`, then `reject_always`, else cancel. An allow
-   * option is never selected.
-   */
-  #armPermissionTimeout(pending: PendingPermission): void {
-    if (this.#permissionTimeoutMs <= 0) return;
-    const timer = setTimeout(() => {
-      if (this.#pending.get(pending.requestId) !== pending) return;
-      const reject =
-        pending.request.options.find((option) => option.kind === "reject_once") ??
-        pending.request.options.find((option) => option.kind === "reject_always");
-      if (reject) {
-        this.#resolvePending(pending, reject, "timeout", "timeout");
-      } else {
-        this.#clearPendingOne(pending.requestId, "timeout", "timeout");
-      }
-    }, this.#permissionTimeoutMs);
-    timer.unref?.();
-    pending.timer = timer;
+    return this.#pendingInputs.permit(optionId, requestId, by);
   }
 
   /** Recompute the blocked status from every pending input, not just one. */
@@ -1238,9 +953,7 @@ export class Session {
 
   /** Changes the operator-facing label. The id and env identity do not change. */
   setName(name: string | null, by = "operator"): void {
-    if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
-    }
+    this.#assertOpen();
     if (name !== null && name.trim().length === 0) {
       throw new HlaoError("bad_request", "a session name must not be empty; pass null to clear");
     }
@@ -1251,12 +964,8 @@ export class Session {
 
   /** Switches a provider-native mode when the backend advertises modes. */
   async setMode(modeId: string, by = "operator"): Promise<SessionModes> {
-    if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
-    }
-    if (!this.#ready || !this.#conn || !this.#agentSessionId) {
-      throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);
-    }
+    this.#assertOpen();
+    const { conn, agentSessionId } = this.#assertReady();
     if (!this.#modes) {
       throw new HlaoError(
         "bad_request",
@@ -1269,8 +978,8 @@ export class Session {
       });
     }
     if (this.#modes.currentModeId !== modeId) {
-      await this.#conn.agent.request("session/set_mode", {
-        sessionId: this.#agentSessionId,
+      await conn.agent.request("session/set_mode", {
+        sessionId: agentSessionId,
         modeId,
       });
       this.#modes = { ...this.#modes, currentModeId: modeId };
@@ -1286,12 +995,8 @@ export class Session {
     value: string | boolean,
     by = "operator",
   ): Promise<SessionConfigOptionView[]> {
-    if (this.isTerminal || this.#closing) {
-      throw new HlaoError("session_closed", `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`);
-    }
-    if (!this.#ready || !this.#conn || !this.#agentSessionId) {
-      throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);
-    }
+    this.#assertOpen();
+    const { conn, agentSessionId } = this.#assertReady();
     const options = this.#configOptions;
     const option = options?.find((candidate) => candidate.id === configId);
     if (!option) {
@@ -1336,16 +1041,16 @@ export class Session {
       }
     }
 
-    const response = await this.#conn.agent.request(
+    const response = await conn.agent.request(
       "session/set_config_option",
       typeof resolvedValue === "boolean"
         ? {
-            sessionId: this.#agentSessionId,
+            sessionId: agentSessionId,
             configId,
             type: "boolean" as const,
             value: resolvedValue,
           }
-        : { sessionId: this.#agentSessionId, configId, value: resolvedValue },
+        : { sessionId: agentSessionId, configId, value: resolvedValue },
     );
     this.#configOptions = toConfigOptionViews(response.configOptions);
     this.#emit("config", { configOptions: this.#configOptions, by });
@@ -1422,231 +1127,14 @@ export class Session {
     return { dropped: queueItemView(item, position), discarded: 1 };
   }
 
-  #onPermission(
-    params: RequestPermissionRequest,
-    requestId: string,
-    signal: AbortSignal,
-  ): Promise<RequestPermissionResponse> {
-    if (this.isTerminal || this.#closing || this.#cancelling) {
-      return Promise.resolve(cancelledResponse());
-    }
-    if (signal.aborted) {
-      return Promise.resolve(cancelledResponse());
-    }
-    const data = {
-      requestId,
-      toolCallId: params.toolCall.toolCallId,
-      title: params.toolCall.title ?? "",
-      kind: params.toolCall.kind ?? null,
-      options: params.options.map((option) => ({
-        optionId: option.optionId,
-        name: option.name,
-        kind: option.kind,
-      })),
-      // True when the request belongs to work no prompt turn owns, such as an
-      // autonomous cycle. It follows the same queue and timeout rules.
-      outsideTurn: this.#active === null,
-    };
-
-    // A request is live work even when no prompt turn owns it. Claude Code can
-    // run an autonomous cycle after a turn's result (a background-task
-    // notification, a peer message), and its tool calls still ask for
-    // permission; answering `cancelled` there aborts the tool call without
-    // ever surfacing the request.
-    if (this.#pending.size >= this.#maxPendingPermissions) {
-      // Fail closed, visibly. This request is not enqueued, so it has no
-      // queuePosition; the provider is told the tool call was cancelled.
-      this.#emit("permission.requested", data);
-      this.#emit("permission.resolved", {
-        requestId,
-        optionId: null,
-        by: "system",
-        reason: "queue_full",
-      });
-      return Promise.resolve(cancelledResponse());
-    }
-
-    return new Promise<RequestPermissionResponse>((resolve) => {
-      // The provider withdraws a request it no longer needs, for example when
-      // it abandons the tool call. The ACP connection aborts this signal on
-      // `$/cancel_request`; clearing one entry keeps the rest answerable.
-      const onWithdraw = (): void => {
-        if (this.#pending.get(requestId) !== pending) return;
-        this.#clearPendingOne(requestId, "withdrawn", "agent");
-      };
-      const settle = (response: RequestPermissionResponse): void => {
-        signal.removeEventListener("abort", onWithdraw);
-        resolve(response);
-      };
-      const pending: PendingPermission = {
-        requestId,
-        requestedAt: nowIso(),
-        request: params,
-        resolve: settle,
-      };
-      this.#pending.set(requestId, pending);
-      signal.addEventListener("abort", onWithdraw, { once: true });
-      if (signal.aborted) {
-        this.#clearPendingOne(requestId, "withdrawn", "agent");
-        return;
-      }
-      this.#emit("permission.requested", {
-        ...data,
-        // 1-based FIFO position. The first request is position 1.
-        queuePosition: this.#pending.size,
-      });
-      this.#armPermissionTimeout(pending);
-      this.#status = "waiting_permission";
-      this.#changed();
-    });
-  }
-
-  #onElicitation(
-    params: CreateElicitationRequest,
-    requestId: string,
-    signal: AbortSignal,
-  ): Promise<CreateElicitationResponse> {
-    if (
-      this.isTerminal ||
-      this.#closing ||
-      this.#cancelling ||
-      signal.aborted
-    ) {
-      return Promise.resolve(cancelledElicitation());
-    }
-    if (this.#pendingElicitation) {
-      this.#emit("error", {
-        message: "a second elicitation arrived while one was pending",
-        requestId,
-      });
-      return Promise.resolve(cancelledElicitation());
-    }
-    // Elicitation is user input, not a permission: the operator-only permit
-    // relay never answers it, because an option kind cannot invent form
-    // content. The request parks until someone responds, declines, or cancels.
-    this.#emit("elicitation.requested", {
-      requestId,
-      sessionId:
-        "sessionId" in params && typeof params.sessionId === "string"
-          ? params.sessionId
-          : null,
-      toolCallId:
-        "toolCallId" in params && typeof params.toolCallId === "string"
-          ? params.toolCallId
-          : null,
-      message: params.message,
-      mode: params.mode,
-      ...(params.mode === "form"
-        ? { requestedSchema: params.requestedSchema }
-        : {}),
-      ...(params.mode === "url"
-        ? { url: params.url, elicitationId: params.elicitationId }
-        : {}),
-      outsideTurn: this.#active === null,
-    });
-
-    return new Promise<CreateElicitationResponse>((resolve) => {
-      // The provider can withdraw a question it no longer needs. The ACP
-      // connection aborts this signal on `$/cancel_request`; clearing the
-      // pending state keeps the session from parking on a dead request.
-      const onWithdraw = (): void => {
-        if (this.#pendingElicitation?.requestId !== requestId) return;
-        this.#clearPendingElicitation("withdrawn", "agent");
-      };
-      const settle = (response: CreateElicitationResponse): void => {
-        signal.removeEventListener("abort", onWithdraw);
-        resolve(response);
-      };
-      this.#pendingElicitation = {
-        requestId,
-        requestedAt: nowIso(),
-        request: params,
-        resolve: settle,
-      };
-      signal.addEventListener("abort", onWithdraw, { once: true });
-      if (signal.aborted) {
-        this.#clearPendingElicitation("withdrawn", "agent");
-        return;
-      }
-      // `waiting_permission` is HLAO's single "blocked on operator input"
-      // status; `pendingElicitation` says which kind it is.
-      this.#status = "waiting_permission";
-      this.#changed();
-    });
-  }
-
-  /** Answer a pending provider question. Accept carries schema-shaped content. */
+  /** Answer a pending provider question. */
   respondElicitation(
-    action: ElicitationAction,
-    content: ElicitationContent | undefined,
+    action: "accept" | "decline" | "cancel",
+    content: Record<string, string | number | boolean | string[]> | undefined,
     requestId: string | undefined,
     by = "operator",
-  ): { requestId: string; action: ElicitationAction } {
-    const pending = this.#pendingElicitation;
-    if (!pending) {
-      throw new HlaoError(
-        "no_pending_elicitation",
-        `session ${this.id} has no pending elicitation`,
-      );
-    }
-    if (requestId !== undefined && requestId !== pending.requestId) {
-      throw new HlaoError(
-        "no_pending_elicitation",
-        `no pending elicitation with request id ${requestId}`,
-        { requestId: pending.requestId },
-      );
-    }
-    this.#pendingElicitation = null;
-    this.#refreshInputStatus();
-    this.#emit("elicitation.resolved", {
-      requestId: pending.requestId,
-      action,
-      ...(content !== undefined ? { content } : {}),
-      by,
-    });
-    pending.resolve(elicitationResponse(action, content));
-    this.#changed();
-    return { requestId: pending.requestId, action };
-  }
-
-  #clearPendingElicitation(reason: string, by = "system"): void {
-    const pending = this.#pendingElicitation;
-    if (!pending) return;
-    this.#pendingElicitation = null;
-    if (this.#status === "waiting_permission") this.#refreshInputStatus();
-    this.#emit("elicitation.resolved", {
-      requestId: pending.requestId,
-      action: "cancel",
-      by,
-      reason,
-    });
-    pending.resolve(cancelledElicitation());
-    this.#changed();
-  }
-
-  /** Clear every pending permission (cancel, close, turn end, failure). */
-  #clearPending(reason: string, by = "system"): void {
-    if (this.#pending.size === 0) return;
-    for (const requestId of [...this.#pending.keys()]) {
-      this.#clearPendingOne(requestId, reason, by);
-    }
-  }
-
-  /** Clear one request without touching its siblings. */
-  #clearPendingOne(requestId: string, reason: string, by = "system"): void {
-    const pending = this.#pending.get(requestId);
-    if (!pending) return;
-    this.#pending.delete(requestId);
-    if (pending.timer !== undefined) clearTimeout(pending.timer);
-    if (this.#status === "waiting_permission") this.#refreshInputStatus();
-    this.#emit("permission.resolved", {
-      requestId: pending.requestId,
-      optionId: null,
-      by,
-      reason,
-    });
-    pending.resolve(cancelledResponse());
-    this.#changed();
+  ): { requestId: string; action: "accept" | "decline" | "cancel" } {
+    return this.#pendingInputs.respondElicitation(action, content, requestId, by);
   }
 
   // -------------------------------------------------------------------------
@@ -1676,7 +1164,20 @@ export class Session {
 
     const child = spawn(this.#backendManifest.command, this.#backendManifest.args, {
       cwd: this.cwd,
-      env: this.#buildEnv(),
+      env: buildSessionEnv({
+        id: this.id,
+        rootId: this.rootId,
+        depth: this.depth,
+        backend: this.backend,
+        home: this.#home,
+        cliPath: this.#cliPath,
+        skillPath: this.#skillPath,
+        skillVersion: this.#skillVersion,
+        name: this.name,
+        parentId: this.parentId,
+        backendEnv: this.#backendManifest.env,
+        env: this.#env,
+      }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX the adapter leads its own process group so tools it starts can
@@ -1778,10 +1279,10 @@ export class Session {
         this.#onUpdate(params);
       })
       .onRequest("session/request_permission", ({ params, requestId, signal }) =>
-        this.#onPermission(params, String(requestId), signal),
+        this.#pendingInputs.requestPermission(params, String(requestId), signal),
       )
       .onRequest("elicitation/create", ({ params, requestId, signal }) =>
-        this.#onElicitation(params, String(requestId), signal),
+        this.#pendingInputs.requestElicitation(params, String(requestId), signal),
       );
 
     this.#conn = app.connect(stream);
@@ -1791,21 +1292,16 @@ export class Session {
     );
 
     const init = await withTimeout(
-      this.#conn.agent.request("initialize", {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: HLAO_CLIENT_CAPABILITIES,
-        clientInfo: { name: "hlao", version: VERSION },
-      }),
+      this.#conn.agent.request<{
+        protocolVersion: number;
+        agentCapabilities?: AgentCapabilities;
+        agentInfo?: { name?: string; version?: string } | null;
+        _meta?: unknown;
+      }>("initialize", initializeParams()),
       this.#config.startupTimeoutMs,
       "ACP initialize",
     );
-
-    if (init.protocolVersion !== ACP_PROTOCOL_VERSION) {
-      throw new HlaoError(
-        "spawn_failed",
-        `${this.backend} speaks ACP v${init.protocolVersion}; HLAO requires v${ACP_PROTOCOL_VERSION}`,
-      );
-    }
+    assertAcpVersion(this.backend, init.protocolVersion);
     this.#caps = init.agentCapabilities ?? {};
     this.#agentName = init.agentInfo?.name ?? null;
     this.#agentVersion = init.agentInfo?.version ?? null;
@@ -1986,7 +1482,7 @@ export class Session {
       if (messageId !== null) this.#lastMessageId = messageId;
     }
     const mapped = projectUpdate(update);
-    this.#applyProviderState(update);
+    applyProviderState(this.#provider, update);
     if (
       mapped.type === "config" &&
       update.sessionUpdate === "config_option_update"
@@ -2011,134 +1507,8 @@ export class Session {
       this.#lastActivityAt = nowIso();
     }
     if (update.sessionUpdate === "usage_update") {
-      this.#checkContextPressure(update.used, update.size);
-    }
-  }
-
-  /** Project the provider's own session state into the view. */
-  #applyProviderState(update: SessionNotification["update"]): void {
-    const at = nowIso();
-    switch (update.sessionUpdate) {
-      case "compaction_update": {
-        const same = this.#compaction?.id === update.compactionId;
-        const summary =
-          update.summary === undefined
-            ? same
-              ? this.#compaction!.summary
-              : null
-            : update.summary === null
-              ? null
-              : contentBlocksText(update.summary);
-        const error =
-          update.error === undefined
-            ? same
-              ? this.#compaction!.error
-              : null
-            : update.error;
-        this.#compaction = {
-          id: update.compactionId,
-          status: update.status,
-          summary,
-          error,
-          updatedAt: at,
-        };
-        break;
-      }
-      case "compaction_summary_chunk": {
-        const text = contentText(update.content);
-        if (this.#compaction?.id === update.compactionId) {
-          this.#compaction = {
-            ...this.#compaction,
-            summary: `${this.#compaction.summary ?? ""}${text}`,
-            updatedAt: at,
-          };
-        } else {
-          this.#compaction = {
-            id: update.compactionId,
-            status: "in_progress",
-            summary: text,
-            error: null,
-            updatedAt: at,
-          };
-        }
-        break;
-      }
-      case "plan": {
-        this.#plan = {
-          planId: null,
-          kind: "items",
-          entries: planEntries(update.entries),
-          updatedAt: at,
-        };
-        break;
-      }
-      case "plan_update": {
-        const plan = update.plan;
-        if (plan.type === "items") {
-          this.#plan = {
-            planId: plan.planId,
-            kind: "items",
-            entries: planEntries(plan.entries),
-            updatedAt: at,
-          };
-        } else if (plan.type === "file") {
-          this.#plan = {
-            planId: plan.planId,
-            kind: "file",
-            uri: plan.uri,
-            updatedAt: at,
-          };
-        } else {
-          this.#plan = {
-            planId: plan.planId,
-            kind: "markdown",
-            content: plan.content,
-            updatedAt: at,
-          };
-        }
-        break;
-      }
-      case "plan_removed": {
-        if (
-          this.#plan !== null &&
-          (this.#plan.planId === null || this.#plan.planId === update.planId)
-        ) {
-          this.#plan = null;
-        }
-        break;
-      }
-      case "session_info_update": {
-        if (update.title !== undefined) this.#title = update.title;
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  /** Derive context-pressure notices from provider usage; no timer. */
-  #checkContextPressure(used: number, size: number): void {
-    if (!(size > 0) || !Number.isFinite(used)) return;
-    const ratio = used / size;
-    if (ratio < 0.7) {
-      this.#contextPressure = { warn75: false, warn90: false };
-      return;
-    }
-    const percent = Math.round(ratio * 100);
-    if (ratio >= 0.75 && !this.#contextPressure.warn75) {
-      this.#contextPressure.warn75 = true;
-      this.#emit("notice", {
-        severity: "warning",
-        title: "context pressure",
-        description: `${used}/${size} tokens (${percent}%)`,
-      });
-    }
-    if (ratio >= 0.9 && !this.#contextPressure.warn90) {
-      this.#contextPressure.warn90 = true;
-      this.#emit("notice", {
-        severity: "error",
-        title: "context pressure",
-        description: `${used}/${size} tokens (${percent}%)`,
+      checkContextPressure(this.#provider, update.used, update.size, (data) => {
+        this.#emit("notice", data);
       });
     }
   }
@@ -2192,8 +1562,7 @@ export class Session {
           : undefined,
     };
 
-    this.#clearPending(status, by);
-    this.#clearPendingElicitation(status, by);
+    this.#pendingInputs.clearAll(status, by);
 
     if (this.#active) {
       const active = this.#active;
@@ -2230,26 +1599,22 @@ export class Session {
   // helpers
   // -------------------------------------------------------------------------
 
-  #buildEnv(): NodeJS.ProcessEnv {
-    const base: NodeJS.ProcessEnv = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (!key.startsWith("HLAO_")) base[key] = value;
+  /** Reject any change to a session that has ended or is closing. */
+  #assertOpen(): void {
+    if (this.isTerminal || this.#closing) {
+      throw new HlaoError(
+        "session_closed",
+        `session ${this.id} is ${this.isTerminal ? this.#status : "closing"}`,
+      );
     }
-    return {
-      ...base,
-      ...this.#backendManifest.env,
-      ...this.#env,
-      HLAO_SESSION_ID: this.id,
-      HLAO_ROOT_ID: this.rootId,
-      HLAO_DEPTH: String(this.depth),
-      HLAO_BACKEND: this.backend,
-      HLAO_HOME: this.#home,
-      HLAO_CLI: this.#cliPath,
-      HLAO_SKILL: this.#skillPath,
-      HLAO_SKILL_VERSION: this.#skillVersion,
-      ...(this.name ? { HLAO_NAME: this.name } : {}),
-      ...(this.parentId ? { HLAO_PARENT_ID: this.parentId } : {}),
-    };
+  }
+
+  /** Reject a request that needs the ACP connection before it exists. */
+  #assertReady(): { conn: ClientConnection; agentSessionId: string } {
+    if (!this.#ready || !this.#conn || !this.#agentSessionId) {
+      throw new HlaoError("session_not_ready", `session ${this.id} is still starting`);
+    }
+    return { conn: this.#conn, agentSessionId: this.#agentSessionId };
   }
 
   #captureStderr(child: ChildProcess): void {
@@ -2347,26 +1712,4 @@ export class Session {
       }
     }
   }
-}
-
-/**
- * The ACP steering extension advertises itself in `InitializeResponse._meta`:
- * `{ steering: { supported: true } }`. Anything else means queue-only.
- */
-function steeringSupported(meta: unknown): boolean {
-  if (meta === null || typeof meta !== "object") return false;
-  const steering = (meta as { steering?: unknown }).steering;
-  if (steering === null || typeof steering !== "object") return false;
-  return (steering as { supported?: unknown }).supported === true;
-}
-
-/** Strip provider `_meta` and keep the plan-entry fields HLAO displays. */
-function planEntries(
-  entries: Array<{ content: string; priority: string; status: string }>,
-): SessionPlanEntryView[] {
-  return entries.map(({ content, priority, status }) => ({
-    content,
-    priority,
-    status,
-  }));
 }

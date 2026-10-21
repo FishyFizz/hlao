@@ -1,16 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import {
   configFingerprint,
   loadConfig,
-  mergeBackends,
-  toAgentView,
   type HlaoConfig,
 } from "./config.js";
 import { clearCrashMarker, readCrashMarker, writeCrashMarker } from "./crash.js";
-import { HlaoError, describeError, toHlaoError } from "./errors.js";
-import { generateSessionId } from "./ids.js";
-import { readSpawnReceipts, recordSpawnReceipt } from "./ledger.js";
+import { HlaoError, describeError } from "./errors.js";
 import {
   pidAlive,
   probeSupervisor,
@@ -22,15 +18,27 @@ import {
 } from "./lock.js";
 import { Logger } from "./logger.js";
 import { ensureHome, isWindows, lockPath, supervisorEndpoint } from "./paths.js";
+import { evaluateWait } from "./session/waits.js";
 import { resolveSession } from "./supervisor/resolve.js";
-import { actor, delay, failure, pathKey } from "./supervisor/util.js";
-import { SKILL_VERSION, ensureHomeSkill, homeSkillPath } from "./skill.js";
+import {
+  listBackends,
+  providerSessionCatalog,
+  recoveryReceipts,
+} from "./supervisor/discovery.js";
+import { SpawnService } from "./supervisor/spawn.js";
+import { actor, delay, pathKey } from "./supervisor/util.js";
+import { WaitGraph, waitCycleError } from "./supervisor/wait-graph.js";
+import { awaitWaitTargets } from "./supervisor/waits.js";
+import { ensureHomeSkill } from "./skill.js";
 import { nowIso } from "./time.js";
 import {
-  FrameTooLargeError,
+  ConnectionHub,
+  type ConnectionHandle,
+  type SubscriptionScope,
+} from "./supervisor/connections.js";
+import {
   createWireServer,
   pathTarget,
-  type WireStream,
   type WireStreamServer,
 } from "./stream.js";
 import {
@@ -38,7 +46,6 @@ import {
   WIRE_PROTOCOL_MAJOR,
   WIRE_PROTOCOL_VERSION,
   isMethod,
-  parseEnvelope,
   parseParams,
   type BackendsListParams,
   type BackendsListResult,
@@ -55,13 +62,10 @@ import {
   type LastCrash,
   type ListParams,
   type ListResult,
-  type NotificationFrame,
   type PermitParams,
   type PermitResult,
-  type ProviderSessionView,
   type ProviderSessionsParams,
   type ProviderSessionsResult,
-  type RecoveryReceiptView,
   type RecoveryReceiptsParams,
   type RecoveryReceiptsResult,
   type RespondElicitationParams,
@@ -75,10 +79,8 @@ import {
   type ReloadParams,
   type ReloadResult,
   type RequestEnvelope,
-  type ResponseEnvelope,
   type SendParams,
   type SendResult,
-  type SessionView,
   type RenameParams,
   type RenameResult,
   type SetConfigOptionParams,
@@ -90,51 +92,12 @@ import {
   type SpawnParams,
   type SpawnResult,
   type SubscribeParams,
-  type SubscribeResult,
   type UnsubscribeParams,
-  type UnsubscribeResult,
   type WaitParams,
   type WaitResult,
-  type WaitTargetResult,
 } from "./protocol.js";
 import { isTerminalStatus } from "./protocol.js";
-import { listProviderSessions } from "./provider.js";
 import { Session } from "./session.js";
-
-/** A persistent connection may have this many requests in flight. */
-const MAX_INFLIGHT_REQUESTS = 64;
-/** Events delivered per session per notification flush. */
-const MAX_NOTIFICATION_EVENTS = 200;
-/** Close a consumer that lets this much data sit in the transport buffer. */
-const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
-/** Subscriptions one persistent connection may hold. */
-const MAX_SUBSCRIPTIONS = 64;
-
-interface SubscriptionState {
-  id: number;
-  /** Report views for every session in the instance, including new ones. */
-  all: boolean;
-  /** Stream events for these sessions (and report their views). */
-  sessionIds: Set<string>;
-  /** Last delivered event seq per session; pass as `since` to read. */
-  cursors: Map<string, number>;
-  /** Last view sent per session, serialized for change detection. */
-  lastViews: Map<string, string>;
-}
-
-interface ConnectionState {
-  stream: WireStream;
-  persistent: boolean;
-  subscriptions: Map<number, SubscriptionState>;
-  nextSubscription: number;
-  inflight: number;
-  flushScheduled: boolean;
-  closed: boolean;
-  observer: (() => void) | null;
-  /** The first frame decides the connection mode; later frames wait for it. */
-  handshaking: boolean;
-  early: string[];
-}
 
 class AlreadyRunningError extends Error {
   override readonly name = "AlreadyRunningError";
@@ -164,33 +127,14 @@ class SupervisorServer {
   /** The lock owner replaced by this start, when it did not stop cleanly. */
   #lastCrash: LastCrash | null = null;
   #sessions = new Map<string, Session>();
-  /**
-   * Blocking cross-session waits held by in-flight requests:
-   * caller -> target -> reference count. A cycle is a turn-level deadlock:
-   * the target's queued message cannot run until the caller's turn ends, and
-   * the caller's turn cannot end until the target's turn does.
-   */
-  #waitEdges = new Map<string, Map<string, number>>();
+  /** Blocking cross-session waits held by in-flight requests. */
+  #waits = new WaitGraph();
+  #spawner: SpawnService;
+  #connections: ConnectionHub;
   #server: WireStreamServer | null = null;
-  #streams = new Set<WireStream>();
-  #changeObservers = new Set<() => void>();
   #lock: LockInfo | null = null;
   #stopping = false;
   #acceptingNew = true;
-  #inflightSpawns = 0;
-  /** Retry-safe spawn identity: idempotency key -> the session it produced. */
-  #spawnIdempotency = new Map<
-    string,
-    { sessionId: string; messageId: string | null; at: number }
-  >();
-  /** In-flight spawns by idempotency key, so concurrent retries share one spawn. */
-  #pendingSpawns = new Map<string, Promise<SpawnResult>>();
-  /**
-   * In-flight resumes by provider session id. A live-table lookup alone is not
-   * enough: two concurrent resumes can both miss it before either registers.
-   */
-  #pendingResumes = new Map<string, Promise<SpawnResult>>();
-  #spawnIdleResolvers: (() => void)[] = [];
   #shutdownAfterResponse: { force: boolean } | null = null;
   #stoppedPromise: Promise<void>;
   #resolveStopped!: () => void;
@@ -211,6 +155,23 @@ class SupervisorServer {
     this.token = randomBytes(24).toString("hex");
     this.#stoppedPromise = new Promise<void>((resolvePromise) => {
       this.#resolveStopped = resolvePromise;
+    });
+    this.#spawner = new SpawnService({
+      home: this.#home,
+      cliPath: this.#cliPath,
+      sessions: this.#sessions,
+      config: () => this.#config,
+      acceptingNew: () => this.#acceptingNew,
+      resolve: (token) => this.#resolve(token),
+      logger: this.#logger,
+      emitChange: () => this.#emitChange(),
+    });
+    this.#connections = new ConnectionHub({
+      handle: (envelope, signal, connection) =>
+        this.#handleEnvelope(envelope, signal, connection),
+      resolveSessionIds: (ids) => ids.map((id) => this.#resolve(id).id),
+      subscriptionSessions: (scope) => this.#subscriptionSessions(scope),
+      afterResponse: () => this.#afterResponse(),
     });
   }
 
@@ -243,7 +204,7 @@ class SupervisorServer {
 
       const server = createWireServer(pathTarget(this.endpoint));
       this.#server = server;
-      server.onConnection((stream) => this.#onConnection(stream));
+      server.onConnection((stream) => this.#connections.accept(stream));
       server.onError((error) => {
         this.#logger.error(`server error: ${describeError(error)}`);
       });
@@ -293,14 +254,12 @@ class SupervisorServer {
 
     // A spawn already handshaking is not in the live table yet. Let it land so
     // the shutdown check can close it, rather than orphaning its adapter.
-    await this.#waitForInflightSpawns(5_000);
+    await this.#spawner.whenIdle(5_000);
 
     const live = [...this.#sessions.values()].filter((session) => !session.isTerminal);
     await Promise.allSettled(live.map((session) => session.close(force)));
 
-    for (const stream of this.#streams) {
-      stream.terminate();
-    }
+    this.#connections.close();
 
     if (this.#server) {
       await this.#server.close();
@@ -402,157 +361,10 @@ class SupervisorServer {
     };
   }
 
-  // -------------------------------------------------------------------------
-  // connections
-  // -------------------------------------------------------------------------
-
-  #onConnection(stream: WireStream): void {
-    this.#streams.add(stream);
-    const abort = new AbortController();
-    const state: ConnectionState = {
-      stream,
-      persistent: false,
-      subscriptions: new Map(),
-      nextSubscription: 1,
-      inflight: 0,
-      flushScheduled: false,
-      closed: false,
-      observer: null,
-      handshaking: true,
-      early: [],
-    };
-
-    stream.onClose(() => {
-      abort.abort();
-      this.#streams.delete(stream);
-      state.closed = true;
-      if (state.observer !== null) {
-        this.#changeObservers.delete(state.observer);
-        state.observer = null;
-      }
-      state.subscriptions.clear();
-    });
-
-    let first = true;
-    const initialTimer = setTimeout(() => {
-      if (first && !state.closed) stream.terminate();
-    }, 15_000);
-    initialTimer.unref?.();
-
-    stream.onError((error) => {
-      if (state.closed) return;
-      if (first) {
-        first = false;
-        clearTimeout(initialTimer);
-        if (error instanceof FrameTooLargeError) {
-          this.#write(
-            stream,
-            failure(0, new HlaoError("bad_request", "request frame too large")),
-          );
-          stream.close();
-          return;
-        }
-      }
-      abort.abort();
-      state.closed = true;
-      stream.terminate();
-    });
-
-    stream.onFrame((line) => {
-      if (state.closed) return;
-      if (first) {
-        first = false;
-        clearTimeout(initialTimer);
-        void this.#handleFrame(line, state, abort.signal).then(() => {
-          state.handshaking = false;
-          for (const queued of state.early.splice(0)) {
-            if (state.closed) break;
-            void this.#handleFrame(queued, state, abort.signal);
-          }
-        });
-        return;
-      }
-      if (state.handshaking) {
-        if (state.early.length >= MAX_INFLIGHT_REQUESTS) {
-          state.closed = true;
-          stream.terminate();
-          return;
-        }
-        state.early.push(line);
-        return;
-      }
-      void this.#handleFrame(line, state, abort.signal);
-    });
-  }
-
-  async #handleFrame(
-    line: string,
-    state: ConnectionState,
-    signal: AbortSignal,
-  ): Promise<void> {
-    let id = 0;
-    let envelope: RequestEnvelope | null = null;
-    try {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        throw new HlaoError("bad_request", "request is not valid JSON");
-      }
-      envelope = parseEnvelope(parsed);
-      id = envelope.id;
-      if (state.inflight >= MAX_INFLIGHT_REQUESTS) {
-        throw new HlaoError(
-          "too_many_requests",
-          `at most ${MAX_INFLIGHT_REQUESTS} requests may be in flight`,
-        );
-      }
-      state.inflight += 1;
-      try {
-        const result = await this.#handleEnvelope(envelope, signal, state);
-        this.#write(state.stream, { id, ok: true, result });
-        if (!state.persistent && this.#requestsPersistentStream(envelope)) {
-          state.persistent = true;
-          state.observer = () => this.#scheduleFlush(state);
-          this.#changeObservers.add(state.observer);
-        }
-      } finally {
-        state.inflight -= 1;
-      }
-    } catch (error) {
-      this.#write(state.stream, failure(id, error));
-    }
-
-    this.#scheduleFlush(state);
-
-    // A legacy connection carries exactly one request, as in protocol 2.0.
-    if (!state.persistent) {
-      state.closed = true;
-      state.stream.close();
-    }
-
-    const shutdown = this.#shutdownAfterResponse;
-    if (shutdown) {
-      this.#shutdownAfterResponse = null;
-      setImmediate(() => {
-        void this.stop(shutdown.force);
-      });
-    }
-  }
-
-  #requestsPersistentStream(envelope: RequestEnvelope): boolean {
-    if (envelope.method !== "hello") return false;
-    try {
-      return parseParams("hello", envelope.params).stream?.persistent === true;
-    } catch {
-      return false;
-    }
-  }
-
   async #handleEnvelope(
     envelope: RequestEnvelope,
     signal: AbortSignal,
-    connection?: ConnectionState,
+    connection: ConnectionHandle,
   ): Promise<unknown> {
     if (envelope.token !== this.token) {
       throw new HlaoError("unauthorized", "invalid supervisor token");
@@ -650,9 +462,9 @@ class SupervisorServer {
       case "sessions.forget":
         return this.#forget(params as ForgetParams);
       case "stream.subscribe":
-        return this.#subscribe(params as SubscribeParams, connection);
+        return connection.subscribe(params as SubscribeParams);
       case "stream.unsubscribe":
-        return this.#unsubscribe(params as UnsubscribeParams, connection);
+        return connection.unsubscribe(params as UnsubscribeParams);
       case "supervisor.reload":
         return this.#reload(params as ReloadParams, caller);
       case "supervisor.shutdown":
@@ -668,337 +480,8 @@ class SupervisorServer {
   // methods
   // -------------------------------------------------------------------------
 
-  async #spawn(params: SpawnParams, caller: string | null): Promise<SpawnResult> {
-    if (!this.#acceptingNew) {
-      throw new HlaoError("session_closed", "the supervisor is shutting down");
-    }
-
-    // Control is operator-only. Checked before idempotency/resume early
-    // returns too, so a caller cannot smuggle a mode past a duplicate path.
-    if (params.mode !== undefined && caller !== null) {
-      throw new HlaoError(
-        "operator_only",
-        "only an operator shell without HLAO_SESSION_ID may pass --mode; an agent-spawned session uses the backend's defaultMode",
-      );
-    }
-
-    const key = params.idempotencyKey;
-    if (key !== undefined) {
-      this.#pruneSpawnIdempotency();
-      const existing = this.#spawnIdempotency.get(key);
-      if (existing !== undefined) {
-        const session = this.#sessions.get(existing.sessionId);
-        if (session !== undefined && !session.isTerminal) {
-          return this.#duplicateSpawn(session, existing.messageId);
-        }
-        this.#spawnIdempotency.delete(key);
-      }
-      const pending = this.#pendingSpawns.get(key);
-      if (pending !== undefined) {
-        try {
-          return { ...(await pending), duplicate: true };
-        } catch {
-          // The original attempt failed; this caller may try again.
-        }
-      }
-    }
-
-    const resumeKey =
-      params.resumeSessionId !== undefined
-        ? `${params.backend}\u0000${params.resumeSessionId}`
-        : undefined;
-    if (resumeKey !== undefined) {
-      const pending = this.#pendingResumes.get(resumeKey);
-      if (pending !== undefined) {
-        try {
-          return { ...(await pending), duplicate: true };
-        } catch {
-          // The original attempt failed; this caller may try again.
-        }
-      }
-    }
-
-    this.#inflightSpawns += 1;
-    const work = this.#spawnInner(params, caller);
-    if (key !== undefined) this.#pendingSpawns.set(key, work);
-    if (resumeKey !== undefined) this.#pendingResumes.set(resumeKey, work);
-    try {
-      return await work;
-    } finally {
-      if (key !== undefined && this.#pendingSpawns.get(key) === work) {
-        this.#pendingSpawns.delete(key);
-      }
-      if (resumeKey !== undefined && this.#pendingResumes.get(resumeKey) === work) {
-        this.#pendingResumes.delete(resumeKey);
-      }
-      this.#inflightSpawns -= 1;
-      if (this.#inflightSpawns === 0) {
-        for (const resolve of this.#spawnIdleResolvers.splice(0)) resolve();
-      }
-    }
-  }
-
-  #duplicateSpawn(session: Session, messageId: string | null): SpawnResult {
-    const view = session.view();
-    return {
-      session: view,
-      nextSeq: 0,
-      duplicate: true,
-      ...(messageId !== null ? { messageId } : {}),
-      ...(view.createdBy !== null ? { createdBy: view.createdBy } : {}),
-    };
-  }
-
-  /**
-   * The parent a spawn will attach to. An agent caller is the default parent;
-   * a stale or terminal caller is attribution, not an error, so the spawn
-   * becomes a root.
-   */
-  #spawnParent(params: SpawnParams, caller: string | null): Session | null {
-    if (params.parentSessionId !== undefined) {
-      return this.#resolve(params.parentSessionId);
-    }
-    if (caller !== null) {
-      const own = this.#sessions.get(caller);
-      return own !== undefined && !own.isTerminal ? own : null;
-    }
-    return null;
-  }
-
-  /**
-   * Record the parent provider id -> child provider id pair. This is a
-   * historical receipt for recovery after a restart, not a live mapping; it
-   * never changes the session table. A ledger append failure is logged and
-   * ignored so a full disk cannot turn a successful spawn into an error.
-   */
-  #recordSpawnReceipt(parent: Session | null, child: SessionView): void {
-    if (parent === null || parent.isTerminal) return;
-    const parentView = parent.view();
-    const parentProviderId = parentView.agentSessionId;
-    const childProviderId = child.agentSessionId;
-    if (parentProviderId === null || childProviderId === null) return;
-    if (parentProviderId === childProviderId) return;
-    try {
-      recordSpawnReceipt(this.#home, {
-        parentProviderId,
-        parentSessionId: parentView.id,
-        childProviderId,
-        childSessionId: child.id,
-        backend: child.backend,
-        cwd: child.cwd,
-        name: child.name,
-      });
-    } catch (error) {
-      this.#logger.warn(`spawn receipt not recorded: ${describeError(error)}`);
-    }
-  }
-
-  #pruneSpawnIdempotency(): void {
-    const cutoff = Date.now() - 60 * 60 * 1_000;
-    for (const [key, entry] of this.#spawnIdempotency) {
-      if (entry.at < cutoff) this.#spawnIdempotency.delete(key);
-    }
-    while (this.#spawnIdempotency.size > 256) {
-      const oldest = this.#spawnIdempotency.keys().next().value;
-      if (oldest === undefined) break;
-      this.#spawnIdempotency.delete(oldest);
-    }
-  }
-
-  async #spawnInner(params: SpawnParams, caller: string | null): Promise<SpawnResult> {
-    const cwd = params.cwd ?? process.cwd();
-    try {
-      if (!statSync(cwd).isDirectory()) {
-        throw new Error("not a directory");
-      }
-    } catch {
-      throw new HlaoError("bad_request", `cwd ${cwd} is not a readable directory`);
-    }
-    const merged = mergeBackends(this.#config.backends, cwd);
-    const backend = merged[params.backend];
-    if (!backend) {
-      throw new HlaoError(
-        "backend_not_found",
-        `unknown backend "${params.backend}" — available: ${Object.keys(merged).sort().join(", ")}`,
-      );
-    }
-    if (!backend.available) {
-      throw new HlaoError(
-        "backend_unavailable",
-        `backend "${params.backend}" is unavailable: ${backend.unavailableReason ?? "unknown reason"}`,
-      );
-    }
-
-    // Reattaching by provider id is idempotent while this supervisor is alive:
-    // two adapters must never drive the same provider transcript. This is a
-    // lookup in the live table, not a store.
-    if (params.resumeSessionId !== undefined) {
-      const attached = [...this.#sessions.values()].find(
-        (candidate) =>
-          !candidate.isTerminal &&
-          candidate.view().agentSessionId === params.resumeSessionId,
-      );
-      if (attached !== undefined) {
-        if (attached.backend !== backend.name) {
-          throw new HlaoError(
-            "bad_request",
-            `provider session ${params.resumeSessionId} is attached to ${attached.id} on backend ${attached.backend}, not ${backend.name}`,
-          );
-        }
-        // A duplicate resume still says "this parent attached this provider
-        // conversation"; record it so a later reboot can recover the pair.
-        this.#recordSpawnReceipt(this.#spawnParent(params, caller), attached.view());
-        return { ...this.#duplicateSpawn(attached, null), resumed: true };
-      }
-    }
-
-    const parent = this.#spawnParent(params, caller);
-
-    if (parent?.isTerminal) {
-      throw new HlaoError(
-        "session_closed",
-        `parent session ${parent.id} is ${parent.view().status}`,
-      );
-    }
-
-    const id = generateSessionId((candidate) => this.#sessions.has(candidate));
-    const rootId = parent?.rootId ?? id;
-    const depth = parent ? parent.depth + 1 : 0;
-    // operator --mode -> backend defaultMode -> the provider's own default.
-    // A reattach (resume or fork) continues an existing conversation: the
-    // provider's persisted mode is the default, and the backend defaultMode
-    // applies only to a genuinely new session. An explicit operator --mode
-    // still wins.
-    const reattaching =
-      params.resumeSessionId !== undefined || params.forkSessionId !== undefined;
-    const effectiveMode =
-      params.mode ?? (reattaching ? undefined : backend.defaultMode);
-
-    const session = await Session.spawn({
-      id,
-      backend,
-      cwd,
-      parentId: parent?.id ?? null,
-      rootId,
-      depth,
-      name: params.name ?? null,
-      createdBy: actor(caller),
-      requestedMode: effectiveMode,
-      env: params.env ?? {},
-      permissionTimeoutMs: this.#config.permissionTimeoutMs,
-      maxPendingPermissions: this.#config.maxPendingPermissions,
-      home: this.#home,
-      config: {
-        startupTimeoutMs: this.#config.startupTimeoutMs,
-        maxEventsPerSession: this.#config.maxEventsPerSession,
-        maxEventLogBytes: this.#config.maxEventLogBytes,
-        maxEventBytes: this.#config.maxEventBytes,
-      },
-      cliPath: this.#cliPath,
-      skill: params.skill ?? true,
-      skillPath: homeSkillPath(this.#home),
-      skillVersion: SKILL_VERSION,
-      ...(params.resumeSessionId !== undefined
-        ? { resumeSessionId: params.resumeSessionId }
-        : {}),
-      ...(params.forkSessionId !== undefined
-        ? { forkSessionId: params.forkSessionId }
-        : {}),
-      log: (line) => this.#logger.info(line),
-    });
-
-    if (!this.#acceptingNew) {
-      await session.close(true);
-      throw new HlaoError("session_closed", "the supervisor is shutting down");
-    }
-
-    if (effectiveMode !== undefined) {
-      try {
-        await session.setMode(effectiveMode, actor(caller));
-      } catch (error) {
-        await session.close(true, actor(caller));
-        throw error;
-      }
-    }
-
-    if (params.model !== undefined) {
-      try {
-        await session.setModel(params.model, actor(caller));
-      } catch (error) {
-        await session.close(true, actor(caller));
-        throw error;
-      }
-    }
-
-    for (const [configId, value] of Object.entries(params.config ?? {})) {
-      try {
-        await session.setConfigOption(configId, value, actor(caller));
-      } catch (error) {
-        await session.close(true, actor(caller));
-        throw error;
-      }
-    }
-
-    this.#sessions.set(id, session);
-    if (params.idempotencyKey !== undefined) {
-      this.#spawnIdempotency.set(params.idempotencyKey, {
-        sessionId: id,
-        messageId: null,
-        at: Date.now(),
-      });
-    }
-    session.onChange(() => this.#emitChange());
-    this.#emitChange();
-    this.#logger.info(
-      `spawned ${id} (${backend.name}) in ${cwd}${parent ? ` parent=${parent.id}` : ""}`,
-    );
-    this.#recordSpawnReceipt(parent, session.view());
-
-    const result: SpawnResult = {
-      session: session.view(),
-      nextSeq: 0,
-      createdBy: actor(caller),
-      ...(params.resumeSessionId !== undefined ? { resumed: true } : {}),
-      ...(params.forkSessionId !== undefined ? { forked: true } : {}),
-    };
-
-    if (params.prompt !== undefined) {
-      try {
-        const sent = await session.send(
-          params.prompt,
-          params.wait ?? false,
-          params.timeoutMs ?? this.#config.sendWaitTimeoutMs,
-          actor(caller),
-        );
-        result.messageId = sent.messageId;
-        if (params.idempotencyKey !== undefined) {
-          const entry = this.#spawnIdempotency.get(params.idempotencyKey);
-          if (entry !== undefined) entry.messageId = sent.messageId;
-        }
-        if (params.wait) {
-          result.firstTurn = {
-            stopReason: sent.stopReason,
-            text: sent.text ?? "",
-            timedOut: sent.timedOut,
-          };
-        }
-      } catch (error) {
-        throw new HlaoError(
-          toHlaoError(error).code,
-          toHlaoError(error).message,
-          {
-            sessionId: session.id,
-            session: session.view(),
-            ...(toHlaoError(error).details !== undefined
-              ? { cause: toHlaoError(error).details }
-              : {}),
-          },
-        );
-      }
-      result.session = session.view();
-    }
-
-    return result;
+  #spawn(params: SpawnParams, caller: string | null): Promise<SpawnResult> {
+    return this.#spawner.spawn(params, caller);
   }
 
   #list(params: ListParams): ListResult {
@@ -1022,87 +505,26 @@ class SupervisorServer {
     return { session: this.#resolve(params.sessionId).view() };
   }
 
-  /**
-   * Backend discovery for any client. The bundled CLI's `agents` command is the
-   * same merge done locally, so it works without a supervisor; this method is
-   * how a dashboard or MCP client sees the same list without reading config.
-   */
+  /** Backend discovery for any client. */
   #backends(params: BackendsListParams, caller: string | null): BackendsListResult {
     if (this.#configError !== null) {
       throw new HlaoError("config_invalid", this.#configError);
     }
     const callerSession = caller !== null ? this.#sessions.get(caller) : undefined;
     const cwd = params.cwd ?? callerSession?.cwd ?? process.cwd();
-    const merged = mergeBackends(this.#config.backends, cwd);
-    return {
-      backends: Object.values(merged)
-        .map(toAgentView)
-        .sort((left, right) => left.name.localeCompare(right.name)),
-    };
+    return listBackends(this.#config, cwd);
+  }
+
+  /** Historical spawn receipts, live-joined: never liveness. */
+  #recoveryReceipts(params: RecoveryReceiptsParams): RecoveryReceiptsResult {
+    return recoveryReceipts(this.#home, this.#sessions, params);
   }
 
   /**
    * Read the provider's own session catalog and join it to the live table.
-   *
-   * The provider owns the rows; the live join answers "does this HLAO instance
-   * currently drive this provider session?" without persisting any mapping.
-   * A row with `attached: false` is provider-only: it may be an external
-   * session, or a session this instance used before a restart. The caller
-   * decides whether to adopt it.
+   * The provider owns the rows; the live join answers only whether this
+   * instance currently drives each row.
    */
-  /**
-   * Historical spawn receipts, live-joined for convenience. The ledger is the
-   * authority on what was attached; the live table answers only whether a
-   * provider id is attached now. Nothing here is written back.
-   */
-  #recoveryReceipts(params: RecoveryReceiptsParams): RecoveryReceiptsResult {
-    const liveByProvider = new Map<string, Session>();
-    for (const session of this.#sessions.values()) {
-      if (session.isTerminal) continue;
-      const view = session.view();
-      if (view.agentSessionId === null) continue;
-      liveByProvider.set(view.agentSessionId, session);
-    }
-
-    const byChild = new Map<string, RecoveryReceiptView>();
-    for (const receipt of readSpawnReceipts(
-      this.#home,
-      params.parentProviderId,
-    )) {
-      const key = `${receipt.backend}\u0000${receipt.childProviderId}`;
-      const existing = byChild.get(key);
-      if (existing !== undefined && existing.recordedAt >= receipt.at) continue;
-      const child = liveByProvider.get(receipt.childProviderId);
-      const childView =
-        child !== undefined && child.backend === receipt.backend
-          ? child.view()
-          : null;
-      const parent = liveByProvider.get(receipt.parentProviderId);
-      const parentView = parent?.view() ?? null;
-      byChild.set(key, {
-        parentProviderId: receipt.parentProviderId,
-        parentSessionId: receipt.parentSessionId,
-        childProviderId: receipt.childProviderId,
-        childSessionId: receipt.childSessionId,
-        backend: receipt.backend,
-        cwd: receipt.cwd,
-        name: receipt.name,
-        recordedAt: receipt.at,
-        attached: childView !== null,
-        hlaoSessionId: childView?.id ?? null,
-        hlaoName: childView?.name ?? null,
-        hlaoStatus: childView?.status ?? null,
-        parentHlaoSessionId: parentView?.id ?? null,
-        parentHlaoName: parentView?.name ?? null,
-        parentHlaoStatus: parentView?.status ?? null,
-      });
-    }
-    const receipts = [...byChild.values()].sort((left, right) =>
-      right.recordedAt.localeCompare(left.recordedAt),
-    );
-    return { receipts };
-  }
-
   async #providerSessions(
     params: ProviderSessionsParams,
     caller: string | null,
@@ -1116,62 +538,15 @@ class SupervisorServer {
     }
     const callerSession = caller !== null ? this.#sessions.get(caller) : undefined;
     const mergeCwd = params.cwd ?? callerSession?.cwd ?? process.cwd();
-    const merged = mergeBackends(this.#config.backends, mergeCwd);
-    const backend = merged[params.backend];
-    if (backend === undefined) {
-      throw new HlaoError(
-        "backend_not_found",
-        `unknown backend "${params.backend}" — available: ${Object.keys(merged).sort().join(", ")}`,
-      );
-    }
-    if (!backend.available) {
-      throw new HlaoError(
-        "backend_unavailable",
-        `backend "${backend.name}" is unavailable: ${backend.unavailableReason ?? "unknown reason"}`,
-      );
-    }
-
-    const catalog = await listProviderSessions({
-      backend,
-      ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
-      ...(params.cursor !== undefined ? { cursor: params.cursor } : {}),
-      timeoutMs: this.#config.startupTimeoutMs,
-      processCwd: mergeCwd,
+    return providerSessionCatalog({
+      config: this.#config,
+      sessions: this.#sessions,
+      params,
+      cwd: mergeCwd,
       signal,
+      timeoutMs: this.#config.startupTimeoutMs,
       log: (line) => this.#logger.info(line),
     });
-
-    const live = [...this.#sessions.values()].filter(
-      (candidate) =>
-        !candidate.isTerminal && candidate.backend === backend.name,
-    );
-    const sessions: ProviderSessionView[] = catalog.sessions.map((row) => {
-      const attached = live.find(
-        (candidate) => candidate.view().agentSessionId === row.sessionId,
-      );
-      const view = attached?.view();
-      return {
-        sessionId: row.sessionId,
-        cwd: row.cwd,
-        title: row.title,
-        updatedAt: row.updatedAt,
-        attached: view !== undefined,
-        hlaoSessionId: view?.id ?? null,
-        hlaoName: view?.name ?? null,
-        hlaoStatus: view?.status ?? null,
-        loadable: catalog.capabilities.load,
-        forkable: catalog.capabilities.fork,
-      };
-    });
-
-    return {
-      backend: backend.name,
-      cwd: params.cwd ?? null,
-      agentName: catalog.agentName,
-      agentVersion: catalog.agentVersion,
-      sessions,
-      nextCursor: catalog.nextCursor,
-    };
   }
 
   /** A caller inside a turn can be blocked by its own in-flight wait request. */
@@ -1182,68 +557,17 @@ class SupervisorServer {
     return status === "busy" || status === "waiting_permission";
   }
 
-  /** Path over blocking wait edges from `start` to `goal`, inclusive, or null. */
-  #waitPath(start: string, goal: string): string[] | null {
-    const seen = new Set<string>();
-    const visit = (node: string, path: string[]): string[] | null => {
-      if (node === goal) return path;
-      if (seen.has(node)) return null;
-      seen.add(node);
-      const targets = this.#waitEdges.get(node);
-      if (targets === undefined) return null;
-      for (const target of targets.keys()) {
-        const found = visit(target, [...path, target]);
-        if (found !== null) return found;
-      }
-      return null;
-    };
-    return visit(start, [start]);
-  }
-
-  /** Hold wait edges for one request; the returned release is idempotent. */
-  #holdWaitEdges(caller: string, targets: readonly string[]): () => void {
-    for (const target of targets) {
-      let edges = this.#waitEdges.get(caller);
-      if (edges === undefined) {
-        edges = new Map();
-        this.#waitEdges.set(caller, edges);
-      }
-      edges.set(target, (edges.get(target) ?? 0) + 1);
-    }
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const edges = this.#waitEdges.get(caller);
-      if (edges === undefined) return;
-      for (const target of targets) {
-        const count = edges.get(target);
-        if (count === undefined) continue;
-        if (count <= 1) edges.delete(target);
-        else edges.set(target, count - 1);
-      }
-      if (edges.size === 0) this.#waitEdges.delete(caller);
-    };
-  }
-
   /** A wait that already holds does not block, so it cannot close a cycle. */
   #waitSatisfiedNow(session: Session, until: WaitParams["until"]): boolean {
     if (until === "change") return false;
     const view = session.view();
-    const awaitingInput =
-      view.pendingPermissions.length > 0 || view.pendingElicitation !== null;
-    switch (until) {
-      case "idle":
-        return view.status === "idle";
-      case "settled":
-        return (
-          isTerminalStatus(view.status) || view.settled || awaitingInput
-        );
-      case "permission":
-        return awaitingInput;
-      case "exit":
-        return isTerminalStatus(view.status);
-    }
+    return evaluateWait(until, {
+      status: view.status,
+      queued: view.queued,
+      awaitingInput:
+        view.pendingPermissions.length > 0 || view.pendingElicitation !== null,
+      terminal: isTerminalStatus(view.status),
+    }).satisfied;
   }
 
   /**
@@ -1254,17 +578,6 @@ class SupervisorServer {
     if (types === undefined || types.length === 0) return false;
     const afterTurn = new Set(["prompt.sent", "turn.started", "turn.ended"]);
     return types.every((type) => afterTurn.has(type));
-  }
-
-  #waitCycleError(kind: "send" | "wait", chain: string[]): HlaoError {
-    const advice =
-      kind === "send"
-        ? "Send without --wait so the message runs after the current turn."
-        : "End the turn so the queued prompt can run; a reply cannot arrive in the middle of the turn that is waiting for it.";
-    return new HlaoError(
-      "bad_request",
-      `wait cycle: ${chain.join(" -> ")}. A message queued behind that cycle cannot start a turn. ${advice}`,
-    );
   }
 
   async #send(params: SendParams, caller: string | null): Promise<SendResult> {
@@ -1279,9 +592,9 @@ class SupervisorServer {
       this.#callerInTurn(caller);
     let release: (() => void) | undefined;
     if (blocking) {
-      const path = this.#waitPath(session.id, caller);
-      if (path !== null) throw this.#waitCycleError("send", [caller, ...path]);
-      release = this.#holdWaitEdges(caller, [session.id]);
+      const path = this.#waits.path(session.id, caller);
+      if (path !== null) throw waitCycleError("send", [caller, ...path]);
+      release = this.#waits.hold(caller, [session.id]);
     }
     try {
       const sent = await session.send(
@@ -1379,7 +692,7 @@ class SupervisorServer {
         ? stateWait
           ? !this.#waitSatisfiedNow(target, params.until)
           : this.#selfChangeDeadlock(params.types)
-        : this.#waitPath(target.id, caller) !== null,
+        : this.#waits.path(target.id, caller) !== null,
     );
     const mode = params.mode ?? "any";
     const deadlocks =
@@ -1393,178 +706,19 @@ class SupervisorServer {
       const path =
         first.id === caller
           ? [caller, caller]
-          : [caller, ...this.#waitPath(first.id, caller)!];
-      throw this.#waitCycleError("wait", path);
+          : [caller, ...this.#waits.path(first.id, caller)!];
+      throw waitCycleError("wait", path);
     }
     const edges = targets.map((target) => target.id).filter((id) => id !== caller);
-    return this.#holdWaitEdges(caller, edges);
+    return this.#waits.hold(caller, edges);
   }
 
-  async #awaitTargets(
+  #awaitTargets(
     params: WaitParams,
     signal: AbortSignal,
     targets: readonly Session[],
   ): Promise<WaitResult> {
-    const timeoutMs = params.timeoutMs ?? this.#config.waitTimeoutMs;
-
-    if (targets.length === 1) {
-      const session = targets[0]!;
-      const waited = await session.waitFor(
-        params.until,
-        params.since,
-        timeoutMs,
-        signal,
-        params.types,
-        params.grep,
-      );
-      const view = session.view();
-      return {
-        ...waited,
-        results: [{ session: view, satisfied: waited.satisfied, reason: waited.reason }],
-        session: view,
-      };
-    }
-
-    const mode = params.mode ?? "any";
-    const baselines = targets.map((target) => target.view().lastSeq);
-    const startedAt = Date.now();
-
-    return await new Promise<WaitResult>((resolve) => {
-      const controller = new AbortController();
-      const onRequestAbort = (): void => controller.abort();
-      if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", onRequestAbort, { once: true });
-
-      const settled = new Map<number, WaitTargetResult>();
-      let finished = false;
-
-      const snapshot = (index: number): WaitTargetResult => {
-        const target = targets[index]!;
-        const view = target.view();
-        const terminal = isTerminalStatus(view.status);
-        switch (params.until) {
-          case "idle":
-            return view.status === "idle"
-              ? { session: view, satisfied: true, reason: "idle" }
-              : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
-          case "settled":
-            if (terminal) {
-              return { session: view, satisfied: true, reason: "exit" };
-            }
-            if (
-              view.pendingPermissions.length > 0 ||
-              view.pendingElicitation !== null
-            ) {
-              return { session: view, satisfied: true, reason: "permission" };
-            }
-            return view.settled
-              ? { session: view, satisfied: true, reason: "idle" }
-              : { session: view, satisfied: false, reason: "pending" };
-          case "permission":
-            return view.pendingPermissions.length > 0 ||
-              view.pendingElicitation !== null
-              ? { session: view, satisfied: true, reason: "permission" }
-              : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
-          case "exit":
-            return {
-              session: view,
-              satisfied: terminal,
-              reason: terminal ? "exit" : "pending",
-            };
-          case "change": {
-            const page = target.read({
-              since: baselines[index] ?? 0,
-              limit: 1,
-              raw: false,
-              types: params.types,
-              grep: params.grep,
-            });
-            return page.events.length > 0
-              ? { session: view, satisfied: true, reason: "change" }
-              : { session: view, satisfied: false, reason: terminal ? "exit" : "pending" };
-          }
-        }
-      };
-
-      const finish = (satisfied: boolean, reason: WaitResult["reason"]): void => {
-        if (finished) return;
-        finished = true;
-        controller.abort();
-        signal.removeEventListener("abort", onRequestAbort);
-        const results = targets.map((_target, index) => {
-          return settled.get(index) ?? snapshot(index);
-        });
-        resolve({
-          satisfied,
-          reason,
-          waitedMs: Date.now() - startedAt,
-          results,
-        });
-      };
-
-      const settleAll = (): void => {
-        const reasons = [...settled.values()].map((entry) => entry.reason);
-        const reason = reasons.every((entry) => entry === "exit") ? "exit" : "timeout";
-        finish(false, reason);
-      };
-
-      targets.forEach((target, index) => {
-        const since = params.until === "change" ? baselines[index] : params.since;
-        void target
-          .waitFor(
-            params.until,
-            since,
-            timeoutMs,
-            controller.signal,
-            params.types,
-            params.grep,
-          )
-          .then(
-            (waited) => {
-              settled.set(index, {
-                session: target.view(),
-                satisfied: waited.satisfied,
-                reason: waited.reason,
-              });
-              if (mode === "all" && !waited.satisfied) {
-                finish(false, waited.reason);
-                return;
-              }
-              if (mode === "any" && waited.satisfied) {
-                finish(true, waited.reason);
-                return;
-              }
-              if (settled.size === targets.length) {
-                if (mode === "all") {
-                  const reasons = [...settled.values()].map(
-                    (entry) => entry.reason,
-                  );
-                  // If any target ended, report that as the aggregate reason:
-                  // an ended session is the fact a caller must not miss, even
-                  // when another target reached the condition.
-                  finish(
-                    true,
-                    reasons.includes("exit") ? "exit" : params.until,
-                  );
-                } else {
-                  settleAll();
-                }
-              }
-            },
-            () => {
-              settled.set(index, {
-                session: target.view(),
-                satisfied: false,
-                reason: "timeout",
-              });
-              if (settled.size === targets.length) {
-                if (mode === "all") finish(false, "timeout");
-                else settleAll();
-              }
-            },
-          );
-      });
-    });
+    return awaitWaitTargets(params, signal, targets, this.#config.waitTimeoutMs);
   }
 
   async #cancel(params: CancelParams, caller: string | null): Promise<CancelResult> {
@@ -1738,24 +892,6 @@ class SupervisorServer {
     return resolveSession(this.#sessions, token);
   }
 
-  #waitForInflightSpawns(timeoutMs: number): Promise<void> {
-    if (this.#inflightSpawns === 0) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      let done = false;
-      const finish = (): void => {
-        if (done) return;
-        done = true;
-        resolve();
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      timer.unref?.();
-      this.#spawnIdleResolvers.push(() => {
-        clearTimeout(timer);
-        finish();
-      });
-    });
-  }
-
   #sweep(): void {
     const cutoff = Date.now() - this.#config.retainClosedMs;
     let changed = false;
@@ -1776,201 +912,26 @@ class SupervisorServer {
 
   /** Called after a session state change or a table change. No timer. */
   #emitChange(): void {
-    for (const observer of [...this.#changeObservers]) {
-      try {
-        observer();
-      } catch {
-        // A slow or broken observer must never block the session table.
-      }
-    }
+    this.#connections.notifyChange();
   }
 
-  #subscribe(
-    params: SubscribeParams,
-    connection?: ConnectionState,
-  ): SubscribeResult {
-    if (connection === undefined || !connection.persistent) {
-      throw new HlaoError(
-        "bad_request",
-        "stream.subscribe requires a persistent stream (hello with stream.persistent)",
-      );
-    }
-    if (connection.subscriptions.size >= MAX_SUBSCRIPTIONS) {
-      throw new HlaoError(
-        "too_many_requests",
-        `at most ${MAX_SUBSCRIPTIONS} subscriptions may be active`,
-      );
-    }
-
-    const sessionIds = (params.sessionIds ?? []).map(
-      (id) => this.#resolve(id).id,
-    );
-    const subscription: SubscriptionState = {
-      id: connection.nextSubscription,
-      all: params.fleet === true,
-      sessionIds: new Set(sessionIds),
-      cursors: new Map(),
-      lastViews: new Map(),
-    };
-    connection.nextSubscription += 1;
-
-    const sessions: SessionView[] = [];
-    const cursors: Record<string, number> = {};
-    const truncated: string[] = [];
-
-    for (const session of this.#subscriptionSessions(subscription)) {
-      const view = session.view();
-      sessions.push(view);
-      const since = params.since?.[session.id];
-      const cursor = since ?? view.lastSeq;
-      subscription.cursors.set(session.id, cursor);
-      subscription.lastViews.set(session.id, JSON.stringify(view));
-      cursors[session.id] = cursor;
-      if (since !== undefined && session.read({ since, limit: 1 }).truncated) {
-        truncated.push(session.id);
-      }
-    }
-
-    connection.subscriptions.set(subscription.id, subscription);
-
-    return {
-      subscription: subscription.id,
-      sessions,
-      cursors,
-      truncated,
-    };
-  }
-
-  #unsubscribe(
-    params: UnsubscribeParams,
-    connection?: ConnectionState,
-  ): UnsubscribeResult {
-    if (connection === undefined || !connection.persistent) {
-      throw new HlaoError(
-        "bad_request",
-        "stream.unsubscribe requires a persistent stream",
-      );
-    }
-    if (!connection.subscriptions.delete(params.subscription)) {
-      throw new HlaoError(
-        "not_found",
-        `no subscription ${params.subscription} on this connection`,
-      );
-    }
-    return { subscription: params.subscription, removed: true };
-  }
-
-  #subscriptionSessions(subscription: SubscriptionState): Session[] {
-    if (subscription.all) return [...this.#sessions.values()];
-    return [...subscription.sessionIds]
+  #subscriptionSessions(scope: SubscriptionScope): Session[] {
+    if (scope.all) return [...this.#sessions.values()];
+    return [...scope.sessionIds]
       .map((id) => this.#sessions.get(id))
       .filter((session): session is Session => session !== undefined);
   }
 
-  #scheduleFlush(state: ConnectionState): void {
-    if (!state.persistent || state.closed || state.flushScheduled) return;
-    if (state.subscriptions.size === 0) return;
-    state.flushScheduled = true;
+  /** A shutdown waits for the response that requested it to be written. */
+  #afterResponse(): void {
+    const shutdown = this.#shutdownAfterResponse;
+    if (!shutdown) return;
+    this.#shutdownAfterResponse = null;
     setImmediate(() => {
-      state.flushScheduled = false;
-      this.#flush(state);
+      void this.stop(shutdown.force);
     });
   }
 
-  #flush(state: ConnectionState): void {
-    if (!state.persistent || state.closed) return;
-    if (state.stream.bufferedBytes() > MAX_STREAM_BUFFER_BYTES) {
-      // The consumer is behind. Close it; it can resume from its cursor.
-      state.closed = true;
-      state.stream.terminate();
-      return;
-    }
-
-    let more = false;
-
-    for (const subscription of state.subscriptions.values()) {
-      const seen = new Set<string>();
-
-      for (const session of this.#subscriptionSessions(subscription)) {
-        const id = session.id;
-        seen.add(id);
-        const view = session.view();
-        const serialized = JSON.stringify(view);
-        if (subscription.lastViews.get(id) !== serialized) {
-          subscription.lastViews.set(id, serialized);
-          this.#writeNotification(state, {
-            type: "notification",
-            subscription: subscription.id,
-            kind: "session",
-            session: view,
-          });
-        }
-
-        if (!subscription.sessionIds.has(id)) continue;
-        const cursor = subscription.cursors.get(id) ?? view.lastSeq;
-        if (view.lastSeq <= cursor) continue;
-
-        let since = cursor;
-        let truncated = false;
-        let pages = 0;
-        while (pages < 4) {
-          const page = session.read({
-            since,
-            limit: MAX_NOTIFICATION_EVENTS,
-          });
-          pages += 1;
-          truncated = truncated || page.truncated;
-          const last = page.events[page.events.length - 1];
-          if (last === undefined) break;
-          since = last.seq;
-          subscription.cursors.set(id, last.seq);
-          this.#writeNotification(state, {
-            type: "notification",
-            subscription: subscription.id,
-            kind: "event",
-            sessionId: id,
-            events: page.events,
-            cursor: last.seq,
-            truncated,
-          });
-          if (!page.hasMore) break;
-        }
-        if (pages >= 4) more = true;
-      }
-
-      for (const id of [...subscription.lastViews.keys()]) {
-        if (seen.has(id)) continue;
-        subscription.lastViews.delete(id);
-        subscription.cursors.delete(id);
-        this.#writeNotification(state, {
-          type: "notification",
-          subscription: subscription.id,
-          kind: "session.removed",
-          sessionId: id,
-        });
-      }
-    }
-
-    if (more) this.#scheduleFlush(state);
-  }
-
-  #writeNotification(
-    state: ConnectionState,
-    frame: NotificationFrame,
-  ): void {
-    this.#write(state.stream, frame);
-  }
-
-  #write(
-    stream: WireStream,
-    frame: ResponseEnvelope | NotificationFrame,
-  ): void {
-    try {
-      stream.write(`${JSON.stringify(frame)}\n`);
-    } catch {
-      // The client may have vanished.
-    }
-  }
 }
 
 

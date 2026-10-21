@@ -3,18 +3,15 @@ import { connectStreaming } from "../../client.js";
 import { HlaoError } from "../../errors.js";
 import { isTerminalStatus } from "../../protocol.js";
 import type {
-  EventType,
   EventView,
   ListResult,
   NotificationFrame,
   SessionView,
   SubscribeResult,
 } from "../../protocol.js";
-import { EVENT_TYPES } from "../../protocol.js";
 import {
   booleanOption,
   expectPositionals,
-  multipleOption,
   parseArgs,
   stringOption,
   usageError,
@@ -26,12 +23,19 @@ import {
   writeJsonLine,
 } from "../context.js";
 import { helpRequested } from "../help.js";
-import { sanitize, type Style } from "../render.js";
-import { resolveInList } from "./session-view.js";
+import { labelOf, resolveInList } from "./session-view.js";
+import { parseEventTypes, parseGrepFilter } from "../event-filters.js";
+import {
+  chunkIds,
+  eventSummary,
+  formatClock,
+  safeJson,
+  sleep,
+  truncate,
+  typeLabel,
+} from "./watch-format.js";
 
-const MAX_IDS_PER_SUBSCRIPTION = 100;
 const LABEL_CHARS = 20;
-const SUMMARY_CHARS = 120;
 
 /**
  * A caller-owned merged timeline. The supervisor owns no watch loop and no
@@ -52,21 +56,9 @@ export async function cmdWatch(args: string[]): Promise<number> {
   if (helpRequested(parsed, "watch")) return 0;
   expectPositionals(parsed, "watch", 0, 0);
 
-  const rawTypes = multipleOption(parsed, "type");
-  for (const type of rawTypes) {
-    if (!(EVENT_TYPES as readonly string[]).includes(type)) {
-      throw usageError(
-        `unknown event type "${type}" — known types: ${EVENT_TYPES.join(", ")}`,
-      );
-    }
-  }
-  const types = rawTypes.length > 0 ? new Set(rawTypes as EventType[]) : null;
-  const grep = stringOption(parsed, "grep");
-  if (grep === "") throw usageError("--grep needs text");
-  const regexFlag = booleanOption(parsed, "regex") === true;
-  if (regexFlag && grep === undefined) {
-    throw usageError("--regex requires --grep");
-  }
+  const rawTypes = parseEventTypes(parsed);
+  const types = rawTypes.length > 0 ? new Set(rawTypes) : null;
+  const { grep, regex: regexFlag } = parseGrepFilter(parsed);
   let regex: RegExp | null = null;
   if (regexFlag && grep !== undefined) {
     try {
@@ -400,73 +392,4 @@ export async function cmdWatch(args: string[]): Promise<number> {
     process.off("SIGTERM", stop);
   }
   return 0;
-}
-
-function chunkIds(ids: string[]): string[][] {
-  const chunks: string[][] = [];
-  for (let index = 0; index < ids.length; index += MAX_IDS_PER_SUBSCRIPTION) {
-    chunks.push(ids.slice(index, index + MAX_IDS_PER_SUBSCRIPTION));
-  }
-  return chunks;
-}
-
-function labelOf(session: SessionView): string {
-  return session.name ?? session.title ?? session.firstPrompt ?? session.id;
-}
-
-function typeLabel(type: EventType, style: Style): string {
-  const padded = type.padEnd(22);
-  if (type.startsWith("permission") || type === "elicitation.requested") {
-    return style.magenta(padded);
-  }
-  if (type === "error" || type === "stderr") return style.red(padded);
-  if (type.startsWith("prompt") || type.startsWith("turn")) return style.cyan(padded);
-  if (type.startsWith("tool")) return style.yellow(padded);
-  return padded;
-}
-
-function eventSummary(event: EventView): string {
-  const data = event.data ?? {};
-  const preferred = [
-    "text",
-    "title",
-    "message",
-    "content",
-    "name",
-    "reason",
-    "status",
-    "command",
-  ].find((key) => typeof data[key] === "string" && (data[key] as string).length > 0);
-  let text: string;
-  if (preferred !== undefined) {
-    text = data[preferred] as string;
-  } else {
-    text = safeJson(data);
-  }
-  text = sanitize(text).replace(/\s+/g, " ").trim();
-  return truncate(text, SUMMARY_CHARS);
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? "";
-  } catch {
-    return "[unserializable]";
-  }
-}
-
-function formatClock(iso: string): string {
-  const date = new Date(iso);
-  if (!Number.isFinite(date.getTime())) return "--:--:--";
-  return date.toTimeString().slice(0, 8);
-}
-
-function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

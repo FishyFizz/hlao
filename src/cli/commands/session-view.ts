@@ -18,6 +18,14 @@ export function isTerminal(session: SessionView): boolean {
   return isTerminalStatus(session.status);
 }
 
+/**
+ * The best human label for a session: an operator name wins, then the
+ * provider's title, then the first prompt. The id is always the fallback.
+ */
+export function labelOf(session: SessionView): string {
+  return session.name ?? session.title ?? session.firstPrompt ?? session.id;
+}
+
 /** Resolve an exact id, then a unique name, then a unique id prefix. */
 export function resolveInList(sessions: SessionView[], token: string): SessionView {
   const exact = sessions.find((session) => session.id === token);
