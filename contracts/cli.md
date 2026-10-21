@@ -13,7 +13,7 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
                 [--no-skill] [--idempotency-key KEY]
                 [--resume PROVIDER_ID | --fork PROVIDER_ID]
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
-                [--wait] [--timeout DUR] [--idempotency-key KEY]
+                [--wait] [--timeout DUR] [--idempotency-key KEY] [--steer | --queue]
 hlao read [<id>] [--self] [--since N | --before N] [--limit N]
                 [--type TYPE]... [--turn N] [--grep TEXT] [--regex] [--context N]
                 [--after TIME] [--until TIME]
@@ -111,6 +111,15 @@ caller in the instance may re-policy any session.
 the caller). Boolean options accept `true`/`false`; select values must match an advertised
 value id. `spawn --model VALUE` selects the option whose category is `model`;
 `spawn --config KEY=VALUE` applies any option before the first prompt.
+
+`send` delivers a prompt. An idle target runs it as a turn immediately. While the target is
+mid-turn, a send issued from a session steers by default (`sessions.send` with `steer: true`):
+when the target's adapter advertises ACP steering the prompt is injected into the running
+turn, and otherwise it queues. An operator shell queues by default. `--steer` forces the
+attempt from either side and `--queue` forces the queue. A steered message has no turn of its
+own: `--wait` waits for the running turn, and `prompt.steered` records the delivery. Only a
+message that actually queued appears in `queue`. A message to the caller's own session is
+always queued — that is the deferred next-turn form.
 
 `queue` lists the active turn and every queued prompt with sender, age, message id, and a
 bounded preview. `queue drop <position>` removes one (1 is next); `queue drop <id> --id

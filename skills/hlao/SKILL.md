@@ -39,7 +39,7 @@ that is a coordination rule, not permission to interfere with unrelated work.
 hlao read                       # your state plus a page of events
 hlao read --since 42            # continue from a cursor
 hlao send --self "..."          # queue your next turn (do not wait inside this one)
-hlao send <id> "..."            # prompt another session
+hlao send <id> "..."            # prompt another session; steers if it is mid-turn
 hlao wait --until permission --timeout 10m
 hlao queue                      # what is queued behind the active turn
 hlao permit <id> --allow        # answer a pending permission request
@@ -59,8 +59,12 @@ that provider session and replays its history; the interrupted turn is not repla
 re-send the instruction. `spawn --fork <provider-id> --cwd <original cwd>` copies the session
 instead; the source keeps running and can still be resumed separately.
 
-A session runs one turn at a time. Messages queue visibly and run in order. `--wait` waits for
-that message's turn; a timeout leaves the work running.
+A session runs one turn at a time. A message to an idle session starts a turn directly. A
+message from one session to another that is mid-turn is **steered** into that running turn
+when the target's adapter supports it; otherwise it queues visibly and runs in order. An
+operator shell queues by default; `--steer` and `--queue` override either side. A self-send
+always queues. `--wait` waits for the turn that will carry the message (for a steered message,
+the running turn); a timeout leaves the work running.
 
 ## Worker loop
 
@@ -82,9 +86,11 @@ Do not use `hlao send --self "..." --wait` from inside a turn. The message queue
 turn you are in, so the wait cannot finish. HLAO rejects that shape with `bad_request` and
 names the deferred form.
 
-A reply is an inbound prompt: it queues until the recipient's turn ends. Do not wait inside
-your turn for a reply that will arrive as a prompt. Send the reply without `--wait`; it runs
-after the recipient's current turn. HLAO rejects a send or wait that would close a wait cycle
+A reply is an inbound prompt: if the recipient is mid-turn, it is injected into that turn
+(steering); if the recipient is idle, it starts its next turn. Either way, do not wait inside
+your turn for a reply that will arrive as a prompt. Send the reply without `--wait`; steering
+can inject it into the recipient's running turn, but it cannot settle a turn that is itself
+blocked waiting on you. HLAO rejects a send or wait that would close a wait cycle
 (`wait cycle: A -> B -> A`) instead of letting both sessions block until an operator
 interrupts. A state wait on your own turn (`hlao wait --self --until settled`) is rejected for
 the same reason; `hlao wait --self --until change` remains valid because a queued prompt emits

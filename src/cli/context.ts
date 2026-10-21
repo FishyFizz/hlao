@@ -191,11 +191,9 @@ let capabilityCache: {
  * command is refused with a clear restart hint rather than an unknown-field
  * error from an older parser.
  */
-export async function ensureCapability(
+async function capabilitySet(
   conn: SupervisorConnection,
-  capability: ProtocolCapability,
-  command: string,
-): Promise<void> {
+): Promise<Set<string>> {
   if (capabilityCache === null || capabilityCache.endpoint !== conn.lock.endpoint) {
     const hello = await conn.request<HelloResult>("hello", {});
     capabilityCache = {
@@ -205,7 +203,26 @@ export async function ensureCapability(
       ),
     };
   }
-  if (!capabilityCache.capabilities.has(capability)) {
+  return capabilityCache.capabilities;
+}
+
+/**
+ * Like `ensureCapability`, but for optional behavior: an older supervisor
+ * simply yields false so the caller can omit the new field.
+ */
+export async function hasCapability(
+  conn: SupervisorConnection,
+  capability: ProtocolCapability,
+): Promise<boolean> {
+  return (await capabilitySet(conn)).has(capability);
+}
+
+export async function ensureCapability(
+  conn: SupervisorConnection,
+  capability: ProtocolCapability,
+  command: string,
+): Promise<void> {
+  if (!(await capabilitySet(conn)).has(capability)) {
     throw new HlaoError(
       "version_mismatch",
       `${command} needs the "${capability}" protocol capability; the running supervisor predates it. Restart it with "hlao down" and retry.`,

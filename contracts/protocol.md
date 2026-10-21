@@ -264,7 +264,7 @@ The token is the instance boundary.
   `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
   `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
   `session.messages`, `session.elicitation`, `spawn.resume`, `spawn.fork`,
-  `read.time`, `read.regex`, `read.context`, `session.firstPrompt`.
+  `read.time`, `read.regex`, `read.context`, `session.firstPrompt`, `send.steering`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -301,6 +301,11 @@ The token is the instance boundary.
   optional `matchedSeqs` when `context` is used; `SessionView` gains optional `firstPrompt`.
   Capabilities: `read.time`, `read.regex`, `read.context`, `session.firstPrompt`. A 2.7
   client that ignores them is unaffected.
+- **2.9** adds mid-turn steering: `sessions.send` accepts `steer` (inject into the running
+  turn when the target is busy and its adapter advertises `_session/steering`), `SendResult`
+  gains optional `steered`, `SessionView` gains optional `steeringSupported`, and the
+  `prompt.steered` event type marks the delivery. Capability: `send.steering`. A client that
+  omits `steer` keeps the queued behavior.
 
 ## Client model
 
@@ -554,11 +559,22 @@ Params:
   timeoutMs?: number;
   messageId?: string;            // caller-chosen; generated when omitted (2.3)
   idempotencyKey?: string;       // retry-safe delivery (2.3)
+  steer?: boolean;               // inject into a running turn when possible (2.9)
 }
 ```
 
 `timeoutMs` defaults to `config.sendWaitTimeoutMs`; `0` means no timeout. The caller's session
-id (or `"operator"`) is recorded as `prompt.sent.from` / `prompt.queued.from`.
+id (or `"operator"`) is recorded as `prompt.sent.from` / `prompt.queued.from` /
+`prompt.steered.from`.
+
+With `steer: true` the supervisor asks the target's adapter to inject the prompt into the
+turn that is already running (ACP `_session/steering`). Injection needs both an active turn
+and a `SessionView.steeringSupported` adapter; otherwise the prompt takes the ordinary queue
+path, so the call is always safe. A steered prompt has no turn of its own: the adapter folds
+it into the running turn, events for it carry that turn's number, and `wait: true` waits for
+that turn to settle. `completed: false, timedOut: false, steered: true` reports an injection
+that the caller did not wait for. A session's send to itself always queues; steering is for
+peer messaging, and the deferred self-send is the documented next-turn form.
 
 Result:
 
@@ -575,6 +591,7 @@ Result:
   outcome?: "completed" | "cancelled" | "timed_out"; // (2.3)
   duplicate?: boolean;           // the idempotency key matched an earlier send (2.3)
   pending?: boolean;             // on a duplicate: the original is still active or queued
+  steered?: boolean;             // injected into the running turn (2.9)
 }
 ```
 
@@ -922,7 +939,7 @@ type EventType =
   | "session.created" | "session.initialized" | "session.resumed" | "session.forked"
   | "session.renamed"
   | "session.closed" | "session.failed"
-  | "prompt.sent" | "prompt.queued" | "prompt.discarded"
+  | "prompt.sent" | "prompt.queued" | "prompt.steered" | "prompt.discarded"
   | "turn.started" | "turn.ended" | "cancel.requested"
   | "agent.message" | "agent.thought" | "user.message" | "session.message"
   | "tool.call" | "tool.update" | "plan" | "plan.update"
@@ -946,8 +963,10 @@ client-side instead.
 
 Actor fields are explicit:
 
-- `prompt.sent` and `prompt.queued` carry `from`: a session id or `"operator"`, plus the
-  message id as `messageId` (2.3). The first prompt that carries the skill pointer also
+- `prompt.sent`, `prompt.queued`, and `prompt.steered` carry `from`: a session id or
+  `"operator"`, plus the message id as `messageId` (2.3). `prompt.steered` (2.9) also carries
+  the injected `text` and the turn it joined; it does not start a turn. The first prompt that
+  carries the skill pointer also
   carries `injected: { skill, path, blocks }` (2.4); the pointer is marked delivered only
   after the provider accepts the prompt, so a failed request is retried with the next prompt.
 - `prompt.discarded` carries the original `from`, the acting `by`, `reason`, a bounded
@@ -1057,6 +1076,7 @@ type SessionView = {
   firstPrompt?: string | null;   // bounded display-only preview of the first prompt (2.8)
   agentName?: string | null;     // provider agent identity (2.5)
   agentVersion?: string | null;
+  steeringSupported?: boolean;   // adapter accepts `_session/steering` (2.9)
 };
 
 type PermissionView = {

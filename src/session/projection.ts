@@ -63,6 +63,7 @@ export function eventTitle(
     case "session.message":
     case "prompt.sent":
     case "prompt.queued":
+    case "prompt.steered":
       return text(data.text) ?? text(data.content);
     case "tool.call":
     case "tool.update":

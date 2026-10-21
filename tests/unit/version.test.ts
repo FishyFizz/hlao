@@ -35,8 +35,8 @@ test("package, lock, CLI, skill, and changelog versions agree", async () => {
   assert.match(read("CHANGELOG.md"), new RegExp(`^## ${pkg.version} —`, "m"));
 });
 
-test("the wire is 2.8 with observation and first-prompt capabilities", () => {
-  assert.deepEqual(WIRE_PROTOCOL_VERSION, { major: 2, minor: 8 });
+test("the wire is 2.9 with observation, first-prompt, and steering capabilities", () => {
+  assert.deepEqual(WIRE_PROTOCOL_VERSION, { major: 2, minor: 9 });
   const capabilities = PROTOCOL_CAPABILITIES as readonly string[];
   for (const capability of [
     "session.compaction",
@@ -52,6 +52,7 @@ test("the wire is 2.8 with observation and first-prompt capabilities", () => {
     "read.time",
     "read.regex",
     "read.context",
+    "send.steering",
   ]) {
     assert.ok(capabilities.includes(capability), capability);
   }

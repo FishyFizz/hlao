@@ -34,6 +34,7 @@ export const EVENT_TYPES = [
   "session.renamed",
   "prompt.sent",
   "prompt.queued",
+  "prompt.steered",
   "prompt.discarded",
   "turn.started",
   "turn.ended",
@@ -222,6 +223,12 @@ export interface SessionView {
   /** Provider agent identity from ACP initialize (2.5). */
   agentName?: string | null;
   agentVersion?: string | null;
+  /**
+   * True when the adapter advertises mid-turn steering
+   * (`_session/steering`). A send with `steer: true` is only injected when
+   * this is true; otherwise it queues. (2.9)
+   */
+  steeringSupported?: boolean;
 }
 
 export interface EventView {
@@ -472,12 +479,21 @@ export interface SendParams {
   messageId?: string;
   /** Dedupe key for a retrying caller (1h / 256 keys in the live session). */
   idempotencyKey?: string;
+  /**
+   * Ask the supervisor to inject this prompt into the target's running turn
+   * instead of queueing it. Injection happens only when the target is busy and
+   * its adapter advertises steering; otherwise the prompt queues, which is the
+   * default when this is absent or false. (2.9)
+   */
+  steer?: boolean;
 }
 export interface SendResult {
   session: SessionView;
   messageId: string;
   /** True when this call placed the message behind a running turn. */
   queued: boolean;
+  /** True when the message was injected into the target's running turn. (2.9) */
+  steered?: boolean;
   /** On a duplicate: true when the original message is still active or queued. */
   pending?: boolean;
   turn: number | null;

@@ -16,6 +16,7 @@ import type {
 } from "@agentclientprotocol/sdk";
 
 const mode = process.env.FAKE_MODE ?? "echo";
+const steeringEnabled = process.env.FAKE_NO_STEERING !== "1";
 const loadEnabled = process.env.FAKE_LOAD_SESSION === "1";
 const forkEnabled = process.env.FAKE_FORK_SESSION === "1";
 const resumeHistory = (process.env.FAKE_RESUME_HISTORY ?? "restored user prompt\nrestored first reply\nrestored second reply").split("\n");
@@ -26,6 +27,10 @@ const doneAt = Number(process.env.FAKE_DONE_AT ?? 2);
 let nextSession = 0;
 let nextFork = 0;
 let cancelActive: (() => void) | null = null;
+/** Set while a session/prompt handler is in flight and able to take a steer. */
+let steerActive:
+  | { sessionId: string; inject: (text: string) => Promise<void> }
+  | null = null;
 let currentMode = "default";
 let promptCount = 0;
 let clientCaps: unknown = null;
@@ -59,6 +64,12 @@ function configOptions(): Array<Record<string, unknown>> {
   ];
 }
 
+type SteerParams = {
+  sessionId: string;
+  prompt: Array<{ type: string; text?: string }>;
+  _meta?: { steering?: { idleBehavior?: string } };
+};
+
 const availableModes = [
   { id: "default", name: "Manual", description: "Always ask" },
   { id: "auto", name: "Auto", description: "The agent decides" },
@@ -87,6 +98,7 @@ const app = agent({ name: "fake-acp" })
         },
       },
       agentInfo: { name: "fake-acp", version: "1.0.0" },
+      _meta: { steering: { supported: steeringEnabled } },
     };
   })
   .onRequest("session/fork", ({ params }) => {
@@ -219,6 +231,10 @@ const app = agent({ name: "fake-acp" })
         kind: "execute",
         status: "pending",
       });
+      steerActive = {
+        sessionId,
+        inject: (steered) => message(`steered: ${steered}`, "steer-1"),
+      };
       const request: RequestPermissionRequest = {
         sessionId,
         toolCall: {
@@ -234,6 +250,7 @@ const app = agent({ name: "fake-acp" })
         ],
       };
       const response = await client.request("session/request_permission", request);
+      steerActive = null;
       const outcome = response.outcome;
       if (outcome.outcome === "selected") {
         await message(`permission: ${outcome.optionId}`);
@@ -245,6 +262,10 @@ const app = agent({ name: "fake-acp" })
 
     if (mode === "slow" || mode === "never" || mode === "slow-first") {
       await message("working…");
+      steerActive = {
+        sessionId,
+        inject: (steered) => message(`steered: ${steered}`, "steer-1"),
+      };
       const stop = await new Promise<StopReason>((resolve) => {
         if (mode === "slow") {
           const timer = setTimeout(() => resolve("end_turn"), delayMs);
@@ -257,6 +278,7 @@ const app = agent({ name: "fake-acp" })
         }
       });
       cancelActive = null;
+      steerActive = null;
       await message(`stopped: ${stop}`, "m2");
       return { stopReason: stop };
     }
@@ -544,10 +566,15 @@ const app = agent({ name: "fake-acp" })
       const pidFile = process.env.FAKE_CHILD_PID_FILE;
       if (pidFile) writeFileSync(pidFile, String(child.pid));
       await message(`CHILD_PID: ${child.pid}`);
+      steerActive = {
+        sessionId,
+        inject: (steered) => message(`steered: ${steered}`, "steer-1"),
+      };
       const stop = await new Promise<StopReason>((resolve) => {
         cancelActive = () => resolve("cancelled");
       });
       cancelActive = null;
+      steerActive = null;
       return { stopReason: stop };
     }
 
@@ -671,6 +698,28 @@ const app = agent({ name: "fake-acp" })
     }
     return { stopReason: "end_turn" } satisfies PromptResponse;
   });
+
+if (steeringEnabled) {
+  app.onRequest(
+    "_session/steering",
+    (raw: unknown) => raw as SteerParams,
+    async ({ params }) => {
+      const text = params.prompt
+        .map((block) => (block.type === "text" ? block.text ?? "" : ""))
+        .join("");
+      if (steerActive === null || steerActive.sessionId !== params.sessionId) {
+        // The Host opts into this so an idle race does not start a turn the
+        // Host cannot settle.
+        if (params._meta?.steering?.idleBehavior === "promptRequired") {
+          return { outcome: "promptRequired", reason: "noRunningTurn" };
+        }
+        return { outcome: "startedNewTurn" };
+      }
+      await steerActive.inject(text);
+      return { outcome: "injected" };
+    },
+  );
+}
 
 const connection = app.connect(
   ndJsonStream(

@@ -11,6 +11,8 @@ import {
   COMMON,
   connect,
   contextFrom,
+  ensureCapability,
+  hasCapability,
   out,
   resolveTarget,
   sessionLabel,
@@ -34,6 +36,8 @@ export async function cmdSend(args: string[]): Promise<number> {
     { name: "wait", type: "boolean" },
     { name: "timeout", type: "duration", valueName: "DUR" },
     { name: "idempotency-key", type: "string", valueName: "KEY" },
+    { name: "steer", type: "boolean" },
+    { name: "queue", type: "boolean" },
   ]);
   if (helpRequested(parsed, "send")) return 0;
 
@@ -58,7 +62,31 @@ export async function cmdSend(args: string[]): Promise<number> {
   );
   const ctx = contextFrom(parsed);
 
+  const steerFlag = booleanOption(parsed, "steer") === true;
+  const queueFlag = booleanOption(parsed, "queue") === true;
+  if (steerFlag && queueFlag) {
+    throw usageError("--steer and --queue are mutually exclusive");
+  }
+  // Agent-to-agent messages default to steering; an operator shell keeps the
+  // observable queue behavior. Either side can override explicitly.
+  let steer: boolean | undefined = steerFlag
+    ? true
+    : queueFlag
+      ? false
+      : ctx.callerSessionId !== null
+        ? true
+        : undefined;
+
   const conn = await connect(ctx);
+  if (steer === true) {
+    if (steerFlag) {
+      await ensureCapability(conn, "send.steering", "send --steer");
+    } else if (!(await hasCapability(conn, "send.steering"))) {
+      // A pre-0.14 supervisor rejects unknown request fields; the default is
+      // optional behavior, so fall back to its queue instead of failing.
+      steer = undefined;
+    }
+  }
   const idempotencyKey = stringOption(parsed, "idempotency-key");
   const request = conn.request<SendResult>(
     "sessions.send",
@@ -68,6 +96,7 @@ export async function cmdSend(args: string[]): Promise<number> {
       wait,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      ...(steer !== undefined ? { steer } : {}),
     },
     { timeoutMs: wait ? 0 : 60_000 },
   );
@@ -110,11 +139,13 @@ export async function cmdSend(args: string[]): Promise<number> {
   if (!result.completed) {
     out(
       `sent to ${sessionLabel(ctx, result.session)}` +
-        (result.queued
-          ? ctx.style.dim(` (queued behind turn ${result.session.turn})`)
-          : result.turn !== null
-            ? ctx.style.dim(` (turn ${result.turn})`)
-            : "") +
+        (result.steered
+          ? ctx.style.dim(` (steered into turn ${result.turn ?? result.session.turn})`)
+          : result.queued
+            ? ctx.style.dim(` (queued behind turn ${result.session.turn})`)
+            : result.turn !== null
+              ? ctx.style.dim(` (turn ${result.turn})`)
+              : "") +
         ctx.style.dim(` · ${sanitize(result.messageId)}`),
     );
     return 0;
@@ -132,7 +163,7 @@ export async function cmdSend(args: string[]): Promise<number> {
   const stop = result.stopReason ?? "unknown";
   out(
     ctx.style.dim(
-      `— turn ${result.turn ?? "?"} ${stop === "cancelled" ? "cancelled" : `ended: ${stop}`} · ${sanitize(result.messageId)} —`,
+      `— turn ${result.turn ?? "?"} ${stop === "cancelled" ? "cancelled" : `ended: ${stop}`}${result.steered ? " (steered)" : ""} · ${sanitize(result.messageId)} —`,
     ),
   );
   return 0;

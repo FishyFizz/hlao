@@ -9,7 +9,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 8 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 9 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -62,6 +62,7 @@ export const PROTOCOL_CAPABILITIES = [
   "session.lastEvent",
   "send.messageId",
   "send.idempotency",
+  "send.steering",
   "spawn.idempotency",
   "spawn.createdBy",
   "supervisor.lastCrash",

@@ -851,6 +851,23 @@ export function renderEvents(
         );
         break;
       }
+      case "prompt.steered": {
+        flush();
+        const id =
+          typeof data.messageId === "string" ? oneLine(data.messageId) : "msg-?";
+        const from = actorName(data.from) ?? "unknown";
+        const text = typeof data.text === "string" ? data.text : "";
+        const turn =
+          event.turn === null || event.turn === undefined
+            ? ""
+            : ` · turn ${event.turn}`;
+        lines.push(
+          `${cursor(event.seq, event.at, style, full, dayChanged)}${style.dim(
+            `steered ${id} · from ${from}${turn}`,
+          )} › ${indent(text)}`,
+        );
+        break;
+      }
       case "prompt.queued": {
         flush();
         const id =

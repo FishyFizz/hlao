@@ -7,8 +7,8 @@ surfaces. This file is the map between them and the code.
 
 ## State
 
-- **Version:** 0.13.0, built 2026-10-21 on `dev`
-  (fleet observation and bulk operations; protocol 2.8 additive).
+- **Version:** 0.14.0, built 2026-10-21 on `dev`
+  (mid-turn steering for inter-agent messaging; protocol 2.9 additive).
 - **Status:** the primitive surface, supervisor, CLI, tests, the four acceptance
   assemblies, and the dashboard client are implemented and green. The socket is a public
   client contract: the bundled CLI, the dashboard, and an MCP server are interchangeable
@@ -17,8 +17,10 @@ surfaces. This file is the map between them and the code.
   identity, notices, and inter-session messages) is projected into `SessionView` and
   first-class events. Fleet observation (a merged live timeline, time/regex/context search,
   whole-instance export, usage aggregation, TTY-aware output) is a caller-owned projection,
-  not supervisor state (ADR 0012).
-- **Verification:** `npm test` runs 234 tests: 232 pass, 2 skipped (POSIX-only process-group
+  not supervisor state (ADR 0012). An agent's send to a busy peer is injected into the
+  running turn when the adapter advertises ACP steering; otherwise it queues. The
+  supervisor remains turn-serial: steering is a provider request, not a second local turn.
+- **Verification:** `npm test` runs 244 tests: 242 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
   ACP agent, including the acceptance assemblies and a raw-NDJSON conformance test that never
   invokes the CLI. The dashboard typechecks, passes 24 tests, and builds.

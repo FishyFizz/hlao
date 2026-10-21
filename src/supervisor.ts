@@ -1078,12 +1078,14 @@ class SupervisorServer {
           ...(params.idempotencyKey !== undefined
             ? { idempotencyKey: params.idempotencyKey }
             : {}),
+          ...(params.steer !== undefined ? { steer: params.steer } : {}),
         },
       );
       return {
         session: session.view(),
         messageId: sent.messageId,
         queued: sent.queued,
+        ...(sent.steered !== undefined ? { steered: sent.steered } : {}),
         ...(sent.pending !== undefined ? { pending: sent.pending } : {}),
         turn: sent.turn,
         completed: sent.completed,

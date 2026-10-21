@@ -117,6 +117,8 @@ export interface SpawnOptions {
 export interface SendResult {
   messageId: string;
   queued: boolean;
+  /** True when the prompt was injected into the running turn. */
+  steered?: boolean;
   /** On a duplicate: true when the original message is still active or queued. */
   pending?: boolean;
   turn: number | null;
@@ -186,6 +188,10 @@ export class Session {
   /** Events emitted while `session/load` replays are marked as history. */
   #replaying = false;
   #caps: AgentCapabilities = {};
+  /** The adapter advertises mid-turn injection through `_session/steering`. */
+  #steeringSupported = false;
+  /** Message ids injected into the current turn, for duplicate `pending`. */
+  #steeredIds = new Set<string>();
   #modes: SessionModes | null = null;
   #configOptions: SessionConfigOptionView[] | null = null;
   #log: EventLog;
@@ -362,6 +368,7 @@ export class Session {
       firstPrompt: this.#firstPrompt,
       agentName: this.#agentName,
       agentVersion: this.#agentVersion,
+      steeringSupported: this.#steeringSupported,
     };
   }
 
@@ -374,7 +381,7 @@ export class Session {
     wait: boolean,
     timeoutMs: number,
     from = "operator",
-    options: { messageId?: string; idempotencyKey?: string } = {},
+    options: { messageId?: string; idempotencyKey?: string; steer?: boolean } = {},
   ): Promise<SendResult> {
     if (this.isTerminal || this.#closing) {
       throw new HlaoError(
@@ -415,6 +422,7 @@ export class Session {
         const active = this.#active?.id === existing.messageId;
         const pending =
           active ||
+          this.#steeredIds.has(existing.messageId) ||
           this.#queue.some((item) => item.id === existing.messageId);
         return {
           messageId: existing.messageId,
@@ -426,7 +434,34 @@ export class Session {
           completed: false,
           timedOut: false,
           duplicate: true,
+          ...(this.#steeredIds.has(existing.messageId) ? { steered: true } : {}),
         };
+      }
+    }
+
+    const messageId = options.messageId ?? generateMessageId();
+    if (
+      this.#active?.id === messageId ||
+      this.#steeredIds.has(messageId) ||
+      this.#queue.some((item) => item.id === messageId)
+    ) {
+      throw new HlaoError(
+        "bad_request",
+        `message id "${messageId}" is already in this session`,
+      );
+    }
+
+    // Steering is the caller's choice; it is only attempted when the target is
+    // actually mid-turn and the adapter advertised the extension. A null result
+    // means "queue it", which is also the idle path.
+    if (options.steer === true) {
+      const steered = await this.#steer(messageId, text, from, wait, timeoutMs);
+      if (steered !== null) {
+        if (key !== undefined) {
+          this.#idempotency.set(key, { messageId, at: Date.now() });
+          this.#pruneIdempotency();
+        }
+        return steered;
       }
     }
 
@@ -434,17 +469,6 @@ export class Session {
       throw new HlaoError(
         "bad_request",
         `session ${this.id} has ${MAX_QUEUED_PROMPTS} prompts queued; wait or cancel first`,
-      );
-    }
-
-    const messageId = options.messageId ?? generateMessageId();
-    if (
-      this.#active?.id === messageId ||
-      this.#queue.some((item) => item.id === messageId)
-    ) {
-      throw new HlaoError(
-        "bad_request",
-        `message id "${messageId}" is already in this session`,
       );
     }
 
@@ -512,6 +536,147 @@ export class Session {
     };
   }
 
+  /**
+   * Inject a prompt into the turn that is already running (ACP
+   * `_session/steering`). Returns null when the turn ended in the gap or the
+   * adapter cannot steer; the caller then takes the ordinary queue path.
+   *
+   * `_meta.steering.idleBehavior: "promptRequired"` matters: without it a race
+   * where the turn ends first makes the adapter start a detached turn that
+   * HLAO neither tracks nor settles.
+   */
+  async #steer(
+    messageId: string,
+    text: string,
+    from: string,
+    wait: boolean,
+    timeoutMs: number,
+  ): Promise<SendResult | null> {
+    const active = this.#active;
+    // A self-send is a deferred next turn by contract. Injecting it into the
+    // turn that issued it would change that and can close a wait cycle.
+    if (
+      active === null ||
+      !this.#steeringSupported ||
+      this.#cancelling ||
+      from === this.id
+    ) {
+      return null;
+    }
+
+    let response: { outcome?: string };
+    try {
+      response = await this.#conn!.agent.request<{ outcome?: string }>(
+        "_session/steering",
+        {
+          sessionId: this.#agentSessionId!,
+          prompt: [{ type: "text", text }],
+          _meta: { steering: { idleBehavior: "promptRequired" } },
+        },
+      );
+    } catch (error) {
+      if ((error as { code?: number }).code === -32601) {
+        // Advertised but not implemented: stop trying for this session.
+        this.#steeringSupported = false;
+      }
+      this.#logLine(
+        `session ${this.id}: steering failed (${describeError(error)}); queued instead`,
+      );
+      return null;
+    }
+
+    if (response?.outcome === "startedNewTurn") {
+      // An adapter without the idleBehavior opt-in delivered the prompt as its
+      // own detached turn. Record the delivery, but HLAO cannot settle it.
+      this.#steeredIds.add(messageId);
+      this.#emit(
+        "prompt.steered",
+        {
+          messageId,
+          text,
+          textPreview: previewText(text),
+          textLength: text.length,
+          from,
+        },
+        null,
+      );
+      return {
+        messageId,
+        queued: false,
+        steered: true,
+        turn: null,
+        completed: false,
+        timedOut: false,
+      };
+    }
+    if (response?.outcome !== "injected") {
+      // promptRequired: the turn finished before the injection landed.
+      return null;
+    }
+
+    const turn = active.turn;
+    this.#steeredIds.add(messageId);
+    this.#emit(
+      "prompt.steered",
+      {
+        messageId,
+        text,
+        textPreview: previewText(text),
+        textLength: text.length,
+        from,
+      },
+      turn,
+    );
+
+    if (!wait) {
+      return {
+        messageId,
+        queued: false,
+        steered: true,
+        turn,
+        completed: false,
+        timedOut: false,
+      };
+    }
+
+    // A steered message has no turn of its own: it joins the running turn, so
+    // waiting means waiting for that turn to settle.
+    const raced = await raceWithTimeout(active.promise, timeoutMs);
+    if (raced.timedOut) {
+      const partial = this.#active === active ? this.#turnText : "";
+      return {
+        messageId,
+        queued: false,
+        steered: true,
+        turn,
+        completed: false,
+        timedOut: true,
+        outcome: "timed_out",
+        ...(partial.length > 0 ? { text: partial } : {}),
+      };
+    }
+
+    const completion = raced.value;
+    if (!completion.ok) {
+      throw new HlaoError(
+        (completion.error?.code as HlaoError["code"]) ?? "session_failed",
+        completion.error?.message ?? "prompt failed",
+      );
+    }
+    return {
+      messageId,
+      queued: false,
+      steered: true,
+      turn: completion.turn ?? turn,
+      completed: true,
+      timedOut: false,
+      stopReason: completion.stopReason,
+      text: completion.text,
+      outcome:
+        completion.stopReason === "cancelled" ? "cancelled" : "completed",
+    };
+  }
+
   #pruneIdempotency(): void {
     const cutoff = Date.now() - 60 * 60 * 1_000;
     for (const [key, entry] of this.#idempotency) {
@@ -536,6 +701,7 @@ export class Session {
       ) {
         const item = this.#queue.shift()!;
         if (item.settled) continue;
+        this.#steeredIds.clear();
         this.#turn += 1;
         item.turn = this.#turn;
         this.#active = item;
@@ -640,6 +806,9 @@ export class Session {
     } finally {
       this.#active = null;
       this.#turnText = "";
+      // Steered ids belong to the turn that just ended. A steer response that
+      // lands after this clear is stale; the next #pump clears it again.
+      this.#steeredIds.clear();
       if (!this.isTerminal) {
         this.#status = this.#awaitingInput ? "waiting_permission" : "idle";
         if (!this.#awaitingInput) this.#turnStartedAt = null;
@@ -1689,6 +1858,7 @@ export class Session {
     this.#caps = init.agentCapabilities ?? {};
     this.#agentName = init.agentInfo?.name ?? null;
     this.#agentVersion = init.agentInfo?.version ?? null;
+    this.#steeringSupported = steeringSupported(init._meta);
 
     const replayStartSeq = this.#log.lastSeq + 1;
     let created: {
@@ -2226,6 +2396,17 @@ export class Session {
       }
     }
   }
+}
+
+/**
+ * The ACP steering extension advertises itself in `InitializeResponse._meta`:
+ * `{ steering: { supported: true } }`. Anything else means queue-only.
+ */
+function steeringSupported(meta: unknown): boolean {
+  if (meta === null || typeof meta !== "object") return false;
+  const steering = (meta as { steering?: unknown }).steering;
+  if (steering === null || typeof steering !== "object") return false;
+  return (steering as { supported?: unknown }).supported === true;
 }
 
 /** Strip provider `_meta` and keep the plan-entry fields HLAO displays. */

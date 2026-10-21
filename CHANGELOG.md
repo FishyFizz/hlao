@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.14.0 — unreleased
+
+### Added
+
+- Mid-turn steering for inter-agent messaging. A `hlao send` issued from inside a session
+  now injects the prompt into the target's running turn (ACP `_session/steering`) when the
+  target is busy and its adapter advertises the extension; an idle target runs the prompt
+  directly as before, and an adapter without steering queues it. `--queue` forces the old
+  queued behavior and `--steer` enables injection from an operator shell. `--wait` on a
+  steered message waits for the running turn, since the injected message has no turn of its
+  own. The delivery is observable as `prompt.steered`, and `sessions.send` reports
+  `steered: true`; a session view reports `steeringSupported`.
+- Protocol 2.9 (additive): `SendParams.steer`, `SendResult.steered`,
+  `SessionView.steeringSupported`, the `prompt.steered` event, and the `send.steering`
+  capability.
+
+### Fixed
+
+- Time flags (`--after`, `--until`, `--since`) reject a bare number as documented. `Date.parse`
+  reads `123` as the year 123 and `2026` as 2026-01-01, so a mistyped duration or epoch value
+  previously returned a plausible page instead of a usage error.
+- `watch` prints a `reconnecting` notice on stderr when the supervisor connection closes
+  cleanly (for example after `down --force`) instead of reconnecting silently. A `--root`
+  token that does not resolve now exits with the selector error instead of printing the same
+  failure every second forever; a root that resolved is pinned across reconnects.
+
 ## 0.13.0 — unreleased
 
 ### Added
@@ -49,13 +75,6 @@
 
 - `find` no longer swallows a per-session read failure: the session is reported in human
   output and in JSON `errors`.
-- Time flags (`--after`, `--until`, `--since`) reject a bare number as documented. `Date.parse`
-  reads `123` as the year 123 and `2026` as 2026-01-01, so a mistyped duration or epoch value
-  previously returned a plausible page instead of a usage error.
-- `watch` prints a `reconnecting` notice on stderr when the supervisor connection closes
-  cleanly (for example after `down --force`) instead of reconnecting silently. A `--root`
-  token that does not resolve now exits with the selector error instead of printing the same
-  failure every second forever; a root that resolved is pinned across reconnects.
 
 ## 0.12.0 — unreleased
 

@@ -485,7 +485,15 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       const object = asObject(raw, what);
       checkKeys(
         object,
-        ["sessionId", "text", "wait", "timeoutMs", "messageId", "idempotencyKey"],
+        [
+          "sessionId",
+          "text",
+          "wait",
+          "timeoutMs",
+          "messageId",
+          "idempotencyKey",
+          "steer",
+        ],
         what,
       );
       return {
@@ -495,6 +503,7 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         timeoutMs: optInt(object, "timeoutMs", what, 0, MAX_TIMEOUT_MS),
         messageId: optString(object, "messageId", what, 100),
         idempotencyKey: optString(object, "idempotencyKey", what, 200),
+        steer: optBoolean(object, "steer", what),
       } as ParamsByMethod[M];
     }
     case "sessions.read": {

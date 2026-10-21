@@ -87,7 +87,7 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | Command | What it does |
 |---|---|
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn; `--resume PROVIDER_ID` reopens the provider session an earlier spawn reported, replaying its durable history through ACP `session/load`; `--fork PROVIDER_ID` copies it through ACP `session/fork` and leaves the source untouched. |
-| `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
+| `hlao send [<id>] [message]` | Deliver a prompt. An idle target runs it immediately; a busy target takes it according to the caller: a session steers into the running turn when the adapter supports it, an operator shell queues. `--steer` / `--queue` override. `--self` targets the caller's session. `--wait` waits for the turn (for a steered message, the running turn). `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
 | `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep` (literal or `--regex`), `--after`/`--until` time bounds, and `--context N` neighbors; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
 | `hlao export [<id>] [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. `--all --out DIR` writes every session plus `manifest.json`; it refuses to overwrite an existing export. |
 | `hlao get [<id>]` | One session's orchestration state without reading events, including provider title, agent/version, plan, compaction, usage, pending permission or question, and lineage. |
@@ -393,8 +393,10 @@ operator / agent shell
   provider session with ACP `session/fork`; the source keeps running and keeps its id. When
   the backend can also load, the copy's history is replayed into the new log. Nothing about
   the fork is recorded in the source session.
-- **A session runs one turn at a time.** Messages queue visibly. `cancel` clears the queue as
-  well as stopping the active turn.
+- **A session runs one turn at a time.** A message sent by an agent to a busy peer is
+  injected into that turn when the adapter advertises ACP steering; otherwise, and for
+  operator sends by default, it queues visibly. A steered message never starts a second
+  turn. `cancel` clears the queue as well as stopping the active turn.
 - **Permissions are state.** `waiting_permission` appears in `list`, `read`, and
   `wait --until permission`; `hlao permit` answers it. The default policy answers
   automatically, and `permit --always` removes the gate from a live session. Provider modes

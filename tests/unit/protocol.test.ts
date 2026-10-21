@@ -125,6 +125,31 @@ test("send text must be present", () => {
   );
 });
 
+test("send accepts a steering request and rejects a non-boolean", () => {
+  const params = parseParams("sessions.send", {
+    sessionId: "abc",
+    text: "note",
+    steer: true,
+  }) as { steer?: boolean };
+  assert.equal(params.steer, true);
+
+  assert.equal(
+    (parseParams("sessions.send", { sessionId: "abc", text: "note" }) as { steer?: boolean })
+      .steer,
+    undefined,
+  );
+  assert.throws(
+    () =>
+      parseParams("sessions.send", {
+        sessionId: "abc",
+        text: "note",
+        steer: "yes",
+      }),
+    (error: unknown) =>
+      error instanceof HlaoError && error.code === "bad_request",
+  );
+});
+
 test("hello accepts an optional major.minor version", () => {
   const empty = parseParams("hello", {});
   assert.equal(empty.protocolVersion, undefined);

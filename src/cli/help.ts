@@ -24,7 +24,7 @@ There is no scheduler and no session store.
 
 Usage:
   hlao spawn <backend> [message] [options]     open a session
-  hlao send [<id>] [message] [--wait]          queue a prompt
+  hlao send [<id>] [message] [--wait]          deliver a prompt (steer or queue)
   hlao read [<id>] [--since N | --before N] [--type T] [--grep TEXT]
                 [--after TIME] [--until TIME] [--regex] [--context N]
                                              read orchestration state + events
@@ -240,16 +240,23 @@ cannot be combined. A backend that does not advertise the ACP capability is
 refused rather than silently ignored.`,
     send: `hlao send [<id>] [message] [options]
 
-Queue a prompt. One turn runs at a time; a message sent while busy waits in a
-visible queue.
+Deliver a prompt. When the target is idle it runs a turn immediately. When it
+is mid-turn the default depends on the caller: a session steers the message
+into the running turn (ACP steering, when the adapter supports it), while an
+operator shell queues it behind the turn. If the adapter cannot steer, the
+message is queued either way. A message to your own session always queues: that
+is the deferred next-turn form.
 
 Options:
+  --steer                always try to inject into a running turn
+  --queue                never inject; always queue behind the running turn
   --self                 target this shell's own session (required when <id> is
                          omitted, because the first positional is the message)
   --stdin                read the message from stdin
   --prompt TEXT          message text (alternative to the positional)
   --prompt-file FILE     read the message from a file
-  --wait                 wait for this message's turn to end
+  --wait                 wait for the turn that carries this message (for a
+                         steered message, the running turn)
   --timeout DUR          bound the wait (0 = no bound)
   --idempotency-key KEY  retry safely: a repeat with the same key returns the
                          original message id and never enqueues twice
