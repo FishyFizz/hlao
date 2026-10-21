@@ -94,6 +94,9 @@ export async function cmdWatch(args: string[]): Promise<number> {
   try {
     // Cursors and labels survive a reconnect; the target set is refreshed from
     // the supervisor on each connection so a restarted instance is re-read.
+    // A resolved --root is pinned: the supervisor does not persist sessions
+    // across a restart, so re-resolving the token later would either fail
+    // forever or silently retarget the watch at a different root.
     const cursors = new Map<string, number>();
     const labels = new Map<string, string>();
     let targets = new Set<string>();
@@ -102,6 +105,8 @@ export async function cmdWatch(args: string[]): Promise<number> {
 
     for (;;) {
       if (stopping) break;
+      let rootResolutionFailed = false;
+      let reconnectReported = false;
       let conn: StreamingConnection;
       try {
         conn = await connectStreaming({
@@ -138,9 +143,14 @@ export async function cmdWatch(args: string[]): Promise<number> {
         const list = await conn.request<ListResult>("sessions.list", {
           includeClosed: true,
         });
-        rootId = rootToken === undefined
-          ? undefined
-          : resolveInList(list.sessions, rootToken).rootId;
+        if (rootToken !== undefined && rootId === undefined) {
+          try {
+            rootId = resolveInList(list.sessions, rootToken).rootId;
+          } catch (error) {
+            rootResolutionFailed = true;
+            throw error;
+          }
+        }
         const selected = list.sessions.filter(
           (session) =>
             (includeAll || !isTerminalStatus(session.status)) &&
@@ -225,6 +235,7 @@ export async function cmdWatch(args: string[]): Promise<number> {
                 process.stderr.write(
                   `hlao: resubscribe failed — ${(error as Error).message}; reconnecting\n`,
                 );
+                reconnectReported = true;
                 resolveClosed();
               }
             } finally {
@@ -363,10 +374,15 @@ export async function cmdWatch(args: string[]): Promise<number> {
 
         await closed;
       } catch (error) {
+        // A bad --root is a selector error, not a transient one: the session
+        // table is gone after a supervisor restart, so retrying only repeats
+        // the same line forever. Mirror the other commands and exit.
+        if (rootResolutionFailed) throw error;
         if (!stopping) {
           process.stderr.write(
             `hlao: watch failed — ${(error as Error).message}; reconnecting\n`,
           );
+          reconnectReported = true;
         }
       } finally {
         stopCurrent = null;
@@ -374,6 +390,9 @@ export async function cmdWatch(args: string[]): Promise<number> {
       }
 
       if (stopping) break;
+      if (!reconnectReported) {
+        process.stderr.write("hlao: watch connection closed; reconnecting\n");
+      }
       await sleep(1_000);
     }
   } finally {

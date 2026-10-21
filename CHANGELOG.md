@@ -49,6 +49,13 @@
 
 - `find` no longer swallows a per-session read failure: the session is reported in human
   output and in JSON `errors`.
+- Time flags (`--after`, `--until`, `--since`) reject a bare number as documented. `Date.parse`
+  reads `123` as the year 123 and `2026` as 2026-01-01, so a mistyped duration or epoch value
+  previously returned a plausible page instead of a usage error.
+- `watch` prints a `reconnecting` notice on stderr when the supervisor connection closes
+  cleanly (for example after `down --force`) instead of reconnecting silently. A `--root`
+  token that does not resolve now exits with the selector error instead of printing the same
+  failure every second forever; a root that resolved is pinned across reconnects.
 
 ## 0.12.0 — unreleased
 
