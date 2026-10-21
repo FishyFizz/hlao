@@ -258,9 +258,9 @@ operator-only; an agent can read its mode but not change it.
 **The operator's default.** `backends.<name>.defaultMode` in config sets the mode a **new**
 session uses when the operator supplies none. The effective mode for a new session is
 operator `--mode` → backend `defaultMode` → the provider's own default. Agent-spawned
-children always use the backend default for a new session. A resumed or forked session
-keeps the provider's persisted mode; an explicit operator `--mode` still overrides. This is
-the replacement for policy inheritance.
+children always use the backend default for a new session; they do not inherit the parent's
+live mode. A resumed or forked session keeps the provider's persisted mode; an explicit
+operator `--mode` still overrides. This is the replacement for policy inheritance.
 
 **Every ask parks.** A request appears in `SessionView.pendingPermissions`, in `list
 --pending`, in `read`, and satisfies `wait --until permission`. The operator answers with
@@ -286,10 +286,11 @@ else cancels; it never allows, and records `permission.resolved { by: "timeout",
 "timeout" }`. An unattended run should set a provider mode or a backend `defaultMode` rather
 than rely on answering in time.
 
-**Control is operator-only.** `permit`, `mode` set, and `spawn --mode` from a caller with
-`HLAO_SESSION_ID` are refused with `operator_only`. A parent agent cannot unblock a child; it
-reports the blocker. The operator uses a shell without `HLAO_SESSION_ID` or the dashboard.
-This is advisory (N-08): the instance token is the real authority.
+**Control is operator-only.** `permit` and any mode set — `hlao mode`, `option <id> mode …`,
+`spawn --mode`, or `spawn --config mode=…` — are refused with `operator_only` when the caller
+has `HLAO_SESSION_ID`. A parent agent cannot unblock a child; it reports the blocker. The
+operator uses a shell without `HLAO_SESSION_ID` or the dashboard. This is advisory (N-08):
+the instance token is the real authority.
 
 Provider config options are a third layer: model, reasoning effort, and adapter-specific
 settings. `hlao option <id>` lists them and `hlao option <id> model opus` sets one;
@@ -340,6 +341,11 @@ hlao send "$HLAO_PARENT_ID" "Blocked: the lock file is held by another worker."
 hlao provider sessions "$HLAO_BACKEND" --cwd "$PWD"   # provider conversations
 hlao adopt "$HLAO_BACKEND" <provider-id> --cwd "$PWD" # take one in as a new agent
 ```
+
+Environment variables expand differently per shell: `$HLAO_PARENT_ID` in POSIX shells,
+`$env:HLAO_PARENT_ID` in PowerShell, and `%HLAO_PARENT_ID%` in cmd.exe. An empty expansion can
+silently retarget a command at your own session; pass an explicit id when the shell is
+uncertain, or read the ids with `hlao whoami`.
 
 Do not run `send --self ... --wait` from inside a turn: the message queues behind the turn
 you are in, so the wait cannot finish. HLAO rejects that shape with `bad_request` and names

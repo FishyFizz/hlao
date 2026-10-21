@@ -232,7 +232,8 @@ request is relayed to the operator:
   Every path that resolves, withdraws, cancels, or closes a request clears its timer.
 - The operator answers with `hlao permit`, using the provider's own option id. `--always` is
   a provider option selector (`allow_always` / `reject_always`), not a state change.
-  `permit`, `mode` set, and a spawn `mode` are operator-only; reads stay open.
+  `permit` and any mode set — `mode`, `option <id> mode …`, `spawn --mode`, or a spawn
+  `--config` mode option — are operator-only; reads stay open.
 
 Provider-native modes are the policy layer: the session view reports the adapter's `modes`,
 `spawn --mode` selects one, and `hlao mode` reads or switches it. The effective mode for a

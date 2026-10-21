@@ -9,8 +9,9 @@ import { generateSessionId } from "../ids.js";
 import { recordSpawnReceipt } from "../ledger.js";
 import type { SpawnParams, SpawnResult } from "../protocol.js";
 import { Session } from "../session.js";
+import { MODE_CONFIG_ID } from "../session/config-options.js";
 import { SKILL_VERSION, homeSkillPath } from "../skill.js";
-import { actor } from "./util.js";
+import { actor, modeConfigOperatorOnlyError } from "./util.js";
 
 export interface SpawnDeps {
   home: string;
@@ -87,6 +88,11 @@ export class SpawnService {
         "operator_only",
         "only an operator shell without HLAO_SESSION_ID may pass --mode; an agent-spawned session uses the backend's defaultMode",
       );
+    }
+    // The bundled adapters also expose the permission mode as a config option;
+    // this is the same control under another name and gets the same guard.
+    if (caller !== null && params.config?.[MODE_CONFIG_ID] !== undefined) {
+      throw modeConfigOperatorOnlyError(MODE_CONFIG_ID);
     }
 
     const key = params.idempotencyKey;
@@ -340,6 +346,12 @@ export class SpawnService {
       await apply(() => session.setModel(params.model!, actor(caller)));
     }
     for (const [configId, value] of Object.entries(params.config ?? {})) {
+      // Covers an adapter that names its mode option something other than
+      // "mode": category "mode" is the general signal.
+      if (caller !== null && session.isModeConfigOption(configId)) {
+        await session.close(true, actor(caller));
+        throw modeConfigOperatorOnlyError(configId);
+      }
       await apply(() => session.setConfigOption(configId, value, actor(caller)));
     }
 

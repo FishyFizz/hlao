@@ -64,6 +64,18 @@ liveness.
   (`FAKE_PROVIDER_SESSIONS`), and can omit `session/list`
   (`FAKE_NO_LIST_SESSION=1`).
 
+### Fixed
+
+- A provider mode can no longer be changed through a config option by an agent
+  caller. The bundled Claude and Codex adapters expose the mode as a config
+  option; `spawn --config mode=…` and `hlao option <id> mode …` now return
+  `operator_only`, matching `hlao mode` and `spawn --mode`. The guard covers
+  any advertised option whose category is `mode`, not just the id `mode`.
+- The injected skill now shows POSIX, PowerShell, and cmd.exe environment
+  syntax (an empty `$HLAO_PARENT_ID` previously retargeted a command at the
+  caller) and states that a new child takes the backend default, not the
+  parent's live mode.
+
 ### Maintenance
 
 - Internal modules were split along their existing responsibilities without

@@ -18,7 +18,8 @@ Options:
   --timeout DUR          bound the first-turn wait (0 = no bound)
   --mode ID              provider mode (operator shell only; see "hlao mode")
   --model VALUE          select the model category of provider config options
-  --config KEY=VALUE     set a provider config option (repeatable)
+  --config KEY=VALUE     set a provider config option (repeatable); a mode
+                         option is operator-only, like --mode
   --parent SESSION       spawn under another session in this instance
   --env K=V              extra environment for the adapter (repeatable)
   --no-skill             omit the HLAO skill pointer from the first prompt
@@ -403,7 +404,8 @@ the provider decides what its modes mean, and HLAO does not normalize them.
 Without modeId: print the current mode and the available modes. Any caller may
 read, including its own with --self.
 With modeId: request session/set_mode and report the result. Setting a mode is
-operator-only; an agent caller is refused with operator_only.
+operator-only; an agent caller is refused with operator_only. The same rule
+covers a mode config option set through "hlao option" or spawn --config.
 
 Bulk set (operator-only, replaces "hlao policy" bulk):
   hlao mode --root SESSION <mode>     the whole job (SESSION must be its root)
@@ -419,7 +421,11 @@ ACP session/new and config_option_update.
 
 Without key value: print every option and its selectable values.
 With key value: request session/set_config_option. Boolean options accept
-true/false. Inside a session, use --self or --self <key> <value>.`,
+true/false. Inside a session, use --self or --self <key> <value>.
+
+A config option whose category is "mode" selects the provider's permission
+mode. Setting it is operator-only, exactly like "hlao mode": an agent caller
+is refused with operator_only.`,
     queue: `hlao queue [<id>] [--self]
 hlao queue drop [<id>] <position> [--self]
 hlao queue drop <id> --id <message>

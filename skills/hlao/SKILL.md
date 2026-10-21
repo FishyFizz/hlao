@@ -19,6 +19,10 @@ harness.
 - `HLAO_SKILL` / `HLAO_SKILL_VERSION` — this file and its package version.
 - `HLAO_CLI` — absolute CLI path when `hlao` is not on `PATH`.
 
+Shell expansion differs by host: POSIX shells use `$HLAO_PARENT_ID`, PowerShell uses
+`$env:HLAO_PARENT_ID`, and cmd.exe uses `%HLAO_PARENT_ID%`. An empty expansion can silently
+retarget a command at your own session, so pass an explicit id when the shell is uncertain.
+
 Lineage is context, not authority. Every session in the instance is addressable by id, unique
 name, or unique prefix. You may read, wait on, message, or close any session in the instance;
 that is a coordination rule, not permission to interfere with unrelated work.
@@ -64,8 +68,9 @@ re-send the instruction. `spawn --fork <provider-id> --cwd <original cwd>` copie
 instead; the source keeps running and can still be resumed separately.
 
 When you spawn or adopt a child, HLAO writes a historical spawn receipt pairing your provider
-id with the child's provider id (plus backend, cwd, and name) in `$HLAO_HOME/spawn-ledger.jsonl`.
-After a restart, `hlao children --self` reads it; `hlao get --self` reports your own provider
+id with the child's provider id (plus backend, cwd, and name) to `spawn-ledger.jsonl` in
+`HLAO_HOME` (`$HLAO_HOME/spawn-ledger.jsonl` in a POSIX shell). After a restart,
+`hlao children --self` reads it; `hlao get --self` reports your own provider
 id, and `hlao children --provider <id>` reads the same ledger without a supervisor. Resume a
 child by provider id, not by title. Because an agent caller is the default parent, the new
 HLAO attachment lands under you:
@@ -114,7 +119,8 @@ Between turns:
 
 - A self-send is a deferred next turn: `hlao send --self "Check the log again."` without
   `--wait`. Finish the current turn; the queued prompt runs next.
-- Report a blocker to the parent: `hlao send "$HLAO_PARENT_ID" "Blocked: ..."`.
+- Report a blocker to the parent. POSIX shell: `hlao send "$HLAO_PARENT_ID" "Blocked: ..."`.
+  PowerShell: `hlao send "$env:HLAO_PARENT_ID" "Blocked: ..."`.
 
 Do not use `hlao send --self "..." --wait` from inside a turn. The message queues behind the
 turn you are in, so the wait cannot finish. HLAO rejects that shape with `bad_request` and
@@ -139,8 +145,9 @@ provider is waiting for an answer; `exit` means the session ended.
 ## Reporting
 
 - Finish with what the operator asked for. If the prompt names a result format, use it.
-- If you are blocked, send a concise fact to `$HLAO_PARENT_ID`: what you tried, what is
-  missing, and what would unblock you. Do not guess.
+- If you are blocked, send a concise fact to your parent (`$HLAO_PARENT_ID` in a POSIX shell,
+  `$env:HLAO_PARENT_ID` in PowerShell): what you tried, what is missing, and what would
+  unblock you. Do not guess.
 - If a command fails, read the error and stop; do not loop on a dead adapter.
 - Do not spawn a replacement session unless the operator asked. Resuming a session you
   spawned with `--resume` continues it; it is not a replacement.
@@ -152,14 +159,17 @@ provider is waiting for an answer; `exit` means the session ended.
 - A pending request is visible in `read` and in `list --pending` as
   `pendingPermissions` (a FIFO queue; parallel asks are each answerable). **Answering is
   operator-only.** `hlao permit` and `hlao mode <id> <mode>` from a shell with
-  `HLAO_SESSION_ID` are refused with `operator_only`. Do not try to answer your own or a
-  child's request, and do not change a mode: report the blocker to `$HLAO_PARENT_ID` or the
+  `HLAO_SESSION_ID` are refused with `operator_only`. A mode config option is the same
+  control: `hlao option <id> mode <mode>` and `spawn --config mode=<mode>` are refused too.
+  Do not try to answer your own or a child's request, and do not change a mode: report the
+  blocker to your parent (`$HLAO_PARENT_ID`; `$env:HLAO_PARENT_ID` in PowerShell) or the
   operator and stop.
 - A provider question is separate and also never auto-answered: `hlao elicit <id>` shows it,
   and `--accept key=value`, `--decline`, or `--cancel` answers it. A session parked on either
   gate cannot run a command to answer itself; leave a clear blocker.
-- The operator may have set a per-backend `defaultMode`; an agent-spawned child inherits it.
-  An agent cannot pass `--mode`.
+- The operator may have set a per-backend `defaultMode`; a new agent-spawned child takes
+  that backend default (or the provider default). It does not inherit your live mode. An
+  agent cannot pass `--mode`.
 - This control is advisory, not an ACL. The instance token is the real authority. Cooperate
   with the gate rather than working around it; containment needs a separate instance.
 

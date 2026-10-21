@@ -89,12 +89,14 @@ caller. Read-only forms of `read`, `wait`, `cancel`, `close`, `option`, and `que
 to `HLAO_SESSION_ID` when it is set and no id is given; their setting forms use `--self`. A
 target supplied both positionally and with `--self` is `bad_request`.
 
-Control is operator-only in protocol 3.0. `permit`, a `mode` set (including bulk), and a
-`spawn --mode` from a caller with `HLAO_SESSION_ID` are refused with `operator_only`. The CLI
-checks `HLAO_SESSION_ID` first for a clear message; the supervisor enforces the same rule.
-Reads stay open: an agent may read its mode and its pending requests. The operator uses a
-shell without `HLAO_SESSION_ID` or the dashboard. This is advisory, not an ACL: the instance
-token remains the real authority (N-08).
+Control is operator-only in protocol 3.0. `permit` and any mode set — `mode` (including
+bulk), `option <id> mode …`, `spawn --mode`, or `spawn --config mode=…` — from a caller with
+`HLAO_SESSION_ID` are refused with `operator_only`. The CLI checks `HLAO_SESSION_ID` first for
+a clear message; the supervisor enforces the same rule, including when the mode is reached
+through a config option whose category is `mode`. Reads stay open: an agent may read its mode
+and its pending requests. The operator uses a shell without `HLAO_SESSION_ID` or the
+dashboard. This is advisory, not an ACL: the instance token remains the real authority
+(N-08).
 
 `--tree` on `close` is a CLI assembly: list the target's subtree (including retained closed
 sessions, so lineage is not broken by an intermediate that already closed), then close each

@@ -26,7 +26,12 @@ import {
   recoveryReceipts,
 } from "./supervisor/discovery.js";
 import { SpawnService } from "./supervisor/spawn.js";
-import { actor, delay, pathKey } from "./supervisor/util.js";
+import {
+  actor,
+  delay,
+  modeConfigOperatorOnlyError,
+  pathKey,
+} from "./supervisor/util.js";
 import { WaitGraph, waitCycleError } from "./supervisor/wait-graph.js";
 import { awaitWaitTargets } from "./supervisor/waits.js";
 import { ensureHomeSkill } from "./skill.js";
@@ -794,6 +799,11 @@ class SupervisorServer {
     caller: string | null,
   ): Promise<SetConfigOptionResult> {
     const session = this.#resolve(params.sessionId);
+    // A mode config option is a mode change; `option <id> mode …` may not do
+    // what `mode` and spawn `--mode` refuse.
+    if (caller !== null && session.isModeConfigOption(params.configId)) {
+      throw modeConfigOperatorOnlyError(params.configId);
+    }
     await session.setConfigOption(params.configId, params.value, actor(caller));
     return { session: session.view() };
   }

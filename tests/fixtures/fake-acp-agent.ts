@@ -70,6 +70,19 @@ function configOptions(): Array<Record<string, unknown>> {
       category: "model_config",
       currentValue: Boolean(configValues.verbose),
     },
+    {
+      type: "select",
+      id: "mode",
+      name: "Mode",
+      description: "Session permission mode",
+      category: "mode",
+      currentValue: currentMode,
+      options: availableModes.map((entry) => ({
+        value: entry.id,
+        name: entry.name,
+        description: entry.description,
+      })),
+    },
   ];
 }
 
@@ -292,6 +305,16 @@ const app = agent({ name: "fake-acp" })
   })
   .onRequest("session/set_config_option", async ({ params, client }) => {
     configValues = { ...configValues, [params.configId]: params.value };
+    if (params.configId === "mode") {
+      currentMode = String(params.value);
+      await client.notify("session/update", {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentModeId: currentMode,
+        } as never,
+      });
+    }
     const options = configOptions();
     await client.notify("session/update", {
       sessionId: params.sessionId,

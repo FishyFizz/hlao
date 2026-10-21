@@ -29,6 +29,7 @@ import type {
 } from "./protocol.js";
 import { MAX_PROMPT_CHARS, isTerminalStatus } from "./protocol.js";
 import { raceWithTimeout, withTimeout } from "./session/async.js";
+import { isModeConfigOption } from "./session/config-options.js";
 import { buildSessionEnv } from "./session/env.js";
 import { PendingInputs } from "./session/pending-input.js";
 import {
@@ -987,6 +988,19 @@ export class Session {
       this.#changed();
     }
     return this.#modes;
+  }
+
+  /**
+   * True when this config option is the provider's permission-mode selector.
+   * The supervisor uses this to keep every path to a mode change
+   * operator-only (`mode`, `spawn --mode`, `spawn --config mode=…`, and
+   * `option <id> mode …`).
+   */
+  isModeConfigOption(configId: string): boolean {
+    const option = this.#configOptions?.find(
+      (candidate) => candidate.id === configId,
+    );
+    return option !== undefined && isModeConfigOption(option);
   }
 
   /** Sets a provider-advertised session config option. */

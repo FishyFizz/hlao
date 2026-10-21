@@ -569,7 +569,8 @@ Params:
   timeoutMs?: number;            // bound on that wait; defaults to sendWaitTimeoutMs
   mode?: string;                 // operator-only; effective before the backend defaultMode
   model?: string;                // value for the option whose category is "model"
-  config?: Record<string, string | boolean>; // session config options applied before the prompt
+  config?: Record<string, string | boolean>; // session config options applied before the prompt;
+                                             // a mode-category option is operator-only
   parentSessionId?: string;      // lineage; defaults to the caller's live session, else a root
   env?: Record<string, string>;  // extra environment for the adapter
   skill?: boolean;               // include the HLAO skill pointer in the first prompt (default true)
@@ -935,9 +936,13 @@ Result: `{ session: SessionView }`.
 
 Sends ACP `session/set_config_option` and replaces the session's `configOptions` from the
 response. Boolean options accept a boolean or the strings `"true"`/`"false"`. A select option
-requires one of the advertised value ids. Errors: `bad_request` when the option is not
-advertised or the type is wrong, `bad_option` when the value is not offered,
-`session_not_ready` before ACP is ready, `session_closed` for a terminal session.
+requires one of the advertised value ids. A config option whose category is `mode` (the
+bundled adapters call it `"mode"`) selects the provider's permission mode; it is
+**operator-only** on this method and through a spawn `config`, because it is equivalent to
+`sessions.set_mode`. Errors: `bad_request` when the option is not advertised or the type is
+wrong, `bad_option` when the value is not offered, `operator_only` for a mode-category option
+from a caller with `callerSessionId`, `session_not_ready` before ACP is ready,
+`session_closed` for a terminal session.
 
 ### `sessions.queue`
 

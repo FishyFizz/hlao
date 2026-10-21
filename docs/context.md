@@ -22,14 +22,15 @@ surfaces. This file is the map between them and the code.
   supervisor remains turn-serial: steering is a provider request, not a second local turn.
   HLAO owns no permission policy (ADR 0013): the provider mode is the coarse policy, every
   provider ask is relayed to the operator through a bounded FIFO, and a one-shot timeout
-  fails closed. `permit`, `mode` set, and a spawn `mode` are operator-only. Provider
+  fails closed. `permit` and any mode set (`mode`, `option <id> mode …`, `spawn --mode`,
+  or a spawn `--config` mode option) are operator-only. Provider
   session discovery is a capability-gated read of ACP `session/list` (`backends.sessions`),
   live-joined to the supervisor table; `hlao adopt` loads one as a new HLAO session. There
   is no live provider-to-agent registry (ADR 0014). An append-only spawn-receipt ledger
   pairs parent and child provider ids for manual recovery after a restart; it is history,
   not liveness, and `hlao children` reads it (ADR 0015). A resumed or forked session keeps
   the provider's mode; `defaultMode` applies to new sessions only.
-- **Verification:** `npm test` runs 283 tests: 281 pass, 2 skipped (POSIX-only process-group
+- **Verification:** `npm test` runs 284 tests: 282 pass, 2 skipped (POSIX-only process-group
   tests on Windows), 0 fail. The suite drives the real CLI and supervisor against a scripted
   ACP agent, including the acceptance assemblies, provider discovery/adoption, the
   post-reboot receipt recovery, and a raw-NDJSON conformance test that never invokes the CLI.

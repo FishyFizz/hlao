@@ -113,6 +113,65 @@ test("an invalid defaultMode is the adapter's error at spawn", async (t) => {
   assert.equal(spawned.value.error.code, "bad_option");
 });
 
+test("a mode config option is operator-only on every path", async (t) => {
+  const harness = new Harness();
+  t.after(() => harness.cleanup());
+
+  const parent = await harness.json<SpawnValue>(["spawn", "fake", "--wait"]);
+  assert.equal(parent.code, 0);
+  const parentId = parent.value.session.id;
+  const agentEnv = { HLAO_SESSION_ID: parentId };
+
+  // spawn --config mode=... is a mode set, not an ordinary config option.
+  const before = await harness.json<{ sessions: unknown[] }>(["list", "--all"]);
+  const viaSpawn = await harness.json<JsonError>(
+    ["spawn", "fake", "--config", "mode=bypassPermissions", "--wait"],
+    { env: agentEnv },
+  );
+  assert.equal(viaSpawn.code, 1);
+  assert.equal(viaSpawn.value.error.code, "operator_only");
+  const after = await harness.json<{ sessions: unknown[] }>(["list", "--all"]);
+  assert.equal(after.value.sessions.length, before.value.sessions.length);
+
+  // option <id> mode ... is the same control.
+  const child = await harness.json<SpawnValue>(["spawn", "fake", "--wait"], {
+    env: agentEnv,
+  });
+  assert.equal(child.code, 0);
+  const childId = child.value.session.id;
+  assert.equal(child.value.session.modes?.currentModeId, "default");
+
+  const viaOption = await harness.json<JsonError>(
+    ["option", childId, "mode", "bypassPermissions"],
+    { env: agentEnv },
+  );
+  assert.equal(viaOption.code, 1);
+  assert.equal(viaOption.value.error.code, "operator_only");
+
+  const unchanged = await harness.json<ModesValue>(["mode", childId]);
+  assert.equal(unchanged.value.currentModeId, "default");
+
+  // The operator still has both paths.
+  const operatorOption = await harness.json<SetModeValue>([
+    "option",
+    childId,
+    "mode",
+    "auto",
+  ]);
+  assert.equal(operatorOption.code, 0);
+  assert.equal(operatorOption.value.session.modes?.currentModeId, "auto");
+
+  const operatorSpawn = await harness.json<SpawnValue>([
+    "spawn",
+    "fake",
+    "--config",
+    "mode=auto",
+    "--wait",
+  ]);
+  assert.equal(operatorSpawn.code, 0);
+  assert.equal(operatorSpawn.value.session.modes?.currentModeId, "auto");
+});
+
 test("mode bulk selectors replace policy bulk and are operator-only", async (t) => {
   const harness = new Harness();
   t.after(() => harness.cleanup());
