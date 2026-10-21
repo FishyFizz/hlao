@@ -29,10 +29,80 @@ test("defaults load when no config exists", () => {
     assert.equal(config.waitTimeoutMs, 30 * 60_000);
     assert.ok(config.backends.claude);
     assert.ok(config.backends.codex);
+    assert.deepEqual(config.backends.opencode?.args, ["acp"]);
+    assert.equal(config.backends.opencode?.source, "builtin");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test(
+  "the opencode builtin spawns the binary an npm shim wraps on Windows",
+  { skip: process.platform !== "win32" },
+  () => {
+    const home = tempHome();
+    const prefix = tempHome();
+    const previousPath = process.env.PATH;
+    const previousExtensions = process.env.PATHEXT;
+    try {
+      const wrapped = join(
+        prefix,
+        "node_modules",
+        "@opencode",
+        "cli",
+        "bin",
+        "opencode.exe",
+      );
+      mkdirSync(join(prefix, "node_modules", "@opencode", "cli", "bin"), {
+        recursive: true,
+      });
+      writeFileSync(wrapped, "");
+      // npm leaves a .cmd shim next to the modules directory.
+      writeFileSync(join(prefix, "opencode.cmd"), "@echo off\r\n");
+      process.env.PATH = prefix;
+      process.env.PATHEXT = ".EXE;.CMD;.BAT";
+
+      const { config } = loadConfig(home);
+      assert.equal(config.backends.opencode?.available, true);
+      assert.equal(config.backends.opencode?.command, wrapped);
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousExtensions === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = previousExtensions;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "an npm shim with no wrapped binary is not reported ready",
+  { skip: process.platform !== "win32" },
+  () => {
+    const home = tempHome();
+    const prefix = tempHome();
+    const previousPath = process.env.PATH;
+    const previousExtensions = process.env.PATHEXT;
+    try {
+      writeFileSync(join(prefix, "opencode.cmd"), "@echo off\r\n");
+      process.env.PATH = prefix;
+      process.env.PATHEXT = ".EXE;.CMD;.BAT";
+
+      const { config } = loadConfig(home);
+      assert.equal(config.backends.opencode?.available, false);
+      assert.match(
+        config.backends.opencode?.unavailableReason ?? "",
+        /shell shim/,
+      );
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousExtensions === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = previousExtensions;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  },
+);
 
 test("user backends override built-ins and carry their source", () => {
   const home = tempHome();

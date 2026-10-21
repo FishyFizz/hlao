@@ -16,9 +16,10 @@ the plain operations, so the next move is decided when the situation is visible.
 
 ```console
 $ hlao agents
-NAME    SOURCE   READY  MODE  CONFIG                    COMMAND                     NOTES
-claude  builtin  yes    —     —                         …\dist\index.js             Claude Code through the ACP adapter
-codex   builtin  yes    —     —                         …\dist\index.js             OpenAI Codex through the ACP adapter
+NAME     SOURCE   READY  MODE  CONFIG                    COMMAND                     NOTES
+claude   builtin  yes    —     —                         …\dist\index.js             Claude Code through the ACP adapter
+codex    builtin  yes    —     —                         …\dist\index.js             OpenAI Codex through the ACP adapter
+opencode builtin  yes    —     —                         …\opencode.exe acp          OpenCode through its ACP server
 
 $ hlao spawn claude "Audit the build log at build.log and report the first failure." --wait
 spawned k7m2qp (claude) in D:\work\svc  provider 4f2a9c1e  mode default
@@ -73,7 +74,8 @@ and token — the instance is the hard swarm boundary.
 - **Node.js >= 22.13** (developed on 26.8.1). The ACP SDK is pure TypeScript; there is no
   native build step.
 - **A backend with its own provider authentication.** The bundled `claude` and `codex`
-  adapters wrap their provider runtimes and inherit the environment. A missing adapter or a
+  adapters wrap their provider runtimes and inherit the environment; the `opencode`
+  builtin starts the OpenCode ACP server from an installed `opencode`. A missing adapter or a
   failure during startup shows up as a spawn error with the adapter's stderr; a provider
   rejection during a turn appears in the session output, not hidden in the supervisor.
 - **Windows 11, macOS, or Linux.** The supervisor uses a named pipe on Windows and a Unix
@@ -352,8 +354,9 @@ prints `{"ok":false,"error":{"code","message","details?"}}` on stdout with exit 
 
 ## Backends and configuration
 
-Built-ins are `claude` and `codex`, resolved from HLAO's pinned adapter dependencies. Add a
-backend without writing code by adding a manifest:
+Built-ins are `claude` and `codex`, resolved from HLAO's pinned adapter dependencies, and
+`opencode`, resolved from an OpenCode install on `PATH` (`opencode acp`). Add a backend
+without writing code by adding a manifest:
 
 ```json
 {

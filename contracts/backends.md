@@ -23,11 +23,20 @@ type BackendManifest = {
 |---|---|---|
 | `claude` | `node <resolved @agentclientprotocol/claude-agent-acp>/dist/index.js` | Requires the adapter's own provider auth to be present |
 | `codex` | `node <resolved @agentclientprotocol/codex-acp>` | Requires the adapter's own provider auth to be present |
+| `opencode` | `opencode acp` | The operator's own OpenCode install; resolved from `PATH` |
 
-Resolution uses `createRequire(import.meta.url)` against HLAO's own dependencies, so a
-locally installed or globally installed HLAO resolves the pinned adapters it shipped with.
-Resolution failure yields `available: false` with the resolver's message; the entry still
-appears in `hlao agents` so the failure is visible rather than silent.
+The two ACP-package adapters resolve with `createRequire(import.meta.url)` against HLAO's
+own dependencies, so a locally installed or globally installed HLAO resolves the pinned
+adapters it shipped with. `opencode` is an external tool, so its command is resolved on
+`PATH` to something the supervisor can spawn without a shell. On Windows an npm global
+install leaves only a `.cmd` shim on `PATH`; the builtin follows that shim into the same
+prefix's `node_modules` for the wrapped `opencode.exe` (`@opencode/cli` v2 or
+`opencode-ai` v1) before declaring the backend unavailable. Resolution failure yields
+`available: false` with the resolver's message; the entry still appears in `hlao agents`
+so the failure is visible rather than silent.
+
+OpenCode's ACP server exposes model and effort as config options and no session modes;
+`backends.<name>.defaultMode` therefore has no effect on it.
 
 ## User config — `<HLAO_HOME>/config.json`
 

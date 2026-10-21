@@ -12,6 +12,12 @@ liveness.
 
 ### Added
 
+- Builtin `opencode` backend: `opencode acp`. Unlike the bundled Claude and
+  Codex adapters it wraps the operator's own OpenCode install, so the command is
+  resolved on `PATH`; on Windows an npm global install's `.cmd` shim is followed
+  to the wrapped `opencode.exe` in the same prefix instead of being reported
+  ready and failing at spawn. OpenCode exposes model and effort as config
+  options and no ACP modes, so `defaultMode` does not apply to it.
 - `backends.sessions` (protocol 3.1): a capability-gated read of ACP
   `session/list` for a backend and absolute cwd (or across cwds when omitted).
   Rows are provider-owned provider session ids with cwd, title, and updatedAt,

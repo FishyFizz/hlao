@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, delimiter, dirname, extname, isAbsolute, join } from "node:path";
 import { HlaoError, describeError } from "./errors.js";
@@ -232,6 +232,19 @@ function builtins(): Record<string, BackendManifest> {
       "OpenAI Codex through the ACP adapter",
       (entry) => entry,
     ),
+    opencode: externalBuiltin(
+      "opencode",
+      "opencode",
+      ["acp"],
+      "OpenCode through its ACP server",
+      // Windows npm installs leave only a .cmd shim on PATH; the shim wraps
+      // the platform binary under the prefix's node_modules. Both the v2
+      // (@opencode/cli) and v1 (opencode-ai) package layouts are known.
+      [
+        join("node_modules", "@opencode", "cli", "bin", "opencode.exe"),
+        join("node_modules", "opencode-ai", "bin", "opencode.exe"),
+      ],
+    ),
   };
 }
 
@@ -277,6 +290,121 @@ function builtin(
       unavailableReason: `cannot resolve ${specifier}: ${describeError(error)}`,
     };
   }
+}
+
+/**
+ * A builtin for a tool the operator installs themselves. The command is
+ * resolved on PATH to something this process can actually spawn, so a Windows
+ * npm shim is never reported as READY.
+ */
+function externalBuiltin(
+  name: string,
+  command: string,
+  args: string[],
+  description: string,
+  shimTargets: readonly string[],
+): BackendManifest {
+  const resolved = resolveSpawnable(command, shimTargets);
+  return {
+    name,
+    command: resolved.executable ?? command,
+    args,
+    env: {},
+    description,
+    source: "builtin",
+    available: resolved.available,
+    ...(resolved.reason !== undefined
+      ? { unavailableReason: resolved.reason }
+      : {}),
+  };
+}
+
+interface SpawnableResolution {
+  available: boolean;
+  executable?: string;
+  reason?: string;
+}
+
+/**
+ * Finds a PATH entry that can be passed to `spawn` without a shell. On Windows
+ * that means `.exe`/`.com`; an npm global install leaves a `.cmd` shim there,
+ * so the declared shim targets (the wrapped binary inside the same prefix) are
+ * tried before reporting the shim problem.
+ */
+function resolveSpawnable(
+  command: string,
+  shimTargets: readonly string[],
+): SpawnableResolution {
+  const windows = process.platform === "win32";
+  const extensions = windows
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM")
+        .split(";")
+        .filter((extension) => extension.length > 0)
+    : [""];
+  let problem: string | undefined;
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (directory.length === 0) continue;
+    let shimFound = false;
+    for (const extension of extensions) {
+      const candidate = join(directory, `${command}${extension}`);
+      if (!existsSync(candidate)) continue;
+      if (isSpawnable(candidate)) {
+        return { available: true, executable: candidate };
+      }
+      shimFound = true;
+      problem ??= spawnProblem(command, candidate);
+    }
+    if (!windows) continue;
+    // npm's POSIX launcher lands on PATH without an extension too.
+    const bare = join(directory, command);
+    if (existsSync(bare) && !isSpawnable(bare)) {
+      shimFound = true;
+      problem ??= spawnProblem(command, bare);
+    }
+    if (!shimFound) continue;
+    for (const target of shimTargets) {
+      const wrapped = join(directory, target);
+      if (existsSync(wrapped) && isSpawnable(wrapped)) {
+        return { available: true, executable: wrapped };
+      }
+    }
+  }
+  return problem !== undefined
+    ? { available: false, reason: problem }
+    : {
+        available: false,
+        reason: `command "${command}" was not found on PATH`,
+      };
+}
+
+function isSpawnable(file: string): boolean {
+  if (process.platform === "win32") {
+    const extension = extname(file).toLowerCase();
+    return extension === ".exe" || extension === ".com";
+  }
+  try {
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function spawnProblem(command: string, candidate: string): string {
+  if (process.platform !== "win32") {
+    return `command "${command}" resolves to ${basename(candidate)}, which is not executable`;
+  }
+  const extension = extname(candidate).toLowerCase();
+  if (extension === ".cmd" || extension === ".bat" || extension === ".ps1") {
+    return (
+      `command "${command}" resolves to ${basename(candidate)}, a Windows shell ` +
+      `shim that cannot be spawned directly; point the backend at the executable it wraps`
+    );
+  }
+  return (
+    `command "${command}" resolves to ${basename(candidate)}, which is not a ` +
+    `Windows executable (.exe or .com)`
+  );
 }
 
 function parseBackendMap(

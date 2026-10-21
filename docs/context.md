@@ -50,6 +50,14 @@ surfaces. This file is the map between them and the code.
 - **Codex:** the adapter starts and reaches its provider; the local account's provider
   returned `403 GROUP_NOT_ALLOWED`, so no successful Codex turn is claimed. That is provider
   configuration, not an HLAO failure.
+- **OpenCode verified on this machine (2026-10-21):** the builtin `opencode` backend
+  (`opencode acp`, OpenCode 2.1.0) completed a prompt, ran the `read` and `shell` tools,
+  reported usage, and appeared in `provider sessions` as loadable/forkable with a live
+  HLAO attachment. On Windows the executable is reached through the npm shim's wrapped
+  `opencode.exe`, since the shim itself cannot be spawned. OpenCode exposes model and
+  effort config options but no ACP modes (`modes: null`), so there is no mode to relay;
+  its background `serve --service` daemon is provider-internal and outlives the ACP
+  adapter, which HLAO does kill with the session.
 
 ## What the product is
 
