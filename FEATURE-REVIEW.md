@@ -1,11 +1,11 @@
 # HLAO — Remaining feature and usage gaps
 
 **Originally reviewed:** 2026-10-19 (HLAO 0.1.0)
-**Updated:** 2026-10-21 after milestone 0.12. The additive 0.10 review was merged here and
+**Updated:** 2026-10-21 after milestone 0.13. The additive 0.10 review was merged here and
 deleted after its resolved findings were removed.
 **Scope:** unresolved findings only. This is the long-standing ledger. The 0.1–0.4 review, the
 0.5 review, and the 0.10 review were merged here; resolved items were removed. Shipped fixes
-are described in `docs/milestones/0.2.md` through `docs/milestones/0.12.md` and ADR 0005–0011.
+are described in `docs/milestones/0.2.md` through `docs/milestones/0.13.md` and ADR 0005–0012.
 
 The substrate is unchanged: five primitives, a per-user supervisor, a bounded cursor-addressed
 event log, identity at spawn, and one-shot waits. The gaps below are affordances around those
@@ -17,7 +17,8 @@ optional JSON envelope (protocol 2.2); 0.8 added message identity, the skill at 
 provenance, and process groups (protocol 2.3); 0.9 was maintenance with no behavior or wire
 change; 0.10 finished the truth pass and added crash/injection metadata (protocol 2.4); 0.11
 added provider-native state and elicitation (protocol 2.5/2.6); 0.12 added provider session
-resume and fork (protocol 2.7). None of that changes the primitive set.
+resume and fork (protocol 2.7); 0.13 added fleet observation and bulk operations (protocol
+2.8). None of that changes the primitive set.
 
 0.8 resolved N-07, N-12, N-14, the spawn requester record (part of N-08), P2-36, P2-0.5-26,
 P2-53, P2-0.5-3, P2-0.5-14, and P2-0.5-22. Attachments and `--context`/`--ledger` (N-13) are
@@ -35,8 +36,12 @@ ACP session messages and user-message chunks (R-12), and the residual agent iden
 0.12 resolved provider session continuity: resume (P0-14) and fork (R-19) through ACP
 `session/load` and `session/fork`, the provider session id as a durable handle, replay
 provenance, and the dashboard client update. Those entries were removed; the wire is now 2.7.
-The design also raised new concerns (RF-01 through RF-08 below), which remain open. R-14's
-mechanism and every other open finding are below.
+0.13 resolved the fleet-observation set: a merged live timeline (R-15), time/regex/context
+read filters (R-17), whole-instance export (R-18), width-aware and projectable list output
+(R-21, R-22), usage aggregation (R-23), readable cross-session search (R-25), and the
+first-prompt fallback (R-29). Those entries were removed; the wire is now 2.8. The design
+also raised new concerns (RF-01 through RF-08 below), which remain open. R-14's mechanism and
+every other open finding are below.
 
 ---
 
@@ -126,28 +131,6 @@ caller-owned `wait --until permission` notification loop the documented pattern.
 --all-pending` helps, but it needs an operator.
 
 **Effort:** S/M.
-
-### Fleet observation (from the 0.10 review)
-
-#### R-15. There is no fleet-level live event stream or merged timeline — P1
-
-`read` takes one id and follows one session; `list --watch` redraws state every interval but
-emits no events; `find` is a one-shot search. A new session that appears during a job is
-invisible until the caller re-lists and knows to follow it. There is no `hlao watch`, `read
---all --follow`, or merged chronological view.
-
-**Why it matters.** The operator's job in a fan-out is to notice the first worker that needs
-attention or reports a shared fact. Requiring one `read --follow` per known id is a client
-assembly HLAO could provide without adding a supervisor timer. It is the natural CLI use of the
-persistent stream added in 0.6.
-
-**Fix shape.** Add a caller-owned `hlao watch [--all|--root S] [--type T] [--grep TEXT]` that
-lists targets, follows each with the existing cursor, and interleaves events with session
-labels; or `read --all --follow`. Respect the same filters and backpressure. Do not put a timer
-or an index in the supervisor. A merged timeline should preserve per-session cursors and report
-when a session appears/disappears.
-
-**Effort:** M.
 
 ### Addressing and session identity
 
@@ -354,11 +337,7 @@ traceability.
 - **P2-2 — String options can still swallow a following flag.** Path, number, and duration
   options are strict, but e.g. `spawn --name --json` accepts `--json` as the name. Reject
   flag-like values for string options, or document that `--name=--json` is the escape hatch.
-- **P2-11 — `agents` left-truncates command paths.** CONFIG paths are middle-truncated; the
-  COMMAND column still cuts into a directory name. Use middle truncation or a basename. See
-  also R-21.
 - **P2-23 — No pager or wrapping.** A large read page or long tool title floods the terminal.
-  See also R-21.
 - **P2-33 — `agents` does not show configured environment keys.** `AgentView.envKeys` exists;
   the human table omits it. Add an `ENV` column or `--show-env` (never values).
 - **P2-0.5-1 — Leading global flags are incomplete.** `hlao --no-color list` and `-h` before a
@@ -412,16 +391,9 @@ traceability.
 | ID | Finding | Current | Suggested shape | Effort |
 |---|---|---|---|---|
 | R-16 | Project config is not discovered from subdirectories | `projectBackendsPath(cwd)` joins the effective cwd with `.hlao/agents.json`; from `<proj>/sub` neither `agents` nor `spawn --cwd .` finds the root config | Walk up to the first `.hlao/agents.json` (optionally stop at `.git`), document precedence, add `--no-project-config` | S/M |
-| R-17 | No time-range filtering or regex search | `read --since N` is a sequence cursor; `--grep` is a literal; no `--after`/`--before` time, `--regex`, or `--context` | Add time/duration filters over `event.at`, opt-in `--regex`, context lines, and the same flags on `find` | S/M |
-| R-18 | No instance-wide export/backup, though `down` discards everything | `export` takes one session; `down --dry-run` cannot save | `export --all --out DIR` with a manifest, and/or `down --export DIR`; report per-session failures and truncation | S/M |
 | R-20 | Queue pause/reorder is absent; cancel is destructive without a dry-run | `queue` lists and drops only; plain `cancel` discards the backlog; bulk cancel prints a count only | `queue hold`/`resume`/`move` (may need a small wire addition); `cancel --dry-run` and per-target output; print dropped previews | M for queue; S for dry-run |
-| R-21 | Tables do not adapt to terminal width | `list --wide --usage` produces a 237-character line; `agents` 198; no `process.stdout.columns` handling | Drop/shorten CWD, middle-truncate, add `--no-cwd`/`--fields`; width-aware by default in a TTY, full width otherwise | S/M |
-| R-22 | JSON is full-fidelity and pretty, so list/watch payloads scale badly | `list --json` is ~2 KB/session because every view carries `modes` and `configOptions`; `--watch --json` repeats it every interval | Add `--fields` and compact JSON; omit static options from list items; let watch emit changed fields; keep full view explicit | S/M |
-| R-23 | No usage/cost aggregation | `list --usage` shows the latest snapshot and a per-currency cost total; 0.10 added MODEL to `list --wide`, but there is no `hlao usage`, per-root/time-window total, or COST column | Add `hlao usage [--root] [--since] [--group session\|root\|model]` and a COST column; keep token snapshots non-additive; a budget remains N-11 | S/M |
 | R-24 | Retained closed sessions poison friendly names | A retained closed `echo1` and a new `echo1` make `read echo1` ambiguous for `retainClosedMs`; the error suggests neither the live id nor `--forget` | Prefer a live match, release the name at close, or block duplicate creation with a remedy; add the remedy to the error | S |
-| R-25 | `find` output is raw JSON, truncated without an ellipsis, and lacks context | Preview is `JSON.stringify(data).slice(0, 140)`, no session name/timestamp/context; "scan capped" conflates `--max` with the 20-page cap | Render a centered one-line snippet with `…`, name/id, time, and event title; add `--context`; separate the cap reasons; reuse R-17 filters | S |
 | R-27 | `option <id> <key>` cannot read one option | `option <id>` lists all and `<key> <value>` sets, but `<key>` alone errors | Allow reading one option's value and metadata; update help | S |
-| R-29 | No first-prompt display fallback | Provider titles land in `SessionView.title` (0.11) and `list`/`get` use them, but a session whose provider reports no title still shows the bare handle | Keep operator names authoritative; add a truncated first-prompt preview as a display-only fallback | S |
 | R-30 | Residual polish | `hlao logs` collides with session transcript naming; no `--color=always`; bidi controls are stripped (RTL tradeoff) | Add a `logs <id>` alias or document the distinction; add `--color auto\|always\|never`; document/soften the bidi tradeoff | S |
 
 ---
@@ -439,10 +411,13 @@ The remaining work is grouped so each milestone has one design decision:
 5. **0.12 — provider session continuity.** Shipped; resolved P0-14 and R-19 (resume/fork, the
    durable provider handle, and replay provenance; wire 2.7). See
    `docs/milestones/0.12.md`.
-6. **0.13 — fleet observation and bulk operations.** R-15, R-17, R-18, R-21, R-22, R-23, R-25,
-   R-29.
+6. **0.13 — fleet observation and bulk operations.** Shipped; resolved R-15, R-17, R-18,
+   R-21, R-22, R-23, R-25, and R-29 (watch, time/regex/context search, whole-instance export,
+   output scaling, usage aggregation, find output, and the first-prompt fallback; wire 2.8).
+   See `docs/milestones/0.13.md` and ADR 0012.
 7. **Safety and policy.** N-08 enforcement, N-10, N-11, R-14's mechanism, and RF-01 (orphan
-   safety). This may move ahead of 0.13 if risk dominates.
+   safety). This is the next milestone; each item changes authority or a default and needs a
+   product decision.
 8. **Provider continuity hardening.** RF-02 through RF-08: replay retention, live-session
    history, provider enumeration, cwd validation, fork-without-load, fork navigation, and
    real-adapter fidelity. Each is a recovery-semantics decision, not a new primitive.
@@ -464,8 +439,10 @@ the answer is recorded as an event.
 
 ## Note
 
-Everything above remains outside the implemented 0.12 surface. The implementation and its tests
+Everything above remains outside the implemented 0.13 surface. The implementation and its tests
 are described in `README.md`, `contracts/`, and `docs/milestones/0.2.md` through
-`docs/milestones/0.12.md`. 0.12 resolved provider session continuity (P0-14 and R-19), then
-recorded the hazards it deferred as RF-01 through RF-08. 0.11 resolved provider-native state
-(R-10..R-13) and merged the 0.10 review into this ledger.
+`docs/milestones/0.13.md`. 0.13 resolved the fleet-observation set and recorded its design
+decision in ADR 0012; the supervisor still owns no timer, index, or aggregate store. 0.12
+resolved provider session continuity (P0-14 and R-19), then recorded the hazards it deferred as
+RF-01 through RF-08. 0.11 resolved provider-native state (R-10..R-13) and merged the 0.10
+review into this ledger.

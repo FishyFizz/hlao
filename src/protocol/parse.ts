@@ -81,6 +81,20 @@ function optBoolean(object: JsonObject, key: string, what: string): boolean | un
   return value;
 }
 
+/** An ISO-8601 timestamp, normalized to UTC. `bad_request` when unparseable. */
+function optIso(object: JsonObject, key: string, what: string): string | undefined {
+  const value = optString(object, key, what, 40);
+  if (value === undefined) return undefined;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    throw new HlaoError(
+      "bad_request",
+      `${what}.${key} must be an ISO-8601 timestamp`,
+    );
+  }
+  return new Date(parsed).toISOString();
+}
+
 function optInt(
   object: JsonObject,
   key: string,
@@ -487,7 +501,20 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
       const object = asObject(raw, what);
       checkKeys(
         object,
-        ["sessionId", "since", "before", "limit", "raw", "types", "turn", "grep"],
+        [
+          "sessionId",
+          "since",
+          "before",
+          "limit",
+          "raw",
+          "types",
+          "turn",
+          "grep",
+          "afterAt",
+          "beforeAt",
+          "regex",
+          "context",
+        ],
         what,
       );
       const since = optInt(object, "since", what, 0, Number.MAX_SAFE_INTEGER);
@@ -498,6 +525,36 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
           `${what}.since and ${what}.before are mutually exclusive`,
         );
       }
+      const afterAt = optIso(object, "afterAt", what);
+      const beforeAt = optIso(object, "beforeAt", what);
+      if (
+        afterAt !== undefined &&
+        beforeAt !== undefined &&
+        Date.parse(afterAt) >= Date.parse(beforeAt)
+      ) {
+        throw new HlaoError(
+          "bad_request",
+          `${what}.afterAt must be earlier than ${what}.beforeAt`,
+        );
+      }
+      const grep = optString(object, "grep", what, 500);
+      const regex = optBoolean(object, "regex", what);
+      if (regex === true) {
+        if (grep === undefined || grep.length === 0) {
+          throw new HlaoError(
+            "bad_request",
+            `${what}.regex requires a non-empty ${what}.grep`,
+          );
+        }
+        try {
+          new RegExp(grep, "i");
+        } catch (error) {
+          throw new HlaoError(
+            "bad_request",
+            `${what}.grep is not a valid regular expression: ${(error as Error).message}`,
+          );
+        }
+      }
       return {
         sessionId: reqString(object, "sessionId", what, 1, 64),
         since,
@@ -506,7 +563,11 @@ export function parseParams<M extends Method>(method: M, raw: unknown): ParamsBy
         raw: optBoolean(object, "raw", what),
         types: eventTypeArray(object, "types", what),
         turn: optInt(object, "turn", what, 0, Number.MAX_SAFE_INTEGER),
-        grep: optString(object, "grep", what, 500),
+        grep,
+        afterAt,
+        beforeAt,
+        regex,
+        context: optInt(object, "context", what, 0, 20),
       } as ParamsByMethod[M];
     }
     case "sessions.wait": {

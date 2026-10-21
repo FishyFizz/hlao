@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { isTerminalStatus } from "../../protocol.js";
 
 
@@ -8,22 +9,30 @@ import { pidAlive, probeSupervisor, readLock, removeLock } from "../../lock.js";
 
 import { type ListResult } from "../../protocol.js";
 
-import { booleanOption, expectPositionals, parseArgs } from "../args.js";
+import {
+  booleanOption,
+  expectPositionals,
+  parseArgs,
+  stringOption,
+} from "../args.js";
 import { COMMON, contextFrom, out, writeJson } from "../context.js";
 import { helpRequested } from "../help.js";
 import { sanitize } from "../render.js";
+import { exportAll } from "./exporting.js";
 
 export async function cmdDown(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "force", type: "boolean" },
     { name: "dry-run", type: "boolean" },
+    { name: "export", type: "path", valueName: "DIR" },
   ]);
   if (helpRequested(parsed, "down")) return 0;
   expectPositionals(parsed, "down", 0, 0);
   const ctx = contextFrom(parsed);
   const force = booleanOption(parsed, "force") ?? false;
   const dryRun = booleanOption(parsed, "dry-run") === true;
+  const exportDir = stringOption(parsed, "export");
   const lock = readLock(ctx.home);
 
   if (!lock) {
@@ -69,12 +78,18 @@ export async function cmdDown(args: string[]): Promise<number> {
           live: live.length,
           retained,
           sessions: list.sessions,
+          ...(exportDir !== undefined
+            ? { exportDir: resolve(exportDir), exportCount: list.sessions.length }
+            : {}),
         });
         return 0;
       }
       out(
         ctx.style.dim(
-          `dry run; ${live.length} live · ${retained} retained`,
+          `dry run; ${live.length} live · ${retained} retained` +
+            (exportDir !== undefined
+              ? ` · would export ${list.sessions.length} session${list.sessions.length === 1 ? "" : "s"} to ${exportDir}`
+              : ""),
         ),
       );
       for (const session of list.sessions) {
@@ -106,6 +121,26 @@ export async function cmdDown(args: string[]): Promise<number> {
       );
     }
 
+    let exported = 0;
+    if (exportDir !== undefined) {
+      const manifest = await exportAll(conn, resolve(exportDir), {
+        raw: false,
+        jsonl: false,
+      });
+      exported = manifest.sessions.length - manifest.failures;
+      if (manifest.failures > 0) {
+        throw new HlaoError(
+          "internal",
+          `export to ${exportDir} failed for ${manifest.failures} session${manifest.failures === 1 ? "" : "s"}; refusing to stop (see manifest.json)`,
+        );
+      }
+      if (!ctx.json) {
+        out(
+          `exported ${exported} session${exported === 1 ? "" : "s"} to ${exportDir}`,
+        );
+      }
+    }
+
     const result = await conn.request<{
       sessionsClosed: number;
       retainedDiscarded: number;
@@ -116,7 +151,15 @@ export async function cmdDown(args: string[]): Promise<number> {
         "the supervisor accepted shutdown but its lock is still present",
       );
     }
-    if (ctx.json) writeJson({ stopped: true, ...result });
+    if (ctx.json) {
+      writeJson({
+        stopped: true,
+        ...result,
+        ...(exportDir !== undefined
+          ? { exported, exportDir: resolve(exportDir) }
+          : {}),
+      });
+    }
     else {
       out(
         `supervisor stopped (${result.sessionsClosed} session${result.sessionsClosed === 1 ? "" : "s"} closed` +
@@ -128,6 +171,9 @@ export async function cmdDown(args: string[]): Promise<number> {
     }
     return 0;
   } catch (error) {
+    // An export is a safety promise; never fall through to a kill when it
+    // could not run.
+    if (exportDir !== undefined) throw error;
     if (!force) throw error;
     if (ctx.callerSessionId !== null) throw error;
 

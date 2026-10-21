@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.13.0 — unreleased
+
+### Added
+
+- `hlao watch [--all | --root S] [--type T] [--grep TEXT] [--regex]` — one merged live
+  timeline across the fleet. It is a client over the persistent stream added in 0.6: one
+  fleet subscription (chunked to the wire's 100-id limit), per-session cursors, and a
+  resubscribe when a new session appears. The supervisor gains no timer, index, or merged
+  store. History is not replayed; `read` and `export` remain the history path.
+- `hlao usage [--root S] [--since TIME] [--until TIME] [--group session|root|model]` —
+  fleet cost and context snapshots. Cost is additive and totalled per currency; context is a
+  per-session snapshot and is never summed. A time window reads the latest `usage` event per
+  session inside the window.
+- Read filters for time, expressions, and context:
+  - `read --after TIME` / `--until TIME` bound events by `event.at` (ISO-8601, `now`, or a
+    duration with a unit meaning "that long ago").
+  - `read --regex` interprets `--grep` as a case-insensitive regular expression.
+  - `read --context N` returns up to N retained neighbors around each match and reports
+    `matchedSeqs`. `--limit` still bounds matches, not the page size.
+  - `find` accepts the same time/regex/context filters.
+- `export --all --out DIR` writes one `<id>.json` (or `.jsonl`) file per session plus
+  `manifest.json`, with per-session counts, truncation, and failures. It refuses to overwrite
+  an existing export. `down --export DIR` runs the same export before shutdown and refuses to
+  stop when any session fails.
+- `SessionView.firstPrompt` — a bounded, display-only preview of the first prompt. Human
+  `list`/`read`/`get` use it after an operator name and a provider title, so an unnamed
+  session no longer shows only a bare handle.
+- List output controls: `--fields a,b,c` selects human columns in the caller's order,
+  `--no-cwd` drops CWD, and `--compact` omits `modes` and `configOptions` from `list --json`
+  items (`get` still returns them). In a TTY, the table drops optional columns (CWD first)
+  and shortens long cells to fit the terminal; piped output keeps the full width.
+- Protocol 2.8 (additive): capabilities `read.time`, `read.regex`, `read.context`, and
+  `session.firstPrompt`; `ReadParams.afterAt`/`beforeAt`/`regex`/`context`;
+  `ReadResult.matchedSeqs`; and `SessionView.firstPrompt`.
+
+### Changed
+
+- `find` human output now prints a centered one-line snippet with time, session label, seq,
+  and type, and marks the matching line with `›`. It distinguishes "stopped at --max" from
+  "page cap reached", reports sessions it could not read, and uses the same filter flags as
+  `read`. JSON results keep `matches`/`capped` and add `cappedByMax`, `cappedByPages`, and
+  `errors`.
+- `list --json` keeps its full-fidelity default; `--compact` is opt-in because the dashboard
+  reads provider modes and config options from list views.
+
+### Fixed
+
+- `find` no longer swallows a per-session read failure: the session is reported in human
+  output and in JSON `errors`.
+
 ## 0.12.0 — unreleased
 
 ### Added

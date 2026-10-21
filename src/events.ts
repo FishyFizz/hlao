@@ -17,6 +17,12 @@ export interface EventReadOptions {
   types?: EventType[];
   turn?: number;
   grep?: string;
+  /** Inclusive lower time bound, epoch milliseconds. */
+  afterAt?: number;
+  /** Exclusive upper time bound, epoch milliseconds. */
+  beforeAt?: number;
+  /** Interpret `grep` as a case-insensitive regular expression. */
+  regex?: boolean;
 }
 
 export interface EventReadResult {
@@ -31,6 +37,8 @@ export interface EventReadResult {
 
 interface StoredEvent extends EventView {
   bytes: number;
+  /** `at` as epoch milliseconds, so time filters do not re-parse ISO strings. */
+  atMs: number;
 }
 
 export interface EventLogOptions {
@@ -80,9 +88,11 @@ export class EventLog {
     this.#lastSeq = seq;
 
     const bounded = boundData(input.data ?? {}, this.#maxEventBytes);
+    const at = nowIso();
     const event: StoredEvent = {
       seq,
-      at: nowIso(),
+      at,
+      atMs: Date.parse(at),
       type: input.type,
       turn: input.turn ?? null,
       data: bounded,
@@ -318,24 +328,40 @@ function createMatcher(
   const types =
     options.types && options.types.length > 0 ? new Set(options.types) : null;
   const turn = options.turn;
-  const grep =
-    options.grep !== undefined && options.grep.length > 0
-      ? options.grep.toLowerCase()
-      : null;
-  if (types === null && turn === undefined && grep === null) return () => true;
+  const rawGrep =
+    options.grep !== undefined && options.grep.length > 0 ? options.grep : null;
+  const grep = rawGrep !== null && options.regex !== true ? rawGrep.toLowerCase() : null;
+  const regex = rawGrep !== null && options.regex === true
+    ? new RegExp(rawGrep, "i")
+    : null;
+  const afterAt = options.afterAt;
+  const beforeAt = options.beforeAt;
+  if (
+    types === null &&
+    turn === undefined &&
+    grep === null &&
+    regex === null &&
+    afterAt === undefined &&
+    beforeAt === undefined
+  ) {
+    return () => true;
+  }
 
   return (event) => {
     if (types !== null && !types.has(event.type)) return false;
     if (turn !== undefined && event.turn !== turn) return false;
-    if (grep !== null) {
+    if (afterAt !== undefined && event.atMs < afterAt) return false;
+    if (beforeAt !== undefined && event.atMs >= beforeAt) return false;
+    if (grep !== null || regex !== null) {
       const data = options.raw ? event.data : stripPrivateData(event.data);
       let haystack: string;
       try {
-        haystack = `${event.type} ${JSON.stringify(data)}`.toLowerCase();
+        haystack = `${event.type} ${JSON.stringify(data)}`;
       } catch {
-        haystack = event.type.toLowerCase();
+        haystack = event.type;
       }
-      if (!haystack.includes(grep)) return false;
+      if (grep !== null && !haystack.toLowerCase().includes(grep)) return false;
+      if (regex !== null && !regex.test(haystack)) return false;
     }
     return true;
   };

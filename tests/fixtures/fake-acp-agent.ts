@@ -648,11 +648,27 @@ const app = agent({ name: "fake-acp" })
       await message(" | chunk-2");
       await message(" | chunk-3");
     }
-    await send({
-      sessionUpdate: "usage_update",
-      used: 42,
-      size: 200_000,
-    });
+    if (mode === "usage") {
+      await send({
+        sessionUpdate: "usage_update",
+        used: 1_200,
+        size: 200_000,
+        cost: { amount: 125, currency: "USD" },
+      });
+      await send({
+        sessionUpdate: "usage_update",
+        used: 1_450,
+        size: 200_000,
+        cost: { amount: 250, currency: "USD" },
+      });
+    }
+    if (mode !== "usage") {
+      await send({
+        sessionUpdate: "usage_update",
+        used: 42,
+        size: 200_000,
+      });
+    }
     return { stopReason: "end_turn" } satisfies PromptResponse;
   });
 

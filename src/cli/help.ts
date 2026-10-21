@@ -1,5 +1,6 @@
 import { booleanOption, type ParsedArgs } from "./args.js";
 import { writeJson } from "./context.js";
+import { SESSION_FIELD_NAMES } from "./render.js";
 
 export function helpRequested(parsed: ParsedArgs, command: string): boolean {
   if (booleanOption(parsed, "help") === true) {
@@ -25,17 +26,24 @@ Usage:
   hlao spawn <backend> [message] [options]     open a session
   hlao send [<id>] [message] [--wait]          queue a prompt
   hlao read [<id>] [--since N | --before N] [--type T] [--grep TEXT]
+                [--after TIME] [--until TIME] [--regex] [--context N]
                                              read orchestration state + events
   hlao read [<id>] --follow [--jsonl] [--out FILE]
                                              watch new events / save one page
   hlao export [<id>] [--out FILE] [--jsonl]  full retained history
+  hlao export --all --out DIR                 every session plus a manifest
+  hlao watch [--all | --root S] [--type T] [--grep TEXT] [--regex]
+                                             merged live timeline across sessions
   hlao wait [<id>...] [--any|--all] [--until idle|settled|permission|exit|change]
                 [--root S | --status S | --idle DUR]   one-shot await, one or many
                                              sessions; selectors are a client assembly
   hlao get [<id>]                              one session's state, no events
-  hlao find TEXT [--all] [--type T]            search events across sessions
+  hlao find TEXT [--all] [--type T] [--after TIME] [--until TIME] [--regex]
+                [--context N]                  search events across sessions
+  hlao usage [--root S] [--since TIME] [--until TIME] [--group session|root|model]
+                                             fleet cost and context snapshots
   hlao list [--all] [--cwd DIR]                sessions in this instance
-  hlao list [--wide] [--usage] [--tree] [--watch]
+  hlao list [--wide] [--usage] [--tree] [--watch] [--fields LIST] [--no-cwd]
                                              dashboard / usage / lineage
   hlao cancel [<id>]                           stop the active turn; discard queue
   hlao close [<id>] [--force] [--tree]         end a session
@@ -57,7 +65,8 @@ Usage:
   hlao doctor [--start] [--probe]                 environment and connectivity checks
   hlao whoami                                  this shell's identity and lineage
   hlao skill [path]                            the agent-facing HLAO skill
-  hlao down [--force]                          stop the supervisor
+  hlao down [--force] [--export DIR]           stop the supervisor; optionally
+                                             export every session first
   hlao help [command]                          this help or one command
   hlao version
 
@@ -83,6 +92,8 @@ Identity:
   hlao whoami reports what this shell is.
 
 Durations: 500ms, 30s, 5m, 2h, 1d, or a bare millisecond count. 0 disables.
+Times: an ISO-8601 timestamp, "now", or a duration with a unit meaning "that
+  long ago" (for example --after 2h, --until 30m).
 
 Exit codes: 0 ok · 1 error · 2 a bounded wait expired (work continues) ·
   3 the awaited condition was lost because the session ended.
@@ -155,6 +166,8 @@ const COMMAND_HELP_NAMES = new Set([
   "wait",
   "get",
   "find",
+  "usage",
+  "watch",
   "list",
   "cancel",
   "close",
@@ -257,6 +270,11 @@ Options:
   --type TYPE            keep only this event type; repeatable
   --turn N               keep only this turn
   --grep TEXT            case-insensitive literal over one event's type and data
+  --regex                interpret --grep as a case-insensitive regular expression
+  --context N            include up to N retained neighbors around each match
+                         (0..20; --limit still bounds matches)
+  --after TIME           keep events at or after TIME
+  --until TIME           keep events strictly before TIME (not with --follow)
   --fail-on-error        with --follow, exit 3 when the session failed
   --verbose              human mode: include bounded tool input/output
   --raw                  with --json, include original ACP payloads; in human
@@ -272,6 +290,9 @@ The response reports earliestRetainedSeq, lastSeq, nextSeq, nextBefore,
 hasMore, and truncated. Filters are applied before the page limit, and cursors
 advance past non-matching events. Tool payloads are omitted unless
 --raw/--verbose; --grep does not search private payloads without --raw.
+With --context, matchedSeqs lists the events that matched and the rest of the
+page is their neighbors; cursors still advance by matches, so a neighbor may
+repeat on the next page.
 
 Agent text is streamed as chunks. Human output joins adjacent chunks, but grep
 matches one event at a time, so a phrase split across chunks will not match.`,
@@ -281,7 +302,7 @@ Print one session's orchestration state without reading events: status, turn,
 queue, settlement, provider title, agent name/version, plan, compaction, policy,
 modes, config options, usage, pending permission, and lineage. --brief prints
 only the header. Inside a session, omit <id> or pass --self.`,
-    find: `hlao find TEXT [--all] [--type TYPE]... [--max N]
+    find: `hlao find TEXT [--all] [--type TYPE]... [--max N] [options]
 
 Search events across sessions. It is a bounded client loop: list sessions, then
 page each transcript with read --grep. By default only live sessions are
@@ -289,9 +310,14 @@ scanned; --all includes retained closed/failed ones.
 
   --type TYPE   keep only these event types; repeatable
   --max N       stop after N matches (1..10000, default 1000)
+  --after TIME  keep events at or after TIME
+  --until TIME  keep events strictly before TIME
+  --regex       interpret TEXT as a case-insensitive regular expression
+  --context N   show up to N neighboring events around each match (0..20)
 
-The scan is capped at 20 pages per session; the summary says when a session was
-capped. Exit 0 with "no matches" when nothing matched.`,
+Each match prints its time, session label, seq, type, and a one-line snippet.
+The summary separates "stopped at --max" from "page cap reached" and names
+sessions that could not be read. Exit 0 with "no matches" when nothing matched.`,
     export: `hlao export [<id>] [options]
 
 Export the session's full retained history, paging until no events remain.
@@ -300,14 +326,57 @@ bounded page by design.
 
 Options:
   --self                 target this shell's own session
+  --all                   export every session; requires --out DIR
   --since N              start after this seq (default 0: all retained events)
   --raw                  include original ACP payloads
   --jsonl                one event object per line (not with --json)
-  --out FILE             write to FILE instead of stdout
+  --out FILE|DIR         write to FILE; with --all, a directory
 
 Without --out the JSON result is written to stdout, so redirecting it is safe.
 The result reports count and whether history was already truncated; human
-output names the file and the event count.`,
+output names the file and the event count.
+
+With --all, each session is written as <id>.json (or <id>.jsonl) plus
+manifest.json, which records per-session counts, truncation, and failures.
+The command refuses to overwrite an existing export in the directory. It exits
+1 when any session failed; the manifest is still written.`,
+    watch: `hlao watch [--all | --root SESSION] [--type TYPE]... [--grep TEXT]
+             [--regex] [--verbose] [--json]
+
+Follow every live session in one merged timeline. Events from different
+sessions are interleaved in delivery order and labelled with the session's
+name (or provider title, first prompt, then id). New sessions are attached
+when the supervisor announces them; a session that disappears is reported.
+
+  --all          also include retained closed/failed sessions (they emit
+                 nothing new)
+  --root S       only that session's root subtree
+  --type TYPE    keep only these event types; repeatable
+  --grep TEXT    case-insensitive literal over type and event data
+  --regex        interpret --grep as a case-insensitive regular expression
+  --verbose      append a bounded data preview to each line
+  --json         one JSON object per line: session.joined, event, or
+                 session.removed
+
+History is not replayed: watch starts at each session's current cursor. Use
+"hlao read" or "hlao export" for retained history. The supervisor owns no
+timer; the CLI holds the subscription and reconnects with its cursors if the
+stream drops. JSON event lines carry {kind:"event", sessionId, event}.`,
+    usage: `hlao usage [--root SESSION] [--since TIME] [--until TIME]
+            [--group session|root|model]
+
+Report fleet usage. Without a window, this projects the latest usage snapshot
+every session already carries. With --since/--until, it reads the latest
+"usage" event per session inside the window (where the log still retains it).
+
+  --root S       keep only that session's root subtree
+  --since TIME   start of the window
+  --until TIME   end of the window
+  --group G      session (default), root, or model
+
+Cost is additive and is totalled per currency. Tokens are context-window
+snapshots, never summed; grouped views therefore show sessions and cost only.
+This is observation, not a budget: a caller stops work with wait/read loops.`,
     wait: `hlao wait [<id>...] [options]
 
 One-shot await on orchestration state. It never re-arms.
@@ -353,6 +422,7 @@ a target still waiting when the wait resolves is reported as "pending". A
 timeout exits 2. A terminal session before the condition is unsatisfied and
 exits 3, except for settled and exit, where termination is completion.`,
     list: `hlao list [--all] [--cwd DIR] [--wide] [--usage] [--tree] [--watch]
+             [--fields LIST] [--no-cwd] [--compact]
 
 List sessions in this HLAO instance. A session is shown by id and name; every
 session in the instance is addressable by every caller. The footer reports the
@@ -366,7 +436,13 @@ never change the instance counts in the footer. --sort created|activity (human
 default: activity). --wide adds BUSY, POLICY, REQUESTER, MODEL, AGENT, MODE,
 PENDING, and EXIT; --usage adds USAGE/COST and a per-currency footer total; --tree
 groups and indents by lineage. --watch redraws every --interval DUR (default 2s; JSON
-emits one result per line) until Ctrl-C.`,
+emits one result per line) until Ctrl-C.
+
+Output width: in a TTY, columns are dropped (CWD first) and long cells are
+shortened to fit the terminal. Piped output keeps the full table. --no-cwd
+drops CWD explicitly; --fields a,b,c selects columns in your order (known
+columns: ${SESSION_FIELD_NAMES.join(", ")}). --compact applies to --json and
+omits modes and configOptions from list items; "hlao get" still returns them.`,
     cancel: `hlao cancel [<id>] [--keep-queue] [--wait]
 
 Request ACP session/cancel for the active turn. By default every queued message
@@ -523,12 +599,18 @@ Spawned sessions get its path in $HLAO_SKILL and a one-line pointer in their fir
 
 Report this shell's role, session id, parent, root, depth, and backend from the
 HLAO_* environment. An operator shell has no session id.`,
-    down: `hlao down [--force]
+    down: `hlao down [--force] [--export DIR]
 
 Ask the supervisor to close all sessions and exit. This ends every live session
 and loses the in-memory history of live and retained sessions; export anything
-you need first with "hlao export <id> --out FILE". --force kills the process
-and removes the lock when the normal path is not available.`,
+you need first with "hlao export <id> --out FILE".
+
+  --export DIR   export every session and manifest.json to DIR before stopping.
+                 If any session fails to export, shutdown is refused.
+  --force        kill the process and remove the lock when the normal path is
+                 not available. With --export, the export must still succeed.
+
+--dry-run reports what would be exported and closed without changing anything.`,
   };
   return help[command] ?? fullHelp();
 }

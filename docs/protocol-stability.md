@@ -114,7 +114,8 @@ handling should be exercised against a slow/stalled consumer before it is truste
    WebSocket) is not shipped; local IPC is the supported dashboard transport today.
 8. **Capabilities to gate:** `stream.persistent`, `stream.subscribe`, `stream.resume`,
    `session.usage`, `session.settled`, `session.lastEvent`, `send.messageId`,
-   `spawn.resume`, `spawn.fork`, and the 2.5 provider-state capabilities
+   `spawn.resume`, `spawn.fork`, `read.time`, `read.regex`, `read.context`,
+   `session.firstPrompt`, and the 2.5 provider-state capabilities
    (`session.compaction`,
    `session.notices`, `session.plan`, `session.title`, `session.agent`, `session.messages`).
    A missing capability means "render the old view", not "fail the dashboard". A dashboard
@@ -123,10 +124,11 @@ handling should be exercised against a slow/stalled consumer before it is truste
 
 ## Known gaps and how to handle them now
 
-- **No fleet-wide event stream.** `fleet` is views only. Use the two-subscription pattern
-  above. The 100-id-per-subscription limit is fine for a single-screen dashboard; a very large
-  fleet needs multiple subscriptions or a selected-session view. A fleet event scope is a
-  candidate for the fleet-observation milestone (R-15/0.12), not a blocker.
+- **Fleet events are a client assembly.** `fleet` is views only; per-session events require
+  the ids in `sessionIds`. `hlao watch` is the reference implementation: chunk the target set
+  to the 100-id limit, keep per-session cursors, attach new sessions by resubscribing, and
+  reconnect with the same cursors. A dashboard can reuse that pattern; there is no
+  supervisor-side merged stream or fleet event scope.
 - **Provider-native state is first-class as of 0.11.** Compaction, plans, titles, agent
   identity, and ACP session messages are projected into `SessionView` and structured events.
   Gate them on the `session.compaction`, `session.notices`, `session.plan`, `session.title`,
@@ -135,7 +137,8 @@ handling should be exercised against a slow/stalled consumer before it is truste
 - **No wire `logs`/`config show`/`find`/`usage` aggregation.** These are CLI-local or client
   assemblies. A dashboard that needs supervisor logs must read the file locally (as `hlao logs`
   does) or wait for a wire method; do not infer them from events. Usage per session is in
-  `SessionView`; per-job aggregation is R-23.
+  `SessionView`; `hlao usage` aggregates it client-side and there is no wire aggregation
+  method. Time/regex/context reads are on the wire (2.8) and are reusable by any client.
 - **No heartbeat.** Local IPC closes reliably when the supervisor dies; a bridge over a
   network transport should add its own heartbeat above the frame layer. The wire itself adds no
   timer, by design.
@@ -156,9 +159,11 @@ handling should be exercised against a slow/stalled consumer before it is truste
 - [ ] `truncated` is surfaced in the transcript, not hidden.
 - [ ] Unknown event types and fields have a generic fallback.
 - [ ] The token never reaches a browser origin.
-- [ ] The UI has optional slots for compaction, plan, title, and agent identity, gated on the
-      2.5 capabilities.
+- [ ] The UI has optional slots for compaction, plan, title, first prompt, and agent identity,
+      gated on the 2.5/2.8 capabilities.
+- [ ] Read time/regex/context filters are offered only when the corresponding capability is
+      present.
 
 **Conclusion:** the dashboard can start now against wire major 2 with capability detection.
-0.11's provider-state additions are in wire 2.5 and are additive; a 2.4 client ignores them, so
+0.13's observation additions are in wire 2.8 and are additive; a 2.7 client ignores them, so
 the same view can grow without a protocol break or a second surface.

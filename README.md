@@ -88,12 +88,14 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 |---|---|
 | `hlao spawn <backend> [message]` | Open a session from a configured backend. Inject identity and the skill pointer, optionally send the first message. `--name` gives it a label; `--no-skill` omits the pointer; `--idempotency-key KEY` reuses a session from a retried spawn; `--resume PROVIDER_ID` reopens the provider session an earlier spawn reported, replaying its durable history through ACP `session/load`; `--fork PROVIDER_ID` copies it through ACP `session/fork` and leaves the source untouched. |
 | `hlao send [<id>] [message]` | Queue a prompt. `--self` targets the caller's session. `--wait` waits for that message's turn. `--stdin` or `--prompt` supplies the text. Every send returns a `msg-…` id; `--idempotency-key KEY` makes a retry return the original instead of enqueuing twice. |
-| `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep`; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
-| `hlao export <id> [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. |
+| `hlao read [<id>] [--since N \| --before N]` | Orchestration state plus a bounded page of typed events. Filters `--type`, `--turn`, `--grep` (literal or `--regex`), `--after`/`--until` time bounds, and `--context N` neighbors; `--follow` keeps reading; `--jsonl` streams one event per line; `--out FILE` saves the page; `--verbose` includes bounded tool payloads; `--raw` includes original ACP payloads. Compaction, plan deltas, provider messages, and user lines render as first-class events. |
+| `hlao export [<id>] [--out FILE]` | Page the full retained history to JSON (or `--jsonl`). Reports the count and whether earlier history was already evicted. `--all --out DIR` writes every session plus `manifest.json`; it refuses to overwrite an existing export. |
 | `hlao get [<id>]` | One session's orchestration state without reading events, including provider title, agent/version, plan, compaction, usage, pending permission or question, and lineage. |
-| `hlao find TEXT` | Search events across sessions (`list` + paged `read --grep`); `--all` includes retained histories. |
+| `hlao find TEXT` | Search events across sessions (`list` + paged `read --grep`) with the same time/regex/context filters. Prints a time, session, seq, and one-line snippet per match; `--all` includes retained histories. |
+| `hlao watch [--all \| --root S]` | One merged live timeline across the fleet over the persistent stream. Attaches sessions that appear, labels events by session, reconnects with cursors, and filters with `--type`, `--grep`, and `--regex`. History is not replayed; use `read`/`export`. |
+| `hlao usage [--root S] [--since T] [--until T]` | Fleet cost and context snapshots, grouped by `session`, `root`, or `model`. Cost is additive per currency; context is never summed. A window reads the latest `usage` event per session. |
 | `hlao wait <id>... [--any \| --all] [--until ...]` | One-shot await on `idle`, `settled`, `permission`, `exit`, or a filtered `change`, for one session or a list. A timeout returns 2; a session that ended first returns 3 (for `settled`, termination is a valid completion). |
-| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/requester/model/agent/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). |
+| `hlao list [--all] [--cwd DIR]` | All sessions in this HLAO instance, with an instance footer and the caller marked. `--wide` adds policy/requester/model/agent/mode/pending/exit; `--usage` adds the latest tokens/cost and a total; `--tree` shows lineage; filters, `--mine` (the caller's root subtree), and `--sort activity\|created` narrow the view; `--watch` redraws (NDJSON with `--json`). In a TTY, columns drop (CWD first) and long cells shorten to fit; `--fields`, `--no-cwd`, and `--compact` project the table or JSON. |
 | `hlao cancel [<id>]` | Stop the active turn and discard queued messages. `--keep-queue` stops only the turn. |
 | `hlao close [<id>] [--tree]` | End a session; `--tree` closes descendants first. Bulk selectors `--idle DUR`, `--status S`, `--root S` support `--dry-run`; `--forget` removes terminal rows. |
 | `hlao permit [<id>] --allow` | Answer the pending permission request. `--deny` or `--option ID` also work; `--always` stops future asks for the session. |
@@ -111,7 +113,7 @@ available adapter through ACP `initialize` + `session/new` and closes it.
 | `hlao doctor [--start] [--probe]` | Diagnose locally; opt in to starting the supervisor or probing adapters. |
 | `hlao whoami` | This shell's role, name, and lineage. Reads the live name when the supervisor is up; never starts one. |
 | `hlao skill [--path]` | Print the HLAO skill (also at `$HLAO_SKILL`); `--path` prints its location. |
-| `hlao down [--force]` | Close every session and stop the supervisor. `--force` kills only a process that answers as the supervisor; an unverified stale lock is removed without touching its pid. |
+| `hlao down [--force] [--export DIR]` | Close every session and stop the supervisor. `--export DIR` backs up every session and a manifest first and refuses to stop if any export failed; `--dry-run` reports without writing. `--force` kills only a process that answers as the supervisor; an unverified stale lock is removed without touching its pid. |
 | `hlao help [command]` | Full help or one command's help. |
 | `hlao version` | Print the CLI version (`--json` for an object). |
 
@@ -144,7 +146,11 @@ provider title is used as a dim display fallback when the operator gave no name.
 `wait --until change`, repeating until the session ends or Ctrl-C. With `--json`, each page is
 one JSON object per line, so a stream can be consumed without framing. The supervisor still
 owns no timer. `read --out FILE` writes the current page as JSON while normal output continues;
-it is the supported export path before `down`.
+`export --all --out DIR` and `down --export DIR` are the whole-instance backup paths.
+
+`hlao watch` is the fleet version of `read --follow`: one merged, labelled timeline over the
+persistent stream, with per-session cursors, mid-stream session attachment, and reconnect.
+`hlao usage` aggregates the cost and context snapshots each session already reports.
 
 `hlao list --watch` redraws the visible sessions every `--interval` (default 2s) and never
 starts a supervisor timer. `--wide` adds busy time, policy, requester, model, agent, mode,
@@ -187,8 +193,8 @@ agent  -> CLI / MCP        --/
 
 Call `hello` first: it returns `protocolVersion: { major, minor }` and a capability list.
 Major versions must match; minor versions are additive. The same contract defines
-`backends.list`, filtered and backward reads, multi-id `wait`, and the `usage` field on every
-session view.
+`backends.list`, filtered/backward/time reads with optional context, multi-id `wait`, and the
+`usage` and `firstPrompt` fields on every session view.
 
 Polling `sessions.list`/`sessions.read` is the 2.0 live-update model and remains supported.
 Protocol 2.1 adds an opt-in persistent stream: `hello` with `stream.persistent`, then

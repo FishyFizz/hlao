@@ -21,7 +21,11 @@ import {
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
-import { renderSessionTable } from "../render.js";
+import {
+  SESSION_FIELD_NAMES,
+  renderSessionTable,
+  type SessionField,
+} from "../render.js";
 import {
   displayStatus,
   isTerminal,
@@ -45,6 +49,9 @@ interface ListRender {
   wide: boolean;
   tree: boolean;
   usage: boolean;
+  fields?: SessionField[];
+  noCwd: boolean;
+  compact: boolean;
   sort: "created" | "activity";
 }
 
@@ -63,6 +70,9 @@ export async function cmdList(args: string[]): Promise<number> {
     { name: "wide", type: "boolean" },
     { name: "tree", type: "boolean" },
     { name: "usage", type: "boolean" },
+    { name: "fields", type: "string", valueName: "LIST" },
+    { name: "no-cwd", type: "boolean" },
+    { name: "compact", type: "boolean" },
     { name: "sort", type: "string", valueName: "created|activity" },
     { name: "watch", type: "boolean" },
     { name: "interval", type: "duration", valueName: "DUR" },
@@ -89,10 +99,21 @@ export async function cmdList(args: string[]): Promise<number> {
     cwd: resolveOptional(stringOption(parsed, "cwd")),
     cwdPrefix: resolveOptional(stringOption(parsed, "cwd-prefix")),
   };
+  const fields = parseFields(stringOption(parsed, "fields"));
+  const compact = booleanOption(parsed, "compact") === true;
+  if (fields !== undefined && ctx.json) {
+    throw usageError("--fields selects human columns; use --compact for JSON");
+  }
+  if (compact && !ctx.json) {
+    throw usageError("--compact requires --json or --watch --json");
+  }
   const render: ListRender = {
     wide: booleanOption(parsed, "wide") === true,
     tree: booleanOption(parsed, "tree") === true,
     usage: booleanOption(parsed, "usage") === true,
+    fields,
+    noCwd: booleanOption(parsed, "no-cwd") === true,
+    compact,
     sort: sortOption ?? (ctx.json ? "created" : "activity"),
   };
   const showClosed =
@@ -136,7 +157,7 @@ export async function cmdList(args: string[]): Promise<number> {
   );
   const counts = instanceCounts(result.sessions);
   if (ctx.json) {
-    writeJson({ sessions, counts });
+    writeJson({ sessions: projectSessions(sessions, render.compact), counts });
     return 0;
   }
   if (sessions.length === 0) {
@@ -157,6 +178,9 @@ export async function cmdList(args: string[]): Promise<number> {
       wide: render.wide,
       tree: render.tree,
       usage: render.usage,
+      fields: render.fields,
+      noCwd: render.noCwd,
+      width: tableWidth(),
     }),
   );
   out(
@@ -190,7 +214,7 @@ async function watchList(
     );
     if (ctx.json) {
       writeJsonLine({
-        sessions,
+        sessions: projectSessions(sessions, render.compact),
         counts: instanceCounts(result.sessions),
       });
     } else {
@@ -211,6 +235,9 @@ async function watchList(
           wide: render.wide,
           tree: render.tree,
           usage: render.usage,
+          fields: render.fields,
+          noCwd: render.noCwd,
+          width: tableWidth(),
         }),
       );
       out(
@@ -226,6 +253,44 @@ async function watchList(
     first = false;
     await sleepMs(interval);
   }
+}
+
+/** Strip static, per-session provider options from list payloads. `get` keeps them. */
+function projectSessions(
+  sessions: SessionView[],
+  compact: boolean,
+): SessionView[] | Record<string, unknown>[] {
+  if (!compact) return sessions;
+  return sessions.map((session) => {
+    const copy = { ...session } as Record<string, unknown>;
+    delete copy.modes;
+    delete copy.configOptions;
+    return copy;
+  });
+}
+
+function tableWidth(): number | undefined {
+  return process.stdout.isTTY === true ? process.stdout.columns : undefined;
+}
+
+function parseFields(raw: string | undefined): SessionField[] | undefined {
+  if (raw === undefined) return undefined;
+  const names = raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  if (names.length === 0) {
+    throw usageError(`--fields needs at least one column (${SESSION_FIELD_NAMES.join(", ")})`);
+  }
+  const unknown = names.filter(
+    (name) => !(SESSION_FIELD_NAMES as readonly string[]).includes(name),
+  );
+  if (unknown.length > 0) {
+    throw usageError(
+      `unknown --fields ${unknown.join(", ")} — known columns: ${SESSION_FIELD_NAMES.join(", ")}`,
+    );
+  }
+  return names as SessionField[];
 }
 
 export function parseStatuses(raw: string | undefined): string[] | undefined {

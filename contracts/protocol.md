@@ -263,7 +263,8 @@ The token is the instance boundary.
   `wait.filters`, `session.settled`, `session.lastEvent`, `send.messageId`, `send.idempotency`,
   `spawn.idempotency`, `spawn.createdBy`, `supervisor.lastCrash`, `prompt.injected`,
   `session.compaction`, `session.notices`, `session.plan`, `session.title`, `session.agent`,
-  `session.messages`, `session.elicitation`, `spawn.resume`, `spawn.fork`.
+  `session.messages`, `session.elicitation`, `spawn.resume`, `spawn.fork`,
+  `read.time`, `read.regex`, `read.context`, `session.firstPrompt`.
 - Adding an optional request field, a result field, a method, or an event type is a minor
   change. Changing or removing existing semantics is a major change.
 - **2.0** removes the `scope` field and makes every session in an instance addressable by every
@@ -294,6 +295,12 @@ The token is the instance boundary.
   `SpawnResult.resumed`/`forked`, `SessionView.forkedFrom`, the `session.resumed` and
   `session.forked` event types, and optional `EventView.replay`. Capabilities:
   `spawn.resume`, `spawn.fork`. A client that ignores them is unaffected.
+- **2.8** adds observation filters and a display fallback: `sessions.read` accepts
+  `afterAt`/`beforeAt` (ISO timestamps), `regex` (interpret `grep` as a case-insensitive
+  expression), and `context` (include retained neighbors around matches); `ReadResult` gains
+  optional `matchedSeqs` when `context` is used; `SessionView` gains optional `firstPrompt`.
+  Capabilities: `read.time`, `read.regex`, `read.context`, `session.firstPrompt`. A 2.7
+  client that ignores them is unaffected.
 
 ## Client model
 
@@ -599,13 +606,21 @@ Params:
   types?: EventType[];           // keep only these event types
   turn?: number;                 // keep only this turn
   grep?: string;                 // case-insensitive literal over type + data JSON
+  afterAt?: string;              // keep events at or after this ISO timestamp (2.8)
+  beforeAt?: string;             // keep events strictly before this ISO timestamp (2.8)
+  regex?: boolean;               // interpret grep as a case-insensitive expression (2.8)
+  context?: number;              // include 0..20 retained neighbors per match (2.8)
 }
 ```
 
 Filters are ANDed and applied while scanning, before the page limit and byte budget. A cursor
 always advances past scanned events, not only returned events, so a filtered follower does not
 rescan the same non-matching range. `grep` searches the event as returned: private payloads
-require `raw: true`.
+require `raw: true`. `afterAt` is inclusive and `beforeAt` is exclusive; both are ISO-8601
+timestamps. `regex: true` requires a non-empty `grep` and is validated at the boundary.
+`context` is display-oriented: `limit` bounds matches, neighbors are added around each match,
+and `matchedSeqs` reports which returned events matched. Cursors still advance by matches, so a
+neighbor may repeat on the next page; a match is never skipped.
 
 A page is also bounded by a byte budget (8 MiB). Fewer than `limit` events may be returned,
 with `hasMore: true`; a single event larger than the budget is returned alone. Without
@@ -624,6 +639,7 @@ Result:
   nextBefore: number | null;      // backward cursor: pass as before; null = no older page
   hasMore: boolean;               // more events in the scan direction
   truncated: boolean;             // history before the page was evicted
+  matchedSeqs?: number[];         // seqs that matched; present when context was requested (2.8)
 }
 ```
 
@@ -1038,6 +1054,7 @@ type SessionView = {
     updatedAt: string;
   } | null;
   title?: string | null;         // provider session title (2.5)
+  firstPrompt?: string | null;   // bounded display-only preview of the first prompt (2.8)
   agentName?: string | null;     // provider agent identity (2.5)
   agentVersion?: string | null;
 };

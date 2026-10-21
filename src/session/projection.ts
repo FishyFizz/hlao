@@ -24,6 +24,11 @@ export function previewText(text: string): string {
   return collapseText(text, TEXT_PREVIEW_CHARS);
 }
 
+/** A shorter display-only preview for the fleet view's first-prompt fallback. */
+export function firstPromptPreview(text: string): string {
+  return collapseText(text, 120);
+}
+
 export function skillPointer(path: string): string {
   // A trailing blank line keeps an adapter that concatenates text blocks from
   // gluing the pointer onto the operator's first words.

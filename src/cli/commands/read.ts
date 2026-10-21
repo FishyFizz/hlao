@@ -5,9 +5,7 @@ import type { SupervisorConnection } from "../../client.js";
 import { HlaoError } from "../../errors.js";
 import type {
   EventType,
-  EventView,
   ReadResult,
-  SessionView,
   WaitResult,
 } from "../../protocol.js";
 import { EVENT_TYPES } from "../../protocol.js";
@@ -33,13 +31,14 @@ import {
   type CommandContext,
 } from "../context.js";
 import { helpRequested } from "../help.js";
+import { exportAll, exportSession } from "./exporting.js";
 import {
   renderEvents,
   renderReadResult,
 } from "../render.js";
+import { parseTimeBound, toIsoTimestamp } from "../time-args.js";
 
 // Read and export: bounded pages, follow, and retained-history export.
-const EXPORT_PAGE_SIZE = 1_000;
 
 /**
  * Export the full retained history, not one bounded page. History is lost on
@@ -50,13 +49,15 @@ export async function cmdExport(args: string[]): Promise<number> {
   const parsed = parseArgs(args, [
     ...COMMON,
     { name: "self", type: "boolean" },
+    { name: "all", type: "boolean" },
     { name: "since", type: "number", valueName: "SEQ" },
     { name: "raw", type: "boolean" },
     { name: "jsonl", type: "boolean" },
     { name: "out", type: "path", valueName: "FILE" },
   ]);
   if (helpRequested(parsed, "export")) return 0;
-  expectPositionals(parsed, "export", 0, 1);
+  const all = booleanOption(parsed, "all") === true;
+  expectPositionals(parsed, "export", all ? 0 : 0, all ? 0 : 1);
 
   const ctx = contextFrom(parsed);
   if (ctx.json && booleanOption(parsed, "jsonl") === true) {
@@ -65,42 +66,38 @@ export async function cmdExport(args: string[]): Promise<number> {
   if (ctx.jsonEnvelope && booleanOption(parsed, "jsonl") === true) {
     throw usageError("--json=envelope cannot be combined with --jsonl");
   }
-  const sessionId = resolveTarget(parsed, "export", "selfDefault");
   const raw = booleanOption(parsed, "raw") === true;
   const jsonl = booleanOption(parsed, "jsonl") === true;
   const outFile = stringOption(parsed, "out");
-  let since = numberOption(parsed, "since") ?? 0;
+  const since = numberOption(parsed, "since") ?? 0;
   const conn = await connect(ctx);
 
-  const events: EventView[] = [];
-  let session: SessionView | null = null;
-  let earliestRetainedSeq = 0;
-  let lastSeq = 0;
-  let truncated = false;
-
-  for (;;) {
-    const page = await conn.request<ReadResult>("sessions.read", {
-      sessionId,
-      since,
-      limit: EXPORT_PAGE_SIZE,
-      raw,
-    });
-    session = page.session;
-    earliestRetainedSeq = page.earliestRetainedSeq;
-    lastSeq = page.lastSeq;
-    truncated = truncated || page.truncated;
-    events.push(...page.events);
-    if (!page.hasMore) break;
-    const next = page.nextSeq;
-    if (next <= since) {
-      throw new HlaoError("internal", "export cursor did not advance");
+  if (all) {
+    if (outFile === undefined) {
+      throw usageError("export --all requires --out DIR");
     }
-    since = next;
+    const manifest = await exportAll(conn, resolve(outFile), {
+      since,
+      raw,
+      jsonl,
+    });
+    const exported = manifest.sessions.length - manifest.failures;
+    if (ctx.json) {
+      writeJson(manifest);
+    } else {
+      out(
+        `exported ${exported} of ${manifest.sessions.length} session${manifest.sessions.length === 1 ? "" : "s"} to ${outFile}` +
+          (manifest.failures > 0
+            ? ctx.style.red(` · ${manifest.failures} failed (see manifest.json)`)
+            : ""),
+      );
+    }
+    return manifest.failures > 0 ? 1 : 0;
   }
 
-  if (session === null) {
-    throw new HlaoError("internal", "export returned no session");
-  }
+  const sessionId = resolveTarget(parsed, "export", "selfDefault");
+  const payload = await exportSession(conn, sessionId, { since, raw });
+  const { events, earliestRetainedSeq, truncated } = payload;
 
   if (jsonl) {
     const body = events.map((event) => JSON.stringify(event)).join("\n");
@@ -117,15 +114,6 @@ export async function cmdExport(args: string[]): Promise<number> {
     }
     return 0;
   }
-
-  const payload = {
-    session,
-    events,
-    earliestRetainedSeq,
-    lastSeq,
-    count: events.length,
-    truncated,
-  };
 
   if (outFile !== undefined) {
     writeFileSync(resolve(outFile), `${JSON.stringify(payload, null, 2)}\n`);
@@ -157,6 +145,10 @@ export async function cmdRead(args: string[]): Promise<number> {
     { name: "type", type: "string", valueName: "TYPE", multiple: true },
     { name: "turn", type: "number", valueName: "N" },
     { name: "grep", type: "string", valueName: "TEXT" },
+    { name: "regex", type: "boolean" },
+    { name: "context", type: "number", valueName: "N" },
+    { name: "after", type: "string", valueName: "TIME" },
+    { name: "until", type: "string", valueName: "TIME" },
     { name: "raw", type: "boolean" },
     { name: "verbose", type: "boolean" },
     { name: "timestamps", type: "boolean" },
@@ -221,14 +213,59 @@ export async function cmdRead(args: string[]): Promise<number> {
   const types = rawTypes.length > 0 ? (rawTypes as EventType[]) : undefined;
   const grep = stringOption(parsed, "grep");
   if (grep === "") throw usageError("--grep needs text");
+  const regex = booleanOption(parsed, "regex") === true;
+  if (regex && grep === undefined) {
+    throw usageError("--regex requires --grep");
+  }
+  const context = numberOption(parsed, "context");
+  if (context !== undefined && (context < 0 || context > 20)) {
+    throw usageError("--context must be between 0 and 20");
+  }
+  if (
+    context !== undefined &&
+    context > 0 &&
+    grep === undefined &&
+    types === undefined &&
+    turn === undefined
+  ) {
+    throw usageError("--context needs --grep, --type, or --turn to be meaningful");
+  }
+  const now = Date.now();
+  const afterRaw = stringOption(parsed, "after");
+  const untilRaw = stringOption(parsed, "until");
+  const afterAt = afterRaw === undefined ? undefined : parseTimeBound(afterRaw, "--after", now);
+  const beforeAt = untilRaw === undefined ? undefined : parseTimeBound(untilRaw, "--until", now);
+  if (afterAt !== undefined && beforeAt !== undefined && afterAt >= beforeAt) {
+    throw usageError("--after must be earlier than --until");
+  }
+  if (beforeAt !== undefined && follow) {
+    throw usageError("--until cannot be combined with --follow");
+  }
 
   const conn = await connect(ctx);
+  const filtered =
+    types !== undefined ||
+    turn !== undefined ||
+    grep !== undefined ||
+    afterAt !== undefined ||
+    beforeAt !== undefined;
   if (types !== undefined || turn !== undefined || grep !== undefined) {
     await ensureCapability(conn, "read.filters", "read filters");
   }
   if (before !== undefined) {
     await ensureCapability(conn, "read.before", "read --before");
   }
+  if (afterAt !== undefined || beforeAt !== undefined) {
+    await ensureCapability(conn, "read.time", "read time filters");
+  }
+  if (regex) {
+    await ensureCapability(conn, "read.regex", "read --regex");
+  }
+  if (context !== undefined && context > 0) {
+    await ensureCapability(conn, "read.context", "read --context");
+  }
+  const afterIso = afterAt === undefined ? undefined : toIsoTimestamp(afterAt);
+  const beforeIso = beforeAt === undefined ? undefined : toIsoTimestamp(beforeAt);
 
   if (follow) {
     return await followRead(conn, ctx, sessionId, {
@@ -238,13 +275,15 @@ export async function cmdRead(args: string[]): Promise<number> {
       types,
       turn,
       grep,
+      afterAt: afterIso,
+      regex,
+      context,
       verbose: verbose || raw,
       timestamps,
       jsonl,
       jsonlPage,
       failOnError,
-      filtered:
-        types !== undefined || turn !== undefined || grep !== undefined,
+      filtered,
     });
   }
 
@@ -257,6 +296,10 @@ export async function cmdRead(args: string[]): Promise<number> {
     types,
     turn,
     grep,
+    ...(afterIso !== undefined ? { afterAt: afterIso } : {}),
+    ...(beforeIso !== undefined ? { beforeAt: beforeIso } : {}),
+    ...(regex ? { regex: true } : {}),
+    ...(context !== undefined ? { context } : {}),
   });
 
   if (outFile !== undefined) {
@@ -286,7 +329,7 @@ export async function cmdRead(args: string[]): Promise<number> {
     renderReadResult(result, ctx.style, "hlao", {
       verbose: verbose || raw,
       fullTimestamps: timestamps,
-      filtered: types !== undefined || turn !== undefined || grep !== undefined,
+      filtered,
     }),
   );
   if (outFile !== undefined) {
@@ -302,6 +345,9 @@ interface FollowOptions {
   types?: EventType[];
   turn?: number;
   grep?: string;
+  afterAt?: string;
+  regex: boolean;
+  context?: number;
   verbose: boolean;
   timestamps: boolean;
   jsonl: boolean;
@@ -346,6 +392,9 @@ async function followRead(
       types: options.types,
       turn: options.turn,
       grep: options.grep,
+      ...(options.afterAt !== undefined ? { afterAt: options.afterAt } : {}),
+      ...(options.regex ? { regex: true } : {}),
+      ...(options.context !== undefined ? { context: options.context } : {}),
     });
 
     if (options.jsonl) {

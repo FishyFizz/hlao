@@ -15,18 +15,25 @@ hlao spawn <backend> [message] [--name N] [--cwd DIR] [--prompt TEXT | --prompt-
 hlao send [<id>] [message] [--self] [--stdin | --prompt TEXT | --prompt-file F]
                 [--wait] [--timeout DUR] [--idempotency-key KEY]
 hlao read [<id>] [--self] [--since N | --before N] [--limit N]
-                [--type TYPE]... [--turn N] [--grep TEXT]
+                [--type TYPE]... [--turn N] [--grep TEXT] [--regex] [--context N]
+                [--after TIME] [--until TIME]
                 [--raw] [--verbose] [--timestamps] [--jsonl] [--jsonl-page]
                 [--follow] [--fail-on-error] [--out FILE]
-hlao export [<id>] [--self] [--since N] [--raw] [--jsonl] [--out FILE]
+hlao export [<id>] [--self] [--all] [--since N] [--raw] [--jsonl] [--out FILE|DIR]
 hlao get [<id>] [--self] [--brief]
 hlao find TEXT [--all] [--type TYPE]... [--max N]
+                [--after TIME] [--until TIME] [--regex] [--context N]
+hlao watch [--all | --root SESSION] [--type TYPE]... [--grep TEXT] [--regex]
+                [--verbose]
+hlao usage [--root SESSION] [--since TIME] [--until TIME]
+                [--group session|root|model]
 hlao wait [<id>...] [--self] [--any | --all]
                 [--until idle|settled|permission|exit|change] [--since N]
                 [--type TYPE]... [--grep TEXT] [--timeout DUR] [--fail-if-failed]
 hlao list [--all] [--cwd DIR] [--cwd-prefix DIR] [--status S] [--backend NAME]
                 [--root SESSION] [--mine] [--name TEXT] [--pending] [--wide] [--tree]
                 [--usage] [--sort created|activity] [--watch] [--interval DUR]
+                [--fields LIST] [--no-cwd] [--compact]
 hlao cancel [<id>] [--self] [--keep-queue]
 hlao close [<id>] [--self] [--force] [--tree] [--forget]
 hlao close --idle DUR | --status S[,S] | --root SESSION [--dry-run]
@@ -50,14 +57,25 @@ hlao reload
 hlao doctor [--start] [--probe]
 hlao whoami
 hlao skill [--path] [--json]
-hlao down [--force] [--dry-run]
+hlao down [--force] [--dry-run] [--export DIR]
 hlao help [command]
 hlao version
 hlao --version
 ```
 
-Global flags on every command: `--json`, `--home DIR`, `--no-color`, `--help`. `--` ends
-option parsing; everything after it is positional.
+Global flags on every command: `--json`, `--json=envelope`, `--home DIR`, `--no-color`,
+`--help`. `--` ends option parsing; everything after it is positional.
+
+Time flags (`--after`, `--until`, `--since`, and `--until` on `usage`) accept an ISO-8601
+timestamp, `now`, or a duration with a unit meaning "that long ago" (`30m`, `2h`, `7d`).
+Bare numbers are rejected as ambiguous.
+
+`hlao watch` follows new events only. It holds one fleet subscription (chunked to the wire's
+100-id limit), attaches sessions that appear, and reconnects with its cursors. `hlao usage`
+projects the snapshots sessions already carry; with a window it reads the latest `usage` event
+per session. `list` adapts its columns to a TTY width; piped output keeps full width.
+`--fields` selects human columns, `--no-cwd` drops CWD, and `--compact` (with `--json`) omits
+`modes` and `configOptions` from list items.
 
 Sessions are resolved by exact id first, then unique name, then unique id prefix, all within
 this HLAO instance. Every session in the instance is addressable by every caller. Duplicate

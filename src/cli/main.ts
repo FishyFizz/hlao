@@ -23,6 +23,8 @@ import {
 } from "./commands/control.js";
 import { cmdFind } from "./commands/find.js";
 import { cmdSkill } from "./commands/skill.js";
+import { cmdUsage } from "./commands/usage.js";
+import { cmdWatch } from "./commands/watch.js";
 import { cmdList } from "./commands/list.js";
 import {
   cmdExport,
@@ -129,6 +131,10 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdWait(args);
       case "list":
         return await cmdList(args);
+      case "watch":
+        return await cmdWatch(args);
+      case "usage":
+        return await cmdUsage(args);
       case "get":
         return await cmdGet(args);
       case "find":

@@ -1108,6 +1108,11 @@ class SupervisorServer {
       types: params.types,
       turn: params.turn,
       grep: params.grep,
+      afterAt: params.afterAt === undefined ? undefined : Date.parse(params.afterAt),
+      beforeAt:
+        params.beforeAt === undefined ? undefined : Date.parse(params.beforeAt),
+      regex: params.regex,
+      context: params.context,
     });
     return {
       session: session.view(),
@@ -1118,6 +1123,7 @@ class SupervisorServer {
       nextBefore: read.nextBefore,
       hasMore: read.hasMore,
       truncated: read.truncated,
+      ...(read.matchedSeqs !== undefined ? { matchedSeqs: read.matchedSeqs } : {}),
     };
   }
 

@@ -9,7 +9,7 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 7 };
+export const WIRE_PROTOCOL_VERSION: ProtocolVersion = { major: 2, minor: 8 };
 export const WIRE_PROTOCOL_MAJOR = WIRE_PROTOCOL_VERSION.major;
 
 /**
@@ -49,6 +49,9 @@ export const PROTOCOL_CAPABILITIES = [
   "session.usage",
   "read.filters",
   "read.before",
+  "read.time",
+  "read.regex",
+  "read.context",
   "wait.multi",
   "stream.persistent",
   "stream.subscribe",
@@ -67,6 +70,7 @@ export const PROTOCOL_CAPABILITIES = [
   "session.notices",
   "session.plan",
   "session.title",
+  "session.firstPrompt",
   "session.agent",
   "session.messages",
   "session.elicitation",

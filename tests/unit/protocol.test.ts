@@ -5,6 +5,7 @@ import {
   parseEnvelope,
   parseParams,
   type HelloParams,
+  type ReadParams,
   type SpawnParams,
   type SubscribeParams,
   type UnsubscribeParams,
@@ -183,6 +184,42 @@ test("read filters validate and since/before are exclusive", () => {
     (error: unknown) =>
       error instanceof HlaoError && error.code === "bad_request",
   );
+});
+
+test("read time, regex, and context filters validate together", () => {
+  const params = parseParams("sessions.read", {
+    sessionId: "abc",
+    grep: "^prompt\\.sent$",
+    regex: true,
+    afterAt: "2026-10-20T10:00:00Z",
+    beforeAt: "2026-10-20T11:00:00Z",
+    context: 2,
+  }) as ReadParams;
+  assert.equal(params.regex, true);
+  assert.equal(params.context, 2);
+  assert.equal(params.afterAt, "2026-10-20T10:00:00.000Z");
+  assert.equal(params.beforeAt, "2026-10-20T11:00:00.000Z");
+
+  for (const bad of [
+    { sessionId: "abc", regex: true },
+    { sessionId: "abc", grep: "[", regex: true },
+    { sessionId: "abc", afterAt: "not-a-time" },
+    {
+      sessionId: "abc",
+      afterAt: "2026-10-20T11:00:00Z",
+      beforeAt: "2026-10-20T10:00:00Z",
+    },
+    { sessionId: "abc", context: 21 },
+    { sessionId: "abc", context: -1 },
+    { sessionId: "abc", context: 1.5 },
+  ]) {
+    assert.throws(
+      () => parseParams("sessions.read", bad),
+      (error: unknown) =>
+        error instanceof HlaoError && error.code === "bad_request",
+      JSON.stringify(bad),
+    );
+  }
 });
 
 test("wait accepts one id or a list, never both", () => {

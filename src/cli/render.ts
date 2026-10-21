@@ -49,11 +49,94 @@ export interface RenderOptions {
   filtered?: boolean;
 }
 
+export const SESSION_FIELD_NAMES = [
+  "self",
+  "id",
+  "name",
+  "backend",
+  "status",
+  "turn",
+  "queued",
+  "activity",
+  "created",
+  "event",
+  "busy",
+  "policy",
+  "requester",
+  "model",
+  "agent",
+  "mode",
+  "pending",
+  "exit",
+  "context",
+  "cost",
+  "cwd",
+] as const;
+
+export type SessionField = (typeof SESSION_FIELD_NAMES)[number];
+
 export interface SessionTableOptions {
   wide?: boolean;
   tree?: boolean;
   usage?: boolean;
+  /** Explicit column selection, in the caller's order. */
+  fields?: SessionField[];
+  /** Omit CWD from the default column set. */
+  noCwd?: boolean;
+  /** Terminal width to fit; omitted or 0 means no fitting (scripts keep full width). */
+  width?: number;
 }
+
+const DEFAULT_DROP_ORDER: SessionField[] = [
+  "self",
+  "cwd",
+  "created",
+  "requester",
+  "exit",
+  "agent",
+  "mode",
+  "busy",
+  "model",
+  "event",
+  "policy",
+  "context",
+  "cost",
+  "pending",
+];
+
+const SHRINKABLE: SessionField[] = [
+  "event",
+  "pending",
+  "agent",
+  "requester",
+  "model",
+  "name",
+  "cwd",
+];
+
+const FIELD_HEADERS: Record<SessionField, string> = {
+  self: "SELF",
+  id: "ID",
+  name: "NAME",
+  backend: "BACKEND",
+  status: "STATUS",
+  turn: "TURN",
+  queued: "QUEUED",
+  activity: "ACTIVITY",
+  created: "CREATED",
+  event: "EVENT",
+  busy: "BUSY",
+  policy: "POLICY",
+  requester: "REQUESTER",
+  model: "MODEL",
+  agent: "AGENT",
+  mode: "MODE",
+  pending: "PENDING",
+  exit: "EXIT",
+  context: "CONTEXT",
+  cost: "COST",
+  cwd: "CWD",
+};
 
 export function renderSessionTable(
   sessions: SessionView[],
@@ -63,92 +146,171 @@ export function renderSessionTable(
 ): string {
   if (sessions.length === 0) return style.dim("no sessions");
   const showSelf = selfId !== null;
+
+  let fields: SessionField[];
+  if (options.fields !== undefined && options.fields.length > 0) {
+    fields = [...new Set(options.fields)].filter(
+      (field) => field !== "self" || showSelf,
+    );
+    // `--fields self` outside a session would otherwise render no columns.
+    if (fields.length === 0) fields = ["id"];
+  } else {
+    fields = [
+      ...(showSelf ? (["self"] as const) : []),
+      "id",
+      "name",
+      "backend",
+      "status",
+      "turn",
+      "queued",
+      "activity",
+      ...(options.wide
+        ? ([
+            "created",
+            "event",
+            "busy",
+            "policy",
+            "requester",
+            "model",
+            "agent",
+            "mode",
+            "pending",
+            "exit",
+          ] as const)
+        : []),
+      ...(options.usage ? (["context", "cost"] as const) : []),
+      ...(!options.noCwd ? (["cwd"] as const) : []),
+    ];
+  }
+
   const rows = sessions.map((session) => {
     const indent = options.tree
       ? `${"  ".repeat(session.depth)}${session.depth > 0 ? "└ " : ""}`
       : "";
-    const base = [
-      ...(showSelf ? [session.id === selfId ? "*" : ""] : []),
-      `${indent}${session.id}`,
-      displayName(session, style),
-      session.backend,
-      styleStatus(
+    const values: Record<SessionField, string> = {
+      self: session.id === selfId ? "*" : "",
+      id: `${indent}${session.id}`,
+      name: displayName(session, style),
+      backend: session.backend,
+      status: styleStatus(
         session.status === "idle" && session.queued > 0
           ? "busy"
           : session.status,
         style,
       ),
-      String(session.turn),
-      session.queued > 0 ? String(session.queued) : "—",
-      formatAge(session.lastActivityAt),
-    ];
-    if (options.wide) {
-      const lastEvent = session.lastEvent
-        ? `${session.lastEvent.type}${session.lastEvent.title ? ` · ${session.lastEvent.title}` : ""}`
-        : "—";
-      base.push(
-        formatCreated(session.createdAt),
-        truncateRight(oneLine(lastEvent), 40),
-        busyFor(session),
-        session.permissionPolicy,
-        session.createdBy ? oneLine(session.createdBy) : "—",
-        modelLabel(session),
-        agentLabel(session),
-        session.modes?.currentModeId ?? "—",
-        session.pendingPermission
-          ? truncateRight(oneLine(session.pendingPermission.title), 30)
-          : session.pendingElicitation
-            ? truncateRight(`Q: ${oneLine(session.pendingElicitation.message)}`, 30)
+      turn: String(session.turn),
+      queued: session.queued > 0 ? String(session.queued) : "—",
+      activity: formatAge(session.lastActivityAt),
+      created: formatCreated(session.createdAt),
+      event: truncateRight(
+        oneLine(
+          session.lastEvent
+            ? `${session.lastEvent.type}${session.lastEvent.title ? ` · ${session.lastEvent.title}` : ""}`
             : "—",
-        exitDetail(session),
-      );
-    }
-    if (options.usage) {
-      base.push(
-        session.usage
-          ? `${formatTokens(session.usage.used)}/${formatTokens(session.usage.size)}`
+        ),
+        40,
+      ),
+      busy: busyFor(session),
+      policy: session.permissionPolicy,
+      requester: session.createdBy ? oneLine(session.createdBy) : "—",
+      model: modelLabel(session),
+      agent: agentLabel(session),
+      mode: session.modes?.currentModeId ?? "—",
+      pending: session.pendingPermission
+        ? truncateRight(oneLine(session.pendingPermission.title), 30)
+        : session.pendingElicitation
+          ? truncateRight(`Q: ${oneLine(session.pendingElicitation.message)}`, 30)
           : "—",
-        session.usage?.cost
-          ? `${(session.usage.cost.amount / 100).toFixed(2)} ${session.usage.cost.currency}`
-          : "—",
-      );
-    }
-    base.push(truncateLeft(oneLine(session.cwd), 60));
-    return base;
+      exit: exitDetail(session),
+      context: session.usage
+        ? `${formatTokens(session.usage.used)}/${formatTokens(session.usage.size)}`
+        : "—",
+      cost: session.usage?.cost
+        ? `${(session.usage.cost.amount / 100).toFixed(2)} ${session.usage.cost.currency}`
+        : "—",
+      cwd: truncateLeft(oneLine(session.cwd), 60),
+    };
+    return fields.map((field) => values[field]);
   });
+
+  const width = options.width !== undefined && options.width > 0 ? options.width : 0;
+  const fitted =
+    width > 0
+      ? fitSessionTable(fields, rows, width, options.fields !== undefined)
+      : { fields, rows };
   return renderTable(
-    [
-      ...(showSelf ? ["SELF"] : []),
-      "ID",
-      "NAME",
-      "BACKEND",
-      "STATUS",
-      "TURN",
-      "QUEUED",
-      "ACTIVITY",
-      ...(options.wide
-        ? [
-            "CREATED",
-            "EVENT",
-            "BUSY",
-            "POLICY",
-            "REQUESTER",
-            "MODEL",
-            "AGENT",
-            "MODE",
-            "PENDING",
-            "EXIT",
-          ]
-        : []),
-      ...(options.usage ? ["CONTEXT", "COST"] : []),
-      "CWD",
-    ],
-    rows,
+    fitted.fields.map((field) => FIELD_HEADERS[field]),
+    fitted.rows,
     style,
   );
 }
 
-function formatTokens(value: number): string {
+/** Drop optional columns, then shrink the widest text column, until the table fits. */
+function fitSessionTable(
+  fields: SessionField[],
+  rows: string[][],
+  width: number,
+  explicit: boolean,
+): { fields: SessionField[]; rows: string[][] } {
+  let currentFields = [...fields];
+  let currentRows = rows.map((row) => [...row]);
+
+  const totalWidth = (): number => {
+    const widths = currentFields.map((_, column) => {
+      let columnWidth = displayWidth(FIELD_HEADERS[currentFields[column]!]);
+      for (const row of currentRows) {
+        columnWidth = Math.max(columnWidth, displayWidth(row[column] ?? ""));
+      }
+      return columnWidth;
+    });
+    return widths.reduce((sum, columnWidth) => sum + columnWidth, 0) +
+      2 * Math.max(0, currentFields.length - 1);
+  };
+
+  if (!explicit) {
+    for (const field of DEFAULT_DROP_ORDER) {
+      if (totalWidth() <= width) break;
+      const index = currentFields.indexOf(field);
+      if (index === -1) continue;
+      currentFields = currentFields.filter((_, column) => column !== index);
+      currentRows = currentRows.map((row) => row.filter((_, column) => column !== index));
+    }
+  }
+
+  // Shrink a flexible column that is still wider than its header. Keep the
+  // shrink loop bounded so a pathological width cannot spin.
+  for (let guard = 0; guard < 500 && totalWidth() > width; guard += 1) {
+    let best = -1;
+    let bestWidth = 0;
+    for (let column = 0; column < currentFields.length; column += 1) {
+      const field = currentFields[column]!;
+      if (!SHRINKABLE.includes(field)) continue;
+      // Shaving a cell that contains an ANSI escape would cut through it.
+      if (currentRows.some((row) => (row[column] ?? "").includes("\u001b"))) {
+        continue;
+      }
+      let columnWidth = displayWidth(FIELD_HEADERS[field]);
+      for (const row of currentRows) {
+        columnWidth = Math.max(columnWidth, displayWidth(row[column] ?? ""));
+      }
+      if (columnWidth > bestWidth && columnWidth > 8) {
+        best = column;
+        bestWidth = columnWidth;
+      }
+    }
+    if (best === -1) break;
+    const target = Math.max(8, bestWidth - (totalWidth() - width));
+    currentRows = currentRows.map((row) => {
+      const next = [...row];
+      next[best] = truncateRight(next[best] ?? "", target);
+      return next;
+    });
+  }
+
+  return { fields: currentFields, rows: currentRows };
+}
+
+export function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "?";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
@@ -203,7 +365,10 @@ function agentLabel(session: SessionView): string {
  */
 function displayName(session: SessionView, style: Style): string {
   if (session.name) return oneLine(session.name);
-  if (session.title) return style.dim(oneLine(session.title));
+  if (session.title) return style.dim(truncateRight(oneLine(session.title), 40));
+  if (session.firstPrompt) {
+    return style.dim(truncateRight(oneLine(session.firstPrompt), 40));
+  }
   return "—";
 }
 
@@ -243,7 +408,9 @@ export function renderSessionHeader(session: SessionView, style: Style): string 
       ? style.cyan(oneLine(session.name))
       : session.title
         ? style.dim(oneLine(session.title))
-        : null,
+        : session.firstPrompt
+          ? style.dim(oneLine(session.firstPrompt))
+          : null,
     session.backend,
     styleStatus(session.status, style),
   ].filter((part): part is string => part !== null);
@@ -287,7 +454,9 @@ export function renderSessionState(
       ? style.cyan(oneLine(session.name))
       : session.title
         ? style.dim(oneLine(session.title))
-        : null,
+        : session.firstPrompt
+          ? style.dim(oneLine(session.firstPrompt))
+          : null,
     session.backend,
     styleStatus(session.status, style),
   ]
@@ -1243,24 +1412,66 @@ function elicitationOptions(property: ElicitationSchemaProperty): string[] {
   ];
 }
 
-export function renderAgentTable(agents: AgentView[], style: Style): string {
+export function renderAgentTable(
+  agents: AgentView[],
+  style: Style,
+  width?: number,
+): string {
   if (agents.length === 0) return style.dim("no backends configured");
-  const rows = agents.map((agent) => {
+  let headers = ["NAME", "SOURCE", "READY", "CONFIG", "COMMAND", "NOTES"];
+  let rows = agents.map((agent) => {
     const commandLine = [agent.command, ...agent.args].join(" ");
     return [
       oneLine(agent.name),
       oneLine(agent.source),
       agent.available ? style.green("yes") : style.red("no"),
       agent.configPath ? truncateMiddle(oneLine(agent.configPath), 40) : "—",
-      truncateLeft(oneLine(commandLine), 60),
+      truncateMiddle(oneLine(commandLine), 60),
       agent.available ? oneLine(agent.description ?? "—") : style.red(oneLine(agent.unavailableReason ?? "unavailable")),
     ];
   });
-  return renderTable(
-    ["NAME", "SOURCE", "READY", "CONFIG", "COMMAND", "NOTES"],
-    rows,
-    style,
-  );
+
+  if (width !== undefined && width > 0) {
+    const total = (): number => {
+      const widths = headers.map((header, column) => {
+        let value = displayWidth(header);
+        for (const row of rows) {
+          value = Math.max(value, displayWidth(row[column] ?? ""));
+        }
+        return value;
+      });
+      return widths.reduce((sum, value) => sum + value, 0) +
+        2 * Math.max(0, headers.length - 1);
+    };
+    // NOTES, then CONFIG, then COMMAND, then SOURCE.
+    const droppable = ["NOTES", "CONFIG", "COMMAND", "SOURCE"];
+    while (total() > width && droppable.length > 0) {
+      const name = droppable.shift()!;
+      const index = headers.indexOf(name);
+      if (index === -1) continue;
+      headers = headers.filter((_, position) => position !== index);
+      rows = rows.map((row) => row.filter((_, position) => position !== index));
+    }
+    for (let guard = 0; guard < 200 && total() > width; guard += 1) {
+      const commandColumn = headers.indexOf("COMMAND");
+      const configColumn = headers.indexOf("CONFIG");
+      const shrink = commandColumn !== -1 ? commandColumn : configColumn;
+      if (shrink === -1) break;
+      const current = Math.max(
+        displayWidth(headers[shrink]!),
+        ...rows.map((row) => displayWidth(row[shrink] ?? "")),
+      );
+      if (current <= 8) break;
+      const target = Math.max(8, current - (total() - width));
+      rows = rows.map((row) => {
+        const next = [...row];
+        next[shrink] = truncateMiddle(next[shrink] ?? "", target);
+        return next;
+      });
+    }
+  }
+
+  return renderTable(headers, rows, style);
 }
 
 export interface DoctorCheck {

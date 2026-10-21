@@ -4,6 +4,7 @@ import {
   createStyle,
   displayWidth,
   renderEvents,
+  renderAgentTable,
   renderReadResult,
   renderSessionState,
   renderSessionTable,
@@ -552,4 +553,77 @@ test("wide list carries requester and model", () => {
   );
   assert.match(table, /REQUESTER\s+MODEL/);
   assert.match(table, /agent7\s+opus/);
+});
+
+test("--fields selects columns in the caller's order", () => {
+  const table = renderSessionTable([session()], style, null, {
+    wide: true,
+    usage: true,
+    fields: ["status", "id", "cost"],
+  });
+  const [header] = table.split("\n");
+  assert.equal(header!.trim(), "STATUS  ID      COST");
+  assert.doesNotMatch(table, /NAME|CWD|MODEL/);
+});
+
+test("a TTY-width table drops optional columns until it fits", () => {
+  const longCwd = `D:\\work\\${"deep\\".repeat(20)}project`;
+  const table = renderSessionTable(
+    [
+      session({
+        name: "a-rather-long-session-name",
+        cwd: longCwd,
+        lastEvent: {
+          type: "agent.message",
+          title: "a long event title that should not force the table wide",
+          at: AT,
+        },
+        usage: { used: 42, size: 200_000, cost: null, at: AT },
+      }),
+    ],
+    style,
+    null,
+    { wide: true, usage: true, width: 80 },
+  );
+  for (const line of table.split("\n")) {
+    assert.ok(
+      displayWidth(line) <= 80,
+      `line is ${displayWidth(line)} columns: ${line}`,
+    );
+  }
+  assert.doesNotMatch(table, /CWD/);
+});
+
+test("a session with no name or title falls back to its first prompt", () => {
+  const table = renderSessionTable(
+    [session({ name: null, title: null, firstPrompt: "audit the build log" })],
+    style,
+  );
+  assert.match(table, /audit the build log/);
+});
+
+test("the agents table middle-truncates and fits a TTY width", () => {
+  const table = renderAgentTable(
+    [
+      {
+        name: "fake",
+        source: "user",
+        command: "C:\\a\\very\\long\\directory\\chain\\that\\keeps\\going\\agent.exe",
+        args: ["--flag", "value"],
+        envKeys: [],
+        description: "a scripted backend with a long note that can be dropped",
+        configPath: "C:\\Users\\someone\\.hlao\\config.json",
+        available: true,
+      },
+    ],
+    style,
+    120,
+  );
+  for (const line of table.split("\n")) {
+    assert.ok(
+      displayWidth(line) <= 120,
+      `line is ${displayWidth(line)} columns: ${line}`,
+    );
+  }
+  assert.match(table, /…/);
 });

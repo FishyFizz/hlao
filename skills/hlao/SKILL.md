@@ -45,6 +45,8 @@ hlao queue                      # what is queued behind the active turn
 hlao permit <id> --allow        # answer a pending permission request
 hlao elicit <id> --accept k=v   # answer a provider question (--decline/--cancel)
 hlao get <id>                   # state only, no events
+hlao find "text"                # search other sessions' events
+hlao usage                      # fleet cost and context snapshots
 hlao list --mine                # the sessions in your job's root subtree
 hlao spawn <backend> --resume <provider-id> --cwd <dir>   # pull an interrupted agent back up
 hlao spawn <backend> --fork <provider-id> --cwd <dir>     # copy one; the source is untouched

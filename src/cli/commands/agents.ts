@@ -30,6 +30,12 @@ export async function cmdAgents(args: string[]): Promise<number> {
     writeJson(result);
     return 0;
   }
-  out(renderAgentTable(result.agents, ctx.style));
+  out(
+    renderAgentTable(
+      result.agents,
+      ctx.style,
+      process.stdout.isTTY === true ? process.stdout.columns : undefined,
+    ),
+  );
   return 0;
 }

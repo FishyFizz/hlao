@@ -206,6 +206,11 @@ export interface SessionView {
   permissionPolicy: PermissionPolicy;
   modes: SessionModes | null;
   configOptions: SessionConfigOptionView[] | null;
+  /**
+   * A short preview of the first prompt, for display when neither an operator
+   * name nor a provider title exists. Never an addressable name. (2.8)
+   */
+  firstPrompt?: string | null;
   /** Latest provider usage snapshot, or null when the adapter reported none. */
   usage: SessionUsageView | null;
   /** Latest provider compaction, or null when none was reported (2.5). */
@@ -498,6 +503,19 @@ export interface ReadParams {
   turn?: number;
   /** Case-insensitive literal over the event type and its data JSON. */
   grep?: string;
+  /** Keep events at or after this ISO timestamp. (2.8) */
+  afterAt?: string;
+  /** Keep events strictly before this ISO timestamp. (2.8) */
+  beforeAt?: string;
+  /** Interpret `grep` as a case-insensitive regular expression. (2.8) */
+  regex?: boolean;
+  /**
+   * Include up to this many retained neighbors around each match. `limit`
+   * bounds matches, not the returned event count. Context is display-oriented:
+   * paging cursors still advance by matches, so a context event may repeat.
+   * (2.8)
+   */
+  context?: number;
 }
 export interface ReadResult {
   session: SessionView;
@@ -510,6 +528,11 @@ export interface ReadResult {
   nextBefore: number | null;
   hasMore: boolean;
   truncated: boolean;
+  /**
+   * Present when `context` was requested: the seqs that matched the filters.
+   * Every other returned event is a context neighbor. (2.8)
+   */
+  matchedSeqs?: number[];
 }
 export interface WaitParams {
   /** Exactly one of sessionId or sessionIds. */
