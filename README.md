@@ -456,15 +456,19 @@ operator / agent shell
   that spawned a session keeps the provider id from its spawn result and uses it to pull the
   interrupted agent back up after a supervisor restart. The interrupted turn itself is not
   replayed; re-issue the prompt as a human would after resuming.
-- **A spawn receipt bridges a restart.** When a parent spawns or adopts a child, the
-  supervisor appends `{parentProviderId, childProviderId, backend, cwd, name}` to
-  `$HLAO_HOME/spawn-ledger.jsonl`. The pair is keyed by the parent's durable provider id, so
-  a leader resumed into an empty instance can run `hlao children --self` (or
-  `hlao children --provider <id>` with no supervisor) and `hlao adopt` each child by provider
-  id. The ledger is append-only history, not a live registry: it never claims a child is
-  running, and the live table remains the only liveness authority. It lives in the same
-  `HLAO_HOME`, so a different home has no receipts. A forked leader has a new provider id;
-  read its predecessor's receipts with `hlao children --provider <source-id>`.
+- **A spawn receipt bridges a restart.** A successful spawn or adoption appends
+  `{parentProviderId, childProviderId, backend, cwd, name}` to
+  `$HLAO_HOME/spawn-ledger.jsonl` once the provider conversation is durable: a resume or
+  fork records immediately, and a fresh session records when its first turn starts. A
+  session that never ran a turn has no transcript to load, so it is not offered for
+  recovery. A parented spawn keys the pair by the parent's durable provider id; an operator
+  root spawn records a null parent, so it is listed as recoverable after a restart without
+  a parent. A leader resumed into an empty instance can run `hlao children --self` (or
+  `hlao children --provider <id>` with no supervisor) and `hlao adopt` each child by
+  provider id. The ledger is append-only history, not a live registry: it never claims a
+  child is running, and the live table remains the only liveness authority. It lives in the
+  same `HLAO_HOME`, so a different home has no receipts. A forked leader has a new provider
+  id; read its predecessor's receipts with `hlao children --provider <source-id>`.
 - **A fork is a copy, not a branch of HLAO state.** `spawn --fork <provider id>` copies the
   provider session with ACP `session/fork`; the source keeps running and keeps its id. When
   the backend can also load, the copy's history is replayed into the new log. Nothing about

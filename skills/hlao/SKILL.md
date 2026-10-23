@@ -67,13 +67,16 @@ that provider session and replays its history; the interrupted turn is not repla
 re-send the instruction. `spawn --fork <provider-id> --cwd <original cwd>` copies the session
 instead; the source keeps running and can still be resumed separately.
 
-When you spawn or adopt a child, HLAO writes a historical spawn receipt pairing your provider
-id with the child's provider id (plus backend, cwd, and name) to `spawn-ledger.jsonl` in
-`HLAO_HOME` (`$HLAO_HOME/spawn-ledger.jsonl` in a POSIX shell). After a restart,
-`hlao children --self` reads it; `hlao get --self` reports your own provider
-id, and `hlao children --provider <id>` reads the same ledger without a supervisor. Resume a
-child by provider id, not by title. Because an agent caller is the default parent, the new
-HLAO attachment lands under you:
+A successful spawn or adoption writes a historical spawn receipt pairing the provider id of
+the spawned conversation with its parent's provider id (null for an operator root spawn) to
+`spawn-ledger.jsonl` in `HLAO_HOME` (`$HLAO_HOME/spawn-ledger.jsonl` in a POSIX shell) once
+the conversation is durable: a resume or fork at once, a fresh session at its first turn. A
+session that was never given a turn has no transcript to resume, so it has no receipt. After
+a restart, `hlao children --self` reads the receipts for your provider id; `hlao get --self`
+reports your own provider id, and `hlao children --provider <id>` reads the same ledger
+without a supervisor. Root receipts carry no parent and are the dashboard's **Recoverable**
+rows. Resume a child by provider id, not by title. Because an agent caller is the default
+parent, the new HLAO attachment lands under you:
 
 ```bash
 hlao children --self

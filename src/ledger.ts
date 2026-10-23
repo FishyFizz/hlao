@@ -2,17 +2,19 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { spawnLedgerPath } from "./paths.js";
 
 /**
- * One historical receipt: this parent attached this provider conversation as a
- * child. It is written once at spawn/attach time and never updated. Recovery
- * uses the parent provider id, because the HLAO ids are lifetime-scoped.
+ * One historical receipt: this provider conversation was attached, by a parent
+ * when one existed. It is written once at spawn/attach time and never updated.
+ * Recovery uses the provider id, because the HLAO ids are lifetime-scoped.
  *
- * The ledger makes no liveness claim. The supervisor's live table remains the
- * only authority for whether a session is running.
+ * A null parent marks a root spawn, so an operator-started agent is still
+ * recoverable after a restart. The ledger makes no liveness claim. The
+ * supervisor's live table remains the only authority for whether a session is
+ * running.
  */
 export interface SpawnReceipt {
   version: 1;
   at: string;
-  parentProviderId: string;
+  parentProviderId: string | null;
   parentSessionId: string | null;
   childProviderId: string;
   childSessionId: string;
@@ -50,9 +52,10 @@ export function recordSpawnReceipt(
  * partial lines are ignored: a crash can leave the last append incomplete, and
  * that must not make earlier receipts unreadable.
  *
- * The same parent/backend/child triple is coalesced to its last entry, so a
- * re-adoption after a restart updates the historical cwd/name without growing
- * duplicate rows in the result.
+ * A parent filter excludes root receipts, which have no parent. The same
+ * parent/backend/child triple is coalesced to its last entry, so a re-adoption
+ * after a restart updates the historical cwd/name without growing duplicate
+ * rows in the result.
  */
 export function readSpawnReceipts(
   home: string,
@@ -84,7 +87,7 @@ export function readSpawnReceipts(
     ) {
       continue;
     }
-    const key = `${receipt.parentProviderId}\u0000${receipt.backend}\u0000${receipt.childProviderId}`;
+    const key = `${receipt.parentProviderId ?? ""}\u0000${receipt.backend}\u0000${receipt.childProviderId}`;
     byTriple.set(key, receipt);
   }
   return [...byTriple.values()].sort(
@@ -99,14 +102,17 @@ function parseReceipt(value: unknown): SpawnReceipt | null {
   const object = value as Record<string, unknown>;
   if (object.version !== 1) return null;
   const at = stringField(object, "at");
-  const parentProviderId = stringField(object, "parentProviderId");
+  // A root receipt stores an explicit null. A line that omits the field is
+  // malformed, not a root, so old or truncated writes cannot fabricate one.
+  if (!("parentProviderId" in object)) return null;
+  const parentProviderId = nullableStringField(object, "parentProviderId");
   const childProviderId = stringField(object, "childProviderId");
   const childSessionId = stringField(object, "childSessionId");
   const backend = stringField(object, "backend");
   const cwd = stringField(object, "cwd");
   if (
     at === null ||
-    parentProviderId === null ||
+    parentProviderId === undefined ||
     childProviderId === null ||
     childSessionId === null ||
     backend === null ||

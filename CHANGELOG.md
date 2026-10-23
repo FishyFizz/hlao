@@ -75,6 +75,18 @@ liveness.
   syntax (an empty `$HLAO_PARENT_ID` previously retargeted a command at the
   caller) and states that a new child takes the backend default, not the
   parent's live mode.
+- A root spawn now writes a spawn receipt with a null parent, so an agent
+  started by the operator or the dashboard is listed as recoverable after a
+  machine restart. Previously only parented spawns wrote receipts, leaving
+  the dashboard's Recoverable group empty for the common case.
+  `RecoveryReceiptView.parentProviderId` is nullable; a parent filter still
+  excludes root receipts.
+- A spawn receipt is written only once the provider conversation is durable:
+  immediately for a resume or fork, and when a fresh session's first turn
+  starts. A fresh session that never ran a turn has no transcript, so the
+  dashboard no longer offers a quick resume that fails with the adapter's
+  `Resource not found`. If the session is later given a turn, the receipt is
+  written then.
 
 ### Maintenance
 

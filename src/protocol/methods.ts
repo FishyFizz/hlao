@@ -197,7 +197,8 @@ export interface RecoveryReceiptsParams {
 }
 /** A historical spawn receipt, live-joined to the current supervisor table. */
 export interface RecoveryReceiptView {
-  parentProviderId: string;
+  /** Null for a root spawn: an operator-started agent has no parent receipt. */
+  parentProviderId: string | null;
   parentSessionId: string | null;
   childProviderId: string;
   childSessionId: string;

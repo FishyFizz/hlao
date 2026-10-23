@@ -7,7 +7,7 @@ import {
 import { HlaoError, describeError, toHlaoError } from "../errors.js";
 import { generateSessionId } from "../ids.js";
 import { recordSpawnReceipt } from "../ledger.js";
-import type { SpawnParams, SpawnResult } from "../protocol.js";
+import type { SpawnParams, SpawnResult, SessionView } from "../protocol.js";
 import { Session } from "../session.js";
 import { MODE_CONFIG_ID } from "../session/config-options.js";
 import { SKILL_VERSION, homeSkillPath } from "../skill.js";
@@ -50,6 +50,13 @@ export class SpawnService {
    * enough: two concurrent resumes can both miss it before either registers.
    */
   readonly #pendingResumes = new Map<string, Promise<SpawnResult>>();
+  /**
+   * Provider ids this supervisor has observed to be durable (a transcript the
+   * provider can load). A fresh session joins on its first turn; a resume or
+   * fork joins at spawn. A duplicate reattach needs it to decide whether a
+   * receipt is safe to write.
+   */
+  readonly #durable = new Set<string>();
   #inflight = 0;
   #idleResolvers: (() => void)[] = [];
 
@@ -182,33 +189,57 @@ export class SpawnService {
   }
 
   /**
-   * Record the parent provider id -> child provider id pair. This is a
-   * historical receipt for recovery after a restart, not a live mapping; it
-   * never changes the session table. A ledger append failure is logged and
-   * ignored so a full disk cannot turn a successful spawn into an error.
+   * Write the receipt for one attachment. A parented spawn adds the parent
+   * provider id; a root spawn records a null parent so an operator-started
+   * agent is still recoverable after a restart. This is historical, not a live
+   * mapping; a ledger append failure is logged and ignored so a full disk
+   * cannot turn a successful spawn into an error.
    */
-  #recordReceipt(parent: Session | null, child: SpawnResult["session"]): void {
-    if (parent === null || parent.isTerminal) return;
-    const parentView = parent.view();
-    const parentProviderId = parentView.agentSessionId;
+  #writeReceipt(parent: SessionView | null, child: SessionView): void {
     const childProviderId = child.agentSessionId;
-    if (parentProviderId === null || childProviderId === null) return;
-    if (parentProviderId === childProviderId) return;
+    if (childProviderId === null) return;
+    const parentProviderId = parent?.agentSessionId ?? null;
+    if (parentProviderId !== null && parentProviderId === childProviderId) {
+      return;
+    }
     try {
       recordSpawnReceipt(this.#deps.home, {
         parentProviderId,
-        parentSessionId: parentView.id,
+        parentSessionId: parent?.id ?? null,
         childProviderId,
         childSessionId: child.id,
         backend: child.backend,
         cwd: child.cwd,
         name: child.name,
       });
+      this.#durable.add(childProviderId);
     } catch (error) {
       this.#deps.logger.warn(
         `spawn receipt not recorded: ${describeError(error)}`,
       );
     }
+  }
+
+  /**
+   * A fresh provider session may live only in the adapter's memory until its
+   * first turn persists a transcript. Recording it earlier would offer a
+   * resume the provider cannot load ("Resource not found"). Defer the receipt
+   * until the first turn starts, or drop it if the session ends untouched.
+   * A resumed or forked conversation already exists, so it records at once.
+   */
+  #recordWhenDurable(parent: SessionView | null, session: Session): void {
+    const record = (): boolean => {
+      const view = session.view();
+      if (view.turn > 0) {
+        this.#writeReceipt(parent, view);
+        return true;
+      }
+      return session.isTerminal;
+    };
+    if (record()) return;
+    const off = session.onChange(() => {
+      if (record()) off();
+    });
   }
 
   #pruneIdempotency(): void {
@@ -263,8 +294,15 @@ export class SpawnService {
           );
         }
         // A duplicate resume still says "this parent attached this provider
-        // conversation"; record it so a later reboot can recover the pair.
-        this.#recordReceipt(this.#spawnParent(params, caller), attached.view());
+        // conversation"; record it so a later reboot can recover the pair. A
+        // provider id with no durable transcript yet is skipped: the original
+        // spawn records it when the session first runs a turn.
+        const attachedView = attached.view();
+        const parentView = this.#spawnParent(params, caller)?.view() ?? null;
+        const providerId = attachedView.agentSessionId;
+        if (providerId !== null && this.#durable.has(providerId)) {
+          this.#writeReceipt(parentView, attachedView);
+        }
         return { ...this.#duplicateSpawn(attached, null), resumed: true };
       }
     }
@@ -368,7 +406,15 @@ export class SpawnService {
     this.#deps.logger.info(
       `spawned ${id} (${backend.name}) in ${cwd}${parent ? ` parent=${parent.id}` : ""}`,
     );
-    this.#recordReceipt(parent, session.view());
+    const parentView = parent?.view() ?? null;
+    if (
+      params.resumeSessionId !== undefined ||
+      params.forkSessionId !== undefined
+    ) {
+      this.#writeReceipt(parentView, session.view());
+    } else {
+      this.#recordWhenDurable(parentView, session);
+    }
 
     const result: SpawnResult = {
       session: session.view(),

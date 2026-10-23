@@ -103,7 +103,8 @@ export async function providerSessionCatalog(options: {
 /**
  * Historical spawn receipts, live-joined for convenience. The ledger is the
  * authority on what was attached; the live table answers only whether a
- * provider id is attached now. Nothing here is written back.
+ * provider id is attached now. A root receipt has no parent and is still a
+ * recoverable agent after a restart. Nothing here is written back.
  */
 export function recoveryReceipts(
   home: string,
@@ -128,7 +129,10 @@ export function recoveryReceipts(
       child !== undefined && child.backend === receipt.backend
         ? child.view()
         : null;
-    const parent = liveByProvider.get(receipt.parentProviderId);
+    const parent =
+      receipt.parentProviderId === null
+        ? undefined
+        : liveByProvider.get(receipt.parentProviderId);
     const parentView = parent?.view() ?? null;
     byChild.set(key, {
       parentProviderId: receipt.parentProviderId,

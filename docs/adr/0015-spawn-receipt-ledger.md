@@ -97,3 +97,28 @@ identity that survives a reboot.
   leader must pass the source provider id: `children --provider <source-id>`.
 - `children --provider` works while the instance is down, which is the state
   after a reboot until the operator resumes the leader.
+
+## Amendment: root spawns also write a receipt
+
+The original decision wrote nothing for an operator spawn with no parent. That made the
+dashboard's **Recoverable** group unusable for the common case: agents started from the
+dashboard or the operator shell are roots, so after a machine restart there was no durable
+record of them and the group stayed empty even though the provider conversations still
+existed.
+
+A receipt now records a root spawn with `parentProviderId: null` and
+`parentSessionId: null`. Everything else is unchanged: the child provider id is still the
+durable handle, the ledger still makes no liveness claim, and a parent filter
+(`hlao children --self`, `recovery.receipts` with `parentProviderId`) excludes root
+receipts. Coalescing stays keyed by parent/backend/child, so a later parented reattach
+replaces the root receipt for the same conversation. Readers from before this amendment
+ignore the null-parent lines because their parser requires a parent provider id.
+
+A second amendment addresses a failure the root receipt exposed. A fresh ACP session gets
+its provider id at `session/new`, but the provider may not write a transcript until the
+first turn. Recording that id immediately made the dashboard offer a quick resume that the
+adapter rejects with `Resource not found`. A receipt is therefore written only when the
+conversation is durable: immediately for a resume or fork (which loaded an existing
+transcript), and when a fresh session's first turn starts. A session that never runs a turn
+is never offered for recovery; if it ends untouched, no receipt is written.
+

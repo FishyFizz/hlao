@@ -70,6 +70,30 @@ test("spawn receipts filter by parent provider id and coalesce re-attachments", 
   }
 });
 
+test("a root receipt is readable without a parent and excluded by a parent filter", () => {
+  const home = mkdtempSync(join(tmpdir(), "hlao-ledger-root-"));
+  try {
+    recordSpawnReceipt(home, {
+      at: "2026-10-21T10:00:00.000Z",
+      parentProviderId: null,
+      parentSessionId: null,
+      childProviderId: "root-1",
+      childSessionId: "root-session",
+      backend: "claude",
+      cwd: "D:/work/a",
+      name: "lead",
+    });
+
+    const all = readSpawnReceipts(home);
+    assert.equal(all.length, 1);
+    assert.equal(all[0]?.parentProviderId, null);
+    assert.equal(all[0]?.childProviderId, "root-1");
+    assert.equal(readSpawnReceipts(home, "parent-1").length, 0);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("malformed and partial ledger lines do not hide valid receipts", () => {
   const home = mkdtempSync(join(tmpdir(), "hlao-ledger-bad-"));
   try {
@@ -88,6 +112,17 @@ test("malformed and partial ledger lines do not hide valid receipts", () => {
     appendFileSync(
       spawnLedgerPath(home),
       `${JSON.stringify({ version: 2, parentProviderId: "parent-1" })}\n`,
+    );
+    appendFileSync(
+      spawnLedgerPath(home),
+      `${JSON.stringify({
+        version: 1,
+        at: "2026-10-21T10:02:00.000Z",
+        childProviderId: "child-2",
+        childSessionId: "child-session-2",
+        backend: "claude",
+        cwd: "D:/work/a",
+      })}\n`,
     );
 
     const receipts = readSpawnReceipts(home, "parent-1");

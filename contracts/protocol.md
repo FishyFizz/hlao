@@ -530,7 +530,7 @@ Result:
 }
 
 type RecoveryReceiptView = {
-  parentProviderId: string;
+  parentProviderId: string | null; // null for a root spawn
   parentSessionId: string | null;  // historical HLAO id at attach time
   childProviderId: string;         // the durable handle to adopt
   childSessionId: string;          // historical HLAO id at attach time
@@ -549,11 +549,15 @@ type RecoveryReceiptView = {
 ```
 
 This reads the append-only spawn-receipt ledger, not the live table. A receipt is written
-when a parent spawns or reattaches a child and is keyed by the parent's provider id, so it
-survives a supervisor restart. The result dedupes the same parent/backend/child triple to
-its latest receipt and sorts newest first. It never creates a session, starts an adapter,
-or claims a child is live; `attached` is only a live-table lookup. A malformed ledger line
-is skipped. `--provider` on the CLI reads the same file with no supervisor.
+once the provider conversation is durable: immediately for a resume or fork, and when a
+fresh session's first turn starts. A spawn that never runs a turn leaves no transcript the
+provider can load, so it has no receipt. A parented spawn records the parent's provider id,
+and a root spawn (an operator spawn with no live parent) records a null parent so the agent
+is still recoverable after a restart. A parent filter excludes root receipts. The result
+dedupes the same parent/backend/child triple to its latest receipt and sorts newest first.
+It never creates a session, starts an adapter, or claims a child is live; `attached` is only
+a live-table lookup. A malformed ledger line is skipped. `--provider` on the CLI reads the
+same file with no supervisor.
 
 ### `sessions.spawn`
 
